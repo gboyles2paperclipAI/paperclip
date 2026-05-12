@@ -16,25 +16,34 @@ function makeMockClients() {
       createNamespace: track("Namespace"),
       readNamespacedServiceAccount: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedServiceAccount: track("ServiceAccount"),
+      replaceNamespacedServiceAccount: track("ServiceAccountReplace"),
       readNamespacedResourceQuota: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedResourceQuota: track("ResourceQuota"),
+      replaceNamespacedResourceQuota: track("ResourceQuotaReplace"),
       readNamespacedLimitRange: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedLimitRange: track("LimitRange"),
+      replaceNamespacedLimitRange: track("LimitRangeReplace"),
       readNamespace: vi.fn().mockRejectedValue({ code: 404 }),
     },
     rbac: {
       readNamespacedRole: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedRole: track("Role"),
+      replaceNamespacedRole: track("RoleReplace"),
       readNamespacedRoleBinding: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedRoleBinding: track("RoleBinding"),
+      replaceNamespacedRoleBinding: track("RoleBindingReplace"),
     },
     networking: {
       readNamespacedNetworkPolicy: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedNetworkPolicy: track("NetworkPolicy"),
+      replaceNamespacedNetworkPolicy: track("NetworkPolicyReplace"),
+      deleteNamespacedNetworkPolicy: vi.fn().mockRejectedValue({ code: 404 }),
     },
     custom: {
       getNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedCustomObject: track("CiliumNetworkPolicy"),
+      replaceNamespacedCustomObject: track("CiliumNetworkPolicyReplace"),
+      deleteNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 404 }),
     },
   };
 }
@@ -88,11 +97,58 @@ describe("ensureTenant", () => {
     expect(sa.metadata.annotations["eks.amazonaws.com/role-arn"]).toBe("arn:aws:iam::123:role/paperclip");
   });
 
-  it("skips creates that already exist (idempotency)", async () => {
+  it("does not recreate a namespace that already exists", async () => {
     const clients = makeMockClients();
     clients.core.readNamespace.mockResolvedValue({ body: { metadata: { name: baseInput.namespace } } });
     await ensureTenant(clients as never, baseInput);
     expect(clients.core.createNamespace).not.toHaveBeenCalled();
+  });
+
+  it("reconciles existing managed resources with the latest desired manifests", async () => {
+    const clients = makeMockClients();
+    const existing = { metadata: { resourceVersion: "rv-1" } };
+    clients.core.readNamespace.mockResolvedValue({ metadata: { name: baseInput.namespace } });
+    clients.core.readNamespacedServiceAccount.mockResolvedValue(existing);
+    clients.rbac.readNamespacedRole.mockResolvedValue(existing);
+    clients.rbac.readNamespacedRoleBinding.mockResolvedValue(existing);
+    clients.core.readNamespacedResourceQuota.mockResolvedValue(existing);
+    clients.core.readNamespacedLimitRange.mockResolvedValue(existing);
+    clients.networking.readNamespacedNetworkPolicy.mockResolvedValue(existing);
+
+    await ensureTenant(clients as never, {
+      ...baseInput,
+      serviceAccountAnnotations: { "eks.amazonaws.com/role-arn": "arn:aws:iam::123:role/paperclip" },
+      resourceQuota: { ...baseInput.resourceQuota, pods: "25" },
+    });
+
+    expect(clients.core.replaceNamespacedServiceAccount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          metadata: expect.objectContaining({
+            annotations: { "eks.amazonaws.com/role-arn": "arn:aws:iam::123:role/paperclip" },
+            resourceVersion: "rv-1",
+          }),
+        }),
+      }),
+    );
+    expect(clients.core.replaceNamespacedResourceQuota).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          metadata: expect.objectContaining({ resourceVersion: "rv-1" }),
+          spec: expect.objectContaining({ hard: expect.objectContaining({ pods: "25" }) }),
+        }),
+      }),
+    );
+    expect(clients.networking.replaceNamespacedNetworkPolicy).toHaveBeenCalled();
+  });
+
+  it("removes stale standard egress NetworkPolicy when cilium mode is selected", async () => {
+    const clients = makeMockClients();
+    await ensureTenant(clients as never, { ...baseInput, egressMode: "cilium" });
+    expect(clients.networking.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      namespace: baseInput.namespace,
+      name: "paperclip-egress-allow",
+    });
   });
 
   it("tolerates a 409 AlreadyExists from a concurrent ensure for the same tenant", async () => {
@@ -102,5 +158,26 @@ describe("ensureTenant", () => {
     clients.core.createNamespace.mockRejectedValue({ statusCode: 409 });
     clients.core.createNamespacedServiceAccount.mockRejectedValue({ code: 409 });
     await expect(ensureTenant(clients as never, baseInput)).resolves.not.toThrow();
+  });
+
+  it("handles concurrent first-run create conflicts by rereading and replacing managed resources", async () => {
+    const clients = makeMockClients();
+    const existing = { metadata: { resourceVersion: "rv-race" } };
+    clients.core.createNamespace.mockRejectedValueOnce({ code: 409 });
+    clients.core.readNamespacedServiceAccount
+      .mockRejectedValueOnce({ code: 404 })
+      .mockResolvedValue(existing);
+    clients.core.createNamespacedServiceAccount.mockRejectedValueOnce({ code: 409 });
+
+    await ensureTenant(clients as never, baseInput);
+
+    expect(clients.core.createNamespace).toHaveBeenCalled();
+    expect(clients.core.replaceNamespacedServiceAccount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          metadata: expect.objectContaining({ resourceVersion: "rv-race" }),
+        }),
+      }),
+    );
   });
 });

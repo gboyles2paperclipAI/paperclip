@@ -220,11 +220,16 @@ const plugin = definePlugin({
     const adapterDefaultsForWarn = getAdapterDefaults(effectiveAdapterType, config.adapters);
     const totalFqdnsForWarn = [...adapterDefaultsForWarn.allowFqdns, ...config.egressAllowFqdns];
     if (config.egressMode === "standard" && totalFqdnsForWarn.length > 0) {
+      // The SDK does not currently thread ctx.logger into environment hooks.
+      // Keep this explicit so operators still see the standard-mode egress
+      // trade-off in raw worker logs.
       if (config.egressAllowCidrs.length === 0) {
+        // eslint-disable-next-line no-console
         console.warn(
           `[plugin-kubernetes] egressMode=standard cannot enforce FQDN-based egress rules; falling back to public-IPv4 (TCP 80/443) with private/link-local ranges excluded so the configured FQDNs (${totalFqdnsForWarn.join(", ")}) remain reachable. Switch egressMode to "cilium" for exact FQDN allow-listing.`,
         );
       } else {
+        // eslint-disable-next-line no-console
         console.warn(
           `[plugin-kubernetes] egressMode=standard cannot enforce FQDN-based egress rules. The following FQDNs are reachable only via operator-supplied egressAllowCidrs: ${totalFqdnsForWarn.join(", ")}. Switch egressMode to "cilium" for exact FQDN allow-listing.`,
         );

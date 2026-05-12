@@ -22,10 +22,15 @@ import { Exec } from "@kubernetes/client-node";
 import { PassThrough } from "node:stream";
 import type { KubeConfig } from "@kubernetes/client-node";
 
-// Minimal WebSocket-like shape covering what we touch (close()). The full type
-// comes from @kubernetes/client-node's transitive ws/isomorphic-ws dep but
-// importing it directly couples this file to that internal choice.
-type WebSocketLike = { close(): void };
+// Minimal WebSocket-like shape covering what we touch (close(), and the
+// close/error events we watch for premature-disconnect detection). The full
+// type comes from @kubernetes/client-node's transitive ws/isomorphic-ws dep
+// but importing it directly couples this file to that internal choice.
+type WebSocketLike = {
+  close(): void;
+  on(event: "close", listener: (code: number, reason: Buffer) => void): void;
+  on(event: "error", listener: (err: Error) => void): void;
+};
 
 // Single-quote a string for safe interpolation into a sh -c script. Wraps in
 // '...' and escapes any embedded single quotes via '\'' (close, escape, reopen).
@@ -143,6 +148,25 @@ export async function execInPod(
         resolve({ exitCode: pendingExitCode, stdout: stdoutData, stderr: stderrData });
       };
 
+      // If the WebSocket closes or errors before the status frame arrives
+      // (network blip, pod OOM-killed mid-exec, apiserver restart), the
+      // statusCallback never fires and tryFinish's stream-end wait never
+      // completes. Rather than let the watchdog time out silently, surface
+      // the transport failure immediately as a failed (non-null) exit code
+      // with the reason appended to stderr, so callers can see exactly what
+      // happened instead of a generic timeout.
+      const finishWithTransportFailure = (message: string) => {
+        if (resolved) return;
+        resolved = true;
+        if (watchdog) clearTimeout(watchdog);
+        const separator = stderrData.length > 0 && !stderrData.endsWith("\n") ? "\n" : "";
+        resolve({
+          exitCode: 1,
+          stdout: stdoutData,
+          stderr: `${stderrData}${separator}${message}`,
+        });
+      };
+
       stdoutStream.on("end", () => { stdoutEnded = true; tryFinish(); });
       stderrStream.on("end", () => { stderrEnded = true; tryFinish(); });
 
@@ -156,9 +180,12 @@ export async function execInPod(
         stdinStream,
         false, // tty=false: keep stdout/stderr on separate channels
         (status) => {
+          // status.status is "Success" | "Failure"
           if (status.status === "Success") {
             pendingExitCode = 0;
           } else {
+            // On failure, the exit code surfaces via
+            // status.details?.causes[].{reason:"ExitCode", message:"<N>"}
             const causes = status.details?.causes ?? [];
             const exitCodeCause = causes.find(
               (c: { reason?: string; message?: string }) =>
@@ -175,6 +202,20 @@ export async function execInPod(
       execPromise
         .then((webSocket) => {
           ws = webSocket as unknown as WebSocketLike;
+          // Detect the connection dropping before the status frame lands.
+          // These handlers are no-ops once tryFinish/finishWithTransportFailure
+          // has already resolved (the `resolved` guard on each), which is the
+          // normal case: tryFinish calls ws.close() itself on success, which
+          // also emits a "close" event we must ignore.
+          ws.on("close", (code: number, reason: Buffer) => {
+            if (resolved) return;
+            const reasonText = reason.length > 0 ? `: ${reason.toString("utf-8")}` : "";
+            finishWithTransportFailure(`Kubernetes exec websocket closed before status frame (${code})${reasonText}`);
+          });
+          ws.on("error", (err: Error) => {
+            if (resolved) return;
+            finishWithTransportFailure(`Kubernetes exec websocket failed before status frame: ${err.message}`);
+          });
           if (stdinStream && stdinPayload) {
             // Remove the default `end -> ws.close()` listener that k8s client
             // attaches in handleStandardInput; it tears down the connection
