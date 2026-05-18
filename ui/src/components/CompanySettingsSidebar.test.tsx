@@ -120,7 +120,7 @@ describe("CompanySettingsSidebar", () => {
     expect(container.textContent).toContain("Company Settings");
     expect(container.textContent).toContain("General");
     expect(container.textContent).toContain("Environments");
-    expect(container.textContent).toContain("Access");
+    expect(container.textContent).toContain("Members");
     expect(container.textContent).toContain("Invites");
     expect(container.textContent).toContain("Secrets");
     expect(sidebarNavItemMock).toHaveBeenCalledWith(
@@ -139,8 +139,8 @@ describe("CompanySettingsSidebar", () => {
     );
     expect(sidebarNavItemMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        to: "/company/settings/access",
-        label: "Access",
+        to: "/company/settings/members",
+        label: "Members",
         badge: 2,
         end: true,
       }),

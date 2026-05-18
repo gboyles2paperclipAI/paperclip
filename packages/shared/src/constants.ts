@@ -905,6 +905,7 @@ export const PLUGIN_RESERVED_COMPANY_SETTINGS_ROUTE_SEGMENTS = [
   "general",
   "environments",
   "access",
+  "members",
   "invites",
   "secrets",
 ] as const;

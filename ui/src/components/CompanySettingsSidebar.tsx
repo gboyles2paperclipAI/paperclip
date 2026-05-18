@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, KeyRound, MailPlus, MonitorCog, Puzzle, Settings, Shield, SlidersHorizontal } from "lucide-react";
+import { ChevronLeft, KeyRound, MailPlus, MonitorCog, Puzzle, Settings, SlidersHorizontal, Users } from "lucide-react";
 import { sidebarBadgesApi } from "@/api/sidebarBadges";
 import { ApiError } from "@/api/client";
 import { Link } from "@/lib/router";
@@ -67,9 +67,9 @@ export function CompanySettingsSidebar() {
             end
           />
           <SidebarNavItem
-            to="/company/settings/access"
-            label="Access"
-            icon={Shield}
+            to="/company/settings/members"
+            label="Members"
+            icon={Users}
             badge={badges?.joinRequests ?? 0}
             end
           />
