@@ -1983,6 +1983,113 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         return updated;
       },
     },
+    access: {
+      members: {
+        async list(input) {
+          requireCapability(manifest, capabilitySet, "access.members.read");
+          requireCompanyId(input.companyId);
+          return [];
+        },
+        async get(_memberId, companyId) {
+          requireCapability(manifest, capabilitySet, "access.members.read");
+          requireCompanyId(companyId);
+          return null;
+        },
+        async update(memberId, _patch, companyId) {
+          requireCapability(manifest, capabilitySet, "access.members.write");
+          requireCompanyId(companyId);
+          throw new Error(`Membership not found: ${memberId}`);
+        },
+      },
+      invites: {
+        async list(input) {
+          requireCapability(manifest, capabilitySet, "access.invites.read");
+          requireCompanyId(input.companyId);
+          return { invites: [], nextOffset: null };
+        },
+        async create(input) {
+          requireCapability(manifest, capabilitySet, "access.invites.write");
+          requireCompanyId(input.companyId);
+          throw new Error("Invite creation is not implemented in the plugin test harness");
+        },
+        async revoke(inviteId, companyId) {
+          requireCapability(manifest, capabilitySet, "access.invites.write");
+          requireCompanyId(companyId);
+          throw new Error(`Invite not found: ${inviteId}`);
+        },
+      },
+    },
+    authorization: {
+      grants: {
+        async list(input) {
+          requireCapability(manifest, capabilitySet, "authorization.grants.read");
+          requireCompanyId(input.companyId);
+          return [];
+        },
+        async set(input) {
+          requireCapability(manifest, capabilitySet, "authorization.grants.write");
+          requireCompanyId(input.companyId);
+          return [];
+        },
+      },
+      policies: {
+        async summary(companyId) {
+          requireCapability(manifest, capabilitySet, "authorization.policies.read");
+          const cid = requireCompanyId(companyId);
+          return {
+            companyId: cid,
+            permissionsMode: "simple",
+            memberCount: 0,
+            activeMemberCount: 0,
+            grantCount: 0,
+            advancedPolicyAvailable: false,
+          };
+        },
+        async get(input) {
+          requireCapability(manifest, capabilitySet, "authorization.policies.read");
+          requireCompanyId(input.companyId);
+          return null;
+        },
+        async update(input) {
+          requireCapability(manifest, capabilitySet, "authorization.policies.write");
+          const cid = requireCompanyId(input.companyId);
+          return {
+            companyId: cid,
+            resourceType: input.resourceType,
+            resourceId: input.resourceId,
+            policy: input.policy,
+            updatedAt: new Date().toISOString(),
+          };
+        },
+        async previewAssignment(input) {
+          requireCapability(manifest, capabilitySet, "authorization.policies.read");
+          requireCompanyId(input.companyId);
+          return {
+            allowed: true,
+            action: "issue.assign",
+            explanation: "Allowed by simple company-wide defaults in the plugin test harness.",
+            reason: "simple_mode",
+          };
+        },
+        async explainAssignment(input) {
+          requireCapability(manifest, capabilitySet, "authorization.policies.read");
+          requireCompanyId(input.companyId);
+          return {
+            allowed: true,
+            action: "issue.assign",
+            explanation: "Allowed by simple company-wide defaults in the plugin test harness.",
+            reason: "simple_mode",
+          };
+        },
+      },
+      audit: {
+        async search(input) {
+          requireCapability(manifest, capabilitySet, "authorization.audit.read");
+          requireCompanyId(input.companyId);
+          return [];
+        },
+      },
+    },
     data: {
       register(key, handler) {
         dataHandlers.set(key, handler);

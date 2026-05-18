@@ -1086,6 +1086,85 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
       },
 
+      access: {
+        members: {
+          async list(input) {
+            return callHost("access.members.list", {
+              companyId: input.companyId,
+              includeArchived: input.includeArchived,
+            });
+          },
+
+          async get(memberId: string, companyId: string) {
+            return callHost("access.members.get", { memberId, companyId });
+          },
+
+          async update(memberId: string, patch, companyId: string) {
+            return callHost("access.members.update", { memberId, patch, companyId });
+          },
+        },
+
+        invites: {
+          async list(input) {
+            return callHost("access.invites.list", {
+              companyId: input.companyId,
+              state: input.state,
+              limit: input.limit,
+              offset: input.offset,
+            });
+          },
+
+          async create(input) {
+            return callHost("access.invites.create", {
+              companyId: input.companyId,
+              allowedJoinTypes: input.allowedJoinTypes,
+              humanRole: input.humanRole,
+              defaultsPayload: input.defaultsPayload,
+              agentMessage: input.agentMessage,
+            });
+          },
+
+          async revoke(inviteId: string, companyId: string) {
+            return callHost("access.invites.revoke", { inviteId, companyId });
+          },
+        },
+      },
+
+      authorization: {
+        grants: {
+          async list(input) {
+            return callHost("authorization.grants.list", input);
+          },
+          async set(input) {
+            return callHost("authorization.grants.set", input);
+          },
+        },
+
+        policies: {
+          async summary(companyId: string) {
+            return callHost("authorization.policies.summary", { companyId });
+          },
+          async get(input) {
+            return callHost("authorization.policies.get", input);
+          },
+          async update(input) {
+            return callHost("authorization.policies.update", input);
+          },
+          async previewAssignment(input) {
+            return callHost("authorization.policies.previewAssignment", input);
+          },
+          async explainAssignment(input) {
+            return callHost("authorization.policies.explainAssignment", input);
+          },
+        },
+
+        audit: {
+          async search(input) {
+            return callHost("authorization.audit.search", input);
+          },
+        },
+      },
+
       data: {
         register(key: string, handler: (params: Record<string, unknown>) => Promise<unknown>): void {
           dataHandlers.set(key, handler);

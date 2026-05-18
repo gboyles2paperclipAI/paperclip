@@ -39,6 +39,7 @@ import type {
   Agent,
   Goal,
   PluginLocalFolderDeclaration,
+  PrincipalPermissionGrant,
 } from "@paperclipai/shared";
 export type { PluginLauncherRenderContextSnapshot } from "@paperclipai/shared";
 
@@ -57,6 +58,13 @@ import type {
   ToolResult,
   PluginLocalFolderListing,
   PluginLocalFolderStatus,
+  PluginAccessInvite,
+  PluginAccessMember,
+  PluginAssignmentPreviewInput,
+  PluginAuthorizationAuditEntry,
+  PluginAuthorizationDecisionResult,
+  PluginAuthorizationPolicyRecord,
+  PluginAuthorizationPolicySummary,
 } from "./types.js";
 import type {
   PluginHealthDiagnostics,
@@ -1127,6 +1135,104 @@ export interface WorkerToHostMethods {
       companyId: string;
     },
     result: Goal,
+  ];
+
+  // Access
+  "access.members.list": [
+    params: { companyId: string; includeArchived?: boolean },
+    result: PluginAccessMember[],
+  ];
+  "access.members.get": [
+    params: { memberId: string; companyId: string },
+    result: PluginAccessMember | null,
+  ];
+  "access.members.update": [
+    params: {
+      memberId: string;
+      companyId: string;
+      patch: {
+        membershipRole?: string | null;
+        status?: "pending" | "active" | "suspended";
+      };
+    },
+    result: PluginAccessMember,
+  ];
+  "access.invites.list": [
+    params: {
+      companyId: string;
+      state?: "active" | "revoked" | "accepted" | "expired";
+      limit?: number;
+      offset?: number;
+    },
+    result: { invites: PluginAccessInvite[]; nextOffset: number | null },
+  ];
+  "access.invites.create": [
+    params: {
+      companyId: string;
+      allowedJoinTypes?: "human" | "agent" | "both";
+      humanRole?: string | null;
+      defaultsPayload?: Record<string, unknown> | null;
+      agentMessage?: string | null;
+    },
+    result: PluginAccessInvite & { token: string },
+  ];
+  "access.invites.revoke": [
+    params: { inviteId: string; companyId: string },
+    result: PluginAccessInvite,
+  ];
+
+  // Authorization
+  "authorization.grants.list": [
+    params: { companyId: string; principalType?: string; principalId?: string },
+    result: PrincipalPermissionGrant[],
+  ];
+  "authorization.grants.set": [
+    params: {
+      companyId: string;
+      principalType: string;
+      principalId: string;
+      grants: Array<{ permissionKey: string; scope?: Record<string, unknown> | null }>;
+      grantedByUserId?: string | null;
+    },
+    result: PrincipalPermissionGrant[],
+  ];
+  "authorization.policies.summary": [
+    params: { companyId: string },
+    result: PluginAuthorizationPolicySummary,
+  ];
+  "authorization.policies.get": [
+    params: { companyId: string; resourceType: "company" | "agent" | "project" | "issue"; resourceId: string },
+    result: PluginAuthorizationPolicyRecord | null,
+  ];
+  "authorization.policies.update": [
+    params: {
+      companyId: string;
+      resourceType: "company" | "agent" | "project" | "issue";
+      resourceId: string;
+      policy: Record<string, unknown> | null;
+    },
+    result: PluginAuthorizationPolicyRecord,
+  ];
+  "authorization.policies.previewAssignment": [
+    params: PluginAssignmentPreviewInput,
+    result: PluginAuthorizationDecisionResult,
+  ];
+  "authorization.policies.explainAssignment": [
+    params: PluginAssignmentPreviewInput,
+    result: PluginAuthorizationDecisionResult,
+  ];
+  "authorization.audit.search": [
+    params: {
+      companyId: string;
+      action?: string;
+      actorType?: string;
+      actorId?: string;
+      entityType?: string;
+      entityId?: string;
+      limit?: number;
+      offset?: number;
+    },
+    result: PluginAuthorizationAuditEntry[],
   ];
 }
 
