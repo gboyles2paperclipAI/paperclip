@@ -3832,6 +3832,7 @@ export function issueService(db: Db) {
           identifier: issues.identifier,
           assigneeAgentId: issues.assigneeAgentId,
           status: issues.status,
+          executionState: issues.executionState,
         })
         .from(issueRelations)
         .innerJoin(issues, eq(issueRelations.relatedIssueId, issues.id))
@@ -3885,6 +3886,7 @@ export function issueService(db: Db) {
           identifier: candidate.identifier,
           assigneeAgentId: candidate.assigneeAgentId!,
           status: candidate.status,
+          executionState: candidate.executionState,
           blockerIssueIds: candidate.blockerIssueIds,
         }));
     },

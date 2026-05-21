@@ -368,6 +368,99 @@ describe("issue dependency wakeups in issue routes", () => {
     expect(mockWakeup).not.toHaveBeenCalledWith("agent-2", expect.anything());
   });
 
+  it("auto-transitions a blocked dependent with a pending review stage to in_review when its blocker resolves", async () => {
+    mockIssueService.getById.mockResolvedValue({
+      id: "issue-1",
+      companyId: "company-1",
+      identifier: "PAP-500",
+      title: "Validation child",
+      description: null,
+      status: "in_progress",
+      priority: "medium",
+      parentId: null,
+      assigneeAgentId: "agent-1",
+      assigneeUserId: null,
+      createdByAgentId: null,
+      createdByUserId: null,
+      executionWorkspaceId: null,
+      labels: [],
+      labelIds: [],
+    });
+    mockIssueService.update
+      .mockResolvedValueOnce({
+        id: "issue-1",
+        companyId: "company-1",
+        identifier: "PAP-500",
+        title: "Validation child",
+        description: null,
+        status: "done",
+        priority: "medium",
+        parentId: null,
+        assigneeAgentId: "agent-1",
+        assigneeUserId: null,
+        createdByAgentId: null,
+        createdByUserId: null,
+        executionWorkspaceId: null,
+        labels: [],
+        labelIds: [],
+      })
+      .mockResolvedValueOnce({
+        id: "issue-2",
+        companyId: "company-1",
+        identifier: "PAP-501",
+        title: "Parent awaiting review",
+        description: null,
+        status: "in_review",
+        priority: "medium",
+        parentId: null,
+        assigneeAgentId: "agent-3",
+        assigneeUserId: null,
+        createdByAgentId: null,
+        createdByUserId: null,
+        executionWorkspaceId: null,
+        labels: [],
+        labelIds: [],
+      });
+    mockIssueService.listWakeableBlockedDependents.mockResolvedValue([
+      {
+        id: "issue-2",
+        companyId: "company-1",
+        identifier: "PAP-501",
+        assigneeAgentId: "agent-3",
+        status: "blocked",
+        executionState: {
+          status: "pending",
+          currentStageId: "a1b2c3d4-0000-0000-0000-000000000001",
+          currentStageIndex: 0,
+          currentStageType: "review",
+          currentParticipant: { type: "agent", agentId: "33333333-3333-4333-8333-333333333333" },
+          returnAssignee: { type: "agent", agentId: "22222222-2222-4222-8222-222222222222" },
+          completedStageIds: [],
+          reviewRequest: null,
+          lastDecisionId: null,
+          lastDecisionOutcome: null,
+        },
+        blockerIssueIds: ["issue-1"],
+      },
+    ]);
+
+    const res = await request(await createApp()).patch("/api/issues/issue-1").send({ status: "done" });
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => {
+      expect(mockIssueService.update).toHaveBeenCalledWith(
+        "issue-2",
+        expect.objectContaining({ status: "in_review" }),
+      );
+      expect(mockWakeup).toHaveBeenCalledWith(
+        "agent-3",
+        expect.objectContaining({
+          reason: "issue_blockers_resolved",
+          payload: expect.objectContaining({ issueId: "issue-2", resolvedBlockerIssueId: "issue-1" }),
+        }),
+      );
+    });
+  });
+
   it("wakes the parent when all direct children become terminal", async () => {
     mockIssueService.getById.mockResolvedValue({
       id: "child-1",

@@ -4174,7 +4174,9 @@ export function issueRoutes(
         for (const dependent of dependents) {
           if (dependent.status === "blocked") {
             try {
-              await svc.update(dependent.id, { status: "todo" });
+              const execState = parseIssueExecutionState(dependent.executionState);
+              const targetStatus = execState?.status === "pending" ? "in_review" : "todo";
+              await svc.update(dependent.id, { status: targetStatus });
               await logActivity(db, {
                 companyId: dependent.companyId,
                 actorType: "system",
@@ -4186,7 +4188,7 @@ export function issueRoutes(
                 entityId: dependent.id,
                 details: {
                   identifier: dependent.identifier,
-                  status: "todo",
+                  status: targetStatus,
                   resolvedBlockerIssueId: issue.id,
                   resolvedBlockerIdentifier: issue.identifier,
                   source: "blocker_completion",
