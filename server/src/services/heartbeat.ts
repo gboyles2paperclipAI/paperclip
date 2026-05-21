@@ -5964,6 +5964,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         return null;
       }
 
+      // Phantom-blocked: issue has status=blocked but no formal blockedByIssueIds (unresolvedBlockerCount=0).
+      // shouldAutoCheckoutIssueForWake allows blocked issues when isDependencyReady=true, so without this guard
+      // executeRun would attempt checkout and receive 422 "Issue is blocked". Detect here so adapter.execute()
+      // is never invoked — the run is cancelled before the queued→running transition.
+      if (unresolvedBlockerCount === 0 && !allowsIssueInteractionWake(context)) {
+        const issueStatusRow = await db
+          .select({ status: issues.status })
+          .from(issues)
+          .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
+          .then((rows) => rows[0] ?? null);
+        if (issueStatusRow?.status === "blocked") {
+          await cancelQueuedRunForBlockedDependencies(run, issueId, []);
+          await finalizeAgentStatus(run.agentId, "cancelled");
+          logger.info({ runId: run.id, issueId }, "claimQueuedRun: cancelled phantom-blocked queued run");
+          return null;
+        }
+      }
+
       const staleness = await evaluateQueuedRunStaleness(run, issueId, context);
       if (staleness.stale) {
         await cancelQueuedRunForStaleIssue(run, issueId, staleness);
