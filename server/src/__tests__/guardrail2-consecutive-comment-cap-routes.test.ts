@@ -3,8 +3,8 @@
  *
  * When an assignee agent posts CONSECUTIVE_AGENT_COMMENT_CAP or more comments
  * in a row with no human or other-agent reply, the route must:
- *   1. Set the issue to `blocked` (which also clears checkout fields)
- *   2. Post a system comment tagging the CTO
+ *   1. Set the issue to `blocked` or `in_review` depending on evidence-only wait state
+ *   2. Post a system comment (CTO-tagged only for true blocked path)
  *   3. NOT dispatch a wakeup to the agent for that comment
  */
 import express from "express";
@@ -303,6 +303,34 @@ describe.sequential("guardrail 2: consecutive agent comment cap", () => {
       );
       expect(assigneeWake).toBeUndefined();
     });
+  });
+
+  it("routes evidence-only consecutive check-ins to in_review (not blocked) and preserves non-CTO path", async () => {
+    mockIssueService.getById.mockResolvedValue(makeInProgressIssue());
+    mockIssueService.listComments.mockResolvedValue(makeAgentCommentStreak(3));
+    mockIssueService.addComment.mockResolvedValue({
+      ...BASE_COMMENT_RESPONSE,
+      body: "Waiting on external evidence; next check in 30 minutes.",
+    });
+
+    const res = await request(await installActor(createApp(), agentActor()))
+      .post(`/api/issues/${ISSUE_ID}/comments`)
+      .send({ body: "Waiting on external evidence; next check in 30 minutes." });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      ISSUE_ID,
+      expect.objectContaining({
+        status: "in_review",
+        checkoutRunId: null,
+        executionRunId: null,
+      }),
+    );
+    const autoPauseNotice = mockIssueService.addComment.mock.calls.find(
+      (call) => call[2]?.authorType === "system" || call[3]?.authorType === "system",
+    );
+    expect(autoPauseNotice?.[1]).toContain("in_review");
+    expect(autoPauseNotice?.[1]).not.toContain("[@CTO]");
   });
 
   it("does NOT auto-pause when there are fewer than 3 consecutive agent comments", async () => {

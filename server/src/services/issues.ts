@@ -4692,6 +4692,7 @@ export function issueService(db: Db) {
 
       if (current.status === "blocked") {
         throw unprocessable("Issue is blocked — resolve blockedByIssueIds or explicitly unblock before checking out", {
+          errorCode: "checkout_blocked",
           issueId: current.id,
           status: current.status,
         });

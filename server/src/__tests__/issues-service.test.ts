@@ -2533,7 +2533,10 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     // No blockedByIssueIds — status-only blocked. Checkout must still be rejected.
     await expect(
       svc.checkout(issueId, assigneeAgentId, ["todo", "blocked", "in_review"], null),
-    ).rejects.toMatchObject({ status: 422 });
+    ).rejects.toMatchObject({
+      status: 422,
+      details: expect.objectContaining({ errorCode: "checkout_blocked" }),
+    });
 
     // Verify status was NOT silently promoted to in_progress
     const row = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, issueId)).then((r) => r[0]);

@@ -118,6 +118,26 @@ const CONSECUTIVE_AGENT_COMMENT_CAP = 3;
 // System CTO agent ID — receives the auto-pause notification comment.
 const SYSTEM_CTO_AGENT_ID = "1320f476-10cb-4c28-b2f6-3d313cd1a787";
 
+function isEvidenceOnlyProgressComment(body: string | null | undefined) {
+  if (!body) return false;
+  const normalized = body.toLowerCase();
+  const hasEvidenceOrWaitingSignal =
+    normalized.includes("evidence")
+    || normalized.includes("awaiting")
+    || normalized.includes("waiting on")
+    || normalized.includes("follow-up")
+    || normalized.includes("follow up")
+    || normalized.includes("next check");
+  const hasBlockingActionSignal =
+    normalized.includes("implemented")
+    || normalized.includes("fixed")
+    || normalized.includes("merged")
+    || normalized.includes("deployed")
+    || normalized.includes("complete")
+    || normalized.includes("closed");
+  return hasEvidenceOrWaitingSignal && !hasBlockingActionSignal;
+}
+
 const updateIssueRouteSchema = updateIssueSchema.extend({
   interrupt: z.boolean().optional(),
 });
@@ -4312,7 +4332,25 @@ export function issueRoutes(
 
     const checkoutRunId = requireAgentRunId(req, res);
     if (req.actor.type === "agent" && !checkoutRunId) return;
-    const updated = await svc.checkout(id, req.body.agentId, req.body.expectedStatuses, checkoutRunId);
+    let updated;
+    try {
+      updated = await svc.checkout(id, req.body.agentId, req.body.expectedStatuses, checkoutRunId);
+    } catch (err) {
+      if (
+        err instanceof HttpError &&
+        err.status === 422 &&
+        typeof err.message === "string" &&
+        err.message.includes("Issue is blocked")
+      ) {
+        res.status(422).json({
+          error: err.message,
+          errorCode: "checkout_blocked",
+          details: err.details ?? null,
+        });
+        return;
+      }
+      throw err;
+    }
     const actor = getActorInfo(req);
 
     await logActivity(db, {
@@ -5145,16 +5183,20 @@ export function issueRoutes(
       }
       if (consecutiveCount >= CONSECUTIVE_AGENT_COMMENT_CAP) {
         try {
-          await svc.update(id, { status: "blocked" });
-          await svc.addComment(
-            id,
-            `**[System: Auto-pause — Guardrail 2]** Agent posted ${consecutiveCount} consecutive comments with no human or other-agent reply. Issue automatically set to \`blocked\` and checkout cleared.\n\n[@CTO](agent://${SYSTEM_CTO_AGENT_ID}) — please review the thread and manually unblock (set status to \`todo\` or reassign) when appropriate.`,
-            {},
-            { authorType: "system" },
-          );
+          const evidenceOnlyWait = isEvidenceOnlyProgressComment(comment.body);
+          const pausedStatus = evidenceOnlyWait ? "in_review" : "blocked";
+          await svc.update(id, {
+            status: pausedStatus,
+            checkoutRunId: null,
+            executionRunId: null,
+          });
+          const notice = evidenceOnlyWait
+            ? `**[System: Auto-pause — Guardrail 2]** Agent posted ${consecutiveCount} consecutive evidence-check comments with no human or other-agent reply. Issue moved to \`in_review\` and checkout cleared to preserve the existing assignee while waiting for external evidence/time.\n\nOperator action: keep assignee unchanged; move to \`todo\` when fresh evidence arrives or reassign if ownership changes.`
+            : `**[System: Auto-pause — Guardrail 2]** Agent posted ${consecutiveCount} consecutive comments with no human or other-agent reply. Issue automatically set to \`blocked\` and checkout cleared.\n\n[@CTO](agent://${SYSTEM_CTO_AGENT_ID}) — please review the thread and manually unblock (set status to \`todo\` or reassign) when appropriate.`;
+          await svc.addComment(id, notice, {}, { authorType: "system" });
           autoPausedByConsecutiveCap = true;
           logger.warn(
-            { issueId: id, agentId: actor.actorId, consecutiveCount },
+            { issueId: id, agentId: actor.actorId, consecutiveCount, evidenceOnlyWait, pausedStatus },
             "guardrail2: auto-paused agent on consecutive comment cap",
           );
         } catch (err) {
