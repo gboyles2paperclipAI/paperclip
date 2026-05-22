@@ -1134,7 +1134,7 @@ export function issueRoutes(
   function enforceInReviewAssigneeRouting(input: {
     existing: {
       id: string;
-      identifier: string;
+      identifier: string | null;
       status: string;
       assigneeAgentId: string | null;
       assigneeUserId?: string | null;
