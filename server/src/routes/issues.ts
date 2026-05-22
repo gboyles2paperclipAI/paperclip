@@ -3700,6 +3700,18 @@ export function issueRoutes(
       }
     }
 
+    if (updateFields.status === "done") {
+      const pendingInteractions = await issueThreadInteractionsSvc.listForIssue(existing.id);
+      if (pendingInteractions.some((i) => i.status === "pending")) {
+        res.status(422).json({
+          error: "PENDING_INTERACTION_BLOCKS_CLOSE",
+          message:
+            "Issue has pending interactions awaiting human response. Resolve or cancel them before closing.",
+        });
+        return;
+      }
+    }
+
     let issue;
     try {
       if (transition.decision && decisionId) {
@@ -5347,14 +5359,34 @@ export function issueRoutes(
     // auto-pause: set the issue to blocked (which also clears checkout fields) and post a
     // system notification tagging the CTO so a human can review before the agent resumes.
     let autoPausedByConsecutiveCap = false;
-    if (!reopened && !isClosed && actor.actorType === "agent" && actor.actorId && actor.actorId === currentIssue.assigneeAgentId) {
+    if (
+      !reopened
+      && !isClosed
+      && currentIssue.status === "in_progress"
+      && actor.actorType === "agent"
+      && actor.actorId
+      && actor.actorId === currentIssue.assigneeAgentId
+    ) {
       const recentComments = await svc.listComments(id, { order: "desc", limit: CONSECUTIVE_AGENT_COMMENT_CAP + 2 });
+      const consecutiveAgentComments: typeof recentComments = [];
       let consecutiveCount = 0;
       for (const c of recentComments) {
-        if (c.authorAgentId === actor.actorId) consecutiveCount++;
+        if (c.authorAgentId === actor.actorId) {
+          consecutiveCount++;
+          consecutiveAgentComments.push(c);
+        }
         else break;
       }
-      if (consecutiveCount >= CONSECUTIVE_AGENT_COMMENT_CAP) {
+      const consecutiveRunIds = new Set(
+        consecutiveAgentComments
+          .map((comment) => comment.createdByRunId ?? null)
+          .filter((runId): runId is string => Boolean(runId)),
+      );
+      const sameRunBurst =
+        consecutiveAgentComments.length >= CONSECUTIVE_AGENT_COMMENT_CAP
+        && consecutiveRunIds.size === 1
+        && consecutiveAgentComments.every((comment) => comment.createdByRunId);
+      if (consecutiveCount >= CONSECUTIVE_AGENT_COMMENT_CAP && !sameRunBurst) {
         try {
           const dependencyReadiness = await svc.getDependencyReadiness(currentIssue.id);
           const hasUnresolvedBlockers = dependencyReadiness.unresolvedBlockerCount > 0;
