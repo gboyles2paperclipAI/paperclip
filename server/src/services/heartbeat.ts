@@ -5964,7 +5964,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         return null;
       }
 
-      // Phantom-blocked: issue has status=blocked but no formal blockedByIssueIds (unresolvedBlockerCount=0).
+      // Phantom-blocked guard: issue has status=blocked but unresolvedBlockerCount=0.
+      // Two cases when unresolvedBlockerCount=0 and status=blocked:
+      //   1. Truly phantom-blocked: no blocker relations exist at all (data inconsistency) — cancel.
+      //   2. All-blockers-done: relations exist but all reached done; auto-unblock was missed — clear and proceed.
       // shouldAutoCheckoutIssueForWake allows blocked issues when isDependencyReady=true, so without this guard
       // executeRun would attempt checkout and receive 422 "Issue is blocked". Detect here so adapter.execute()
       // is never invoked — the run is cancelled before the queued→running transition.
@@ -5975,10 +5978,29 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
           .then((rows) => rows[0] ?? null);
         if (issueStatusRow?.status === "blocked") {
-          await cancelQueuedRunForBlockedDependencies(run, issueId, []);
-          await finalizeAgentStatus(run.agentId, "cancelled");
-          logger.info({ runId: run.id, issueId }, "claimQueuedRun: cancelled phantom-blocked queued run");
-          return null;
+          const [{ totalBlockerCount }] = await db
+            .select({ totalBlockerCount: sql<number>`count(*)` })
+            .from(issueRelations)
+            .where(
+              and(
+                eq(issueRelations.companyId, run.companyId),
+                eq(issueRelations.relatedIssueId, issueId),
+                eq(issueRelations.type, "blocks"),
+              ),
+            );
+          if (Number(totalBlockerCount) === 0) {
+            // Truly phantom-blocked: no blocker relations at all — cancel
+            await cancelQueuedRunForBlockedDependencies(run, issueId, []);
+            await finalizeAgentStatus(run.agentId, "cancelled");
+            logger.info({ runId: run.id, issueId }, "claimQueuedRun: cancelled phantom-blocked queued run");
+            return null;
+          }
+          // All blockers are done but auto-unblock was missed — clear blocked status and proceed
+          await issuesSvc.update(issueId, { status: "in_progress" });
+          logger.info(
+            { runId: run.id, issueId, totalBlockerCount: Number(totalBlockerCount) },
+            "claimQueuedRun: auto-unblocked all-done-blockers issue, proceeding",
+          );
         }
       }
 
