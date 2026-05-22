@@ -735,6 +735,13 @@ export function issueThreadInteractionService(db: Db) {
         case "suggest_tasks":
           return issueThreadInteractionService(db).acceptSuggestedTasks(issue, interactionId, data, actor);
         case "request_confirmation": {
+          // request_confirmation must only be resolved by a human board actor.
+          // Agents are blocked at the route layer via assertBoard(), but this
+          // service-level guard provides defence-in-depth so the service cannot
+          // be misused if called directly (e.g. from tests or future callers).
+          if (actor.agentId != null && actor.userId == null) {
+            throw unprocessable("request_confirmation interactions can only be accepted by a human board actor, not an agent");
+          }
           const accepted = await acceptRequestConfirmation({
             issue,
             current,

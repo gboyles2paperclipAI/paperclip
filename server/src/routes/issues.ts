@@ -4770,6 +4770,20 @@ export function issueRoutes(
       });
       const continuationWakeIssue = continuationIssue ?? issue;
 
+      // For request_confirmation, capture request source context so the audit trail can
+      // prove a human UI action occurred — especially in local_trusted mode where all
+      // unauthenticated browser requests are assigned the synthetic "local-board" identity.
+      // sec-fetch-site / origin headers are browser-only; their presence distinguishes a
+      // deliberate UI click from a scripted curl invocation.
+      const requestConfirmationAuditContext = interaction.kind === "request_confirmation"
+        ? {
+            actorSource: req.actor.type === "board" ? (req.actor.source ?? null) : null,
+            requestSecFetchSite: req.header("sec-fetch-site") ?? null,
+            requestHasOriginHeader: req.header("origin") != null,
+            requestUserAgent: (req.header("user-agent") ?? "").slice(0, 150) || null,
+          }
+        : undefined;
+
       await logActivity(db, {
         companyId: issue.companyId,
         actorType: actor.actorType,
@@ -4793,6 +4807,7 @@ export function issueRoutes(
             interaction.kind === "suggest_tasks"
               ? (interaction.result?.skippedClientKeys?.length ?? 0)
               : 0,
+          ...requestConfirmationAuditContext,
         },
       });
 

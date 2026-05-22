@@ -707,4 +707,98 @@ describe.sequential("issue thread interaction routes", () => {
       },
     );
   });
+
+  // --- request_confirmation safety guardrails ---
+
+  it("rejects agent attempts to accept a request_confirmation (assertBoard blocks non-board actors)", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId: ASSIGNEE_AGENT_ID,
+      companyId: "company-1",
+      runId: "run-agent",
+    });
+    mockInteractionService.acceptInteraction.mockResolvedValueOnce({
+      interaction: {
+        id: "interaction-rc",
+        companyId: "company-1",
+        issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        kind: "request_confirmation",
+        status: "accepted",
+        continuationPolicy: "wake_assignee_on_accept",
+        idempotencyKey: null,
+        sourceCommentId: null,
+        sourceRunId: "run-rc",
+        payload: { version: 1, prompt: "Approve?" },
+        result: { version: 1, outcome: "accepted" },
+        createdAt: "2026-04-20T12:00:00.000Z",
+        updatedAt: "2026-04-20T12:05:00.000Z",
+        resolvedAt: "2026-04-20T12:05:00.000Z",
+      },
+      createdIssues: [],
+      continuationIssue: null,
+    });
+
+    const res = await request(app)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions/interaction-rc/accept")
+      .send({});
+
+    // Agents must not be able to accept request_confirmation — only board users can.
+    expect(res.status).toBe(403);
+    expect(mockInteractionService.acceptInteraction).not.toHaveBeenCalled();
+  });
+
+  it("captures HTTP source context in the audit log when a board user accepts a request_confirmation", async () => {
+    mockInteractionService.acceptInteraction.mockResolvedValueOnce({
+      interaction: {
+        id: "interaction-rc2",
+        companyId: "company-1",
+        issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        kind: "request_confirmation",
+        status: "accepted",
+        continuationPolicy: "wake_assignee_on_accept",
+        idempotencyKey: null,
+        sourceCommentId: null,
+        sourceRunId: "run-rc2",
+        payload: { version: 1, prompt: "Approve this plan?" },
+        result: { version: 1, outcome: "accepted" },
+        createdAt: "2026-04-20T12:00:00.000Z",
+        updatedAt: "2026-04-20T12:05:00.000Z",
+        resolvedAt: "2026-04-20T12:05:00.000Z",
+      },
+      createdIssues: [],
+      continuationIssue: null,
+    });
+
+    // Simulate a browser request: local-board actor with sec-fetch headers (indicates UI click)
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      companyIds: ["company-1"],
+      source: "local_implicit",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions/interaction-rc2/accept")
+      .set("sec-fetch-site", "same-origin")
+      .set("origin", "http://localhost:3100")
+      .set("user-agent", "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 Chrome/148.0.0.0")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.thread_interaction_accepted",
+        details: expect.objectContaining({
+          interactionKind: "request_confirmation",
+          interactionStatus: "accepted",
+          // Audit context proves this was a browser UI action, not an automated call
+          actorSource: "local_implicit",
+          requestSecFetchSite: "same-origin",
+          requestHasOriginHeader: true,
+        }),
+      }),
+    );
+  });
 });
