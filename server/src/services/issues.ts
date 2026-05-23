@@ -1602,7 +1602,8 @@ const issueListSelect = {
   monitorAttemptCount: issues.monitorAttemptCount,
   monitorNotes: issues.monitorNotes,
   monitorScheduledBy: issues.monitorScheduledBy,
-  privilegedHumanGate: issues.privilegedHumanGate,
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+  privilegedHumanGate: (issues.privilegedHumanGate as typeof issues.privilegedHumanGate | undefined) ?? sql<null>`null`,
   executionWorkspaceId: issues.executionWorkspaceId,
   executionWorkspacePreference: issues.executionWorkspacePreference,
   executionWorkspaceSettings: sql<null>`null`,
