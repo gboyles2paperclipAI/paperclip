@@ -3381,6 +3381,40 @@ export function issueService(db: Db) {
     return adopted;
   }
 
+  async function adoptStaleCheckoutOnNullActiveRun(input: {
+    issueId: string;
+    actorAgentId: string;
+    actorRunId: string;
+    expectedCheckoutRunId: string;
+  }) {
+    const now = new Date();
+    return db
+      .update(issues)
+      .set({
+        checkoutRunId: input.actorRunId,
+        executionRunId: input.actorRunId,
+        executionLockedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(issues.id, input.issueId),
+          eq(issues.status, "in_progress"),
+          eq(issues.assigneeAgentId, input.actorAgentId),
+          eq(issues.checkoutRunId, input.expectedCheckoutRunId),
+          isNull(issues.executionRunId),
+        ),
+      )
+      .returning({
+        id: issues.id,
+        status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .then((rows) => rows[0] ?? null);
+  }
+
   async function clearExecutionRunIfTerminal(issueId: string): Promise<boolean> {
     return db.transaction(async (tx) => {
       await tx.execute(
@@ -3406,6 +3440,7 @@ export function issueService(db: Db) {
       const updated = await tx
         .update(issues)
         .set({
+          checkoutRunId: null,
           executionRunId: null,
           executionAgentNameKey: null,
           executionLockedAt: null,
@@ -4942,6 +4977,32 @@ export function issueService(db: Db) {
         }
       }
 
+      // Option 2: stale checkoutRunId with null activeRun (executionRunId cleared by
+      // clearExecutionRunIfTerminal or decoupled from checkoutRunId by reassignment).
+      // Same-agent only — prevents cross-agent hijack of live checkouts.
+      if (
+        actorRunId &&
+        current.status === "in_progress" &&
+        current.assigneeAgentId === actorAgentId &&
+        current.checkoutRunId !== null &&
+        current.checkoutRunId !== actorRunId &&
+        current.executionRunId === null
+      ) {
+        const adopted = await adoptStaleCheckoutOnNullActiveRun({
+          issueId: id,
+          actorAgentId,
+          actorRunId,
+          expectedCheckoutRunId: current.checkoutRunId,
+        });
+
+        if (adopted) {
+          return {
+            ...adopted,
+            adoptedFromRunId: current.checkoutRunId,
+          };
+        }
+      }
+
       if (
         actorRunId &&
         current.status === "in_progress" &&
@@ -4995,7 +5056,11 @@ export function issueService(db: Db) {
         !sameRunLock(existing.checkoutRunId, actorRunId ?? null)
       ) {
         const stale = await isTerminalOrMissingHeartbeatRun(existing.checkoutRunId);
-        if (!stale) {
+        // Also allow release when executionRunId is null (Option 2: activeRun is gone).
+        // clearExecutionRunIfTerminal above will have set executionRunId = null if R1
+        // was terminal, or it stays non-null if R1 is still live — so this check is safe.
+        const nullActiveRun = existing.executionRunId === null;
+        if (!stale && !nullActiveRun) {
           throw conflict("Only checkout run can release issue", {
             issueId: existing.id,
             assigneeAgentId: existing.assigneeAgentId,

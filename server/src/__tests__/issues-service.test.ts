@@ -3142,21 +3142,23 @@ describeEmbeddedPostgres("issueService.clearExecutionRunIfTerminal", () => {
       status: "in_progress",
       priority: "medium",
       assigneeAgentId: agentId,
+      checkoutRunId: runId,
       executionRunId: runId,
       executionAgentNameKey: runId ? "codexcoder" : null,
       executionLockedAt: runId ? new Date() : null,
     });
 
-    return { issueId, runId };
+    return { issueId, runId, agentId, companyId };
   }
 
-  it("clears execution locks owned by terminal runs", async () => {
+  it("clears execution and checkout locks owned by terminal runs", async () => {
     const { issueId } = await seedIssueWithRun("failed");
 
     await expect(svc.clearExecutionRunIfTerminal(issueId)).resolves.toBe(true);
 
     const row = await db
       .select({
+        checkoutRunId: issues.checkoutRunId,
         executionRunId: issues.executionRunId,
         executionAgentNameKey: issues.executionAgentNameKey,
         executionLockedAt: issues.executionLockedAt,
@@ -3165,6 +3167,7 @@ describeEmbeddedPostgres("issueService.clearExecutionRunIfTerminal", () => {
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0]);
     expect(row).toEqual({
+      checkoutRunId: null,
       executionRunId: null,
       executionAgentNameKey: null,
       executionLockedAt: null,
@@ -3203,3 +3206,171 @@ describeEmbeddedPostgres("issueService.clearExecutionRunIfTerminal", () => {
     expect(row).toEqual({ executionRunId: null, executionLockedAt: null });
   });
 });
+
+describeEmbeddedPostgres(
+  "issueService.assertCheckoutOwner — Option 2: null-activeRun same-agent recovery",
+  () => {
+    let db!: ReturnType<typeof createDb>;
+    let svc!: ReturnType<typeof issueService>;
+    let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+    beforeAll(async () => {
+      tempDb = await startEmbeddedPostgresTestDatabase(
+        "paperclip-issues-stale-checkout-null-run-",
+      );
+      db = createDb(tempDb.connectionString);
+      svc = issueService(db);
+    }, 20_000);
+
+    afterEach(async () => {
+      await db.delete(issueComments);
+      await db.delete(issueRelations);
+      await db.delete(issueInboxArchives);
+      await db.delete(activityLog);
+      await db.delete(issues);
+      await db.delete(heartbeatRuns);
+      await db.delete(executionWorkspaces);
+      await db.delete(projectWorkspaces);
+      await db.delete(projects);
+      await db.delete(goals);
+      await db.delete(agents);
+      await db.delete(instanceSettings);
+      await db.delete(companies);
+    });
+
+    afterAll(async () => {
+      await tempDb?.cleanup();
+    });
+
+    async function seedStaleCheckoutScenario(opts: {
+      checkoutRunStatus: string | null;
+      executionRunId: string | null;
+      overrideCheckoutRunId?: string;
+    }) {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      const issueId = randomUUID();
+      const checkoutRunId = opts.overrideCheckoutRunId ?? randomUUID();
+      const actorRunId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "TestAgent",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      // R1 run (the stale checkout run)
+      await db.insert(heartbeatRuns).values({
+        id: checkoutRunId,
+        companyId,
+        agentId,
+        status: opts.checkoutRunStatus ?? "succeeded",
+        invocationSource: "manual",
+      });
+      // R2 run (actor — new run for same agent)
+      await db.insert(heartbeatRuns).values({
+        id: actorRunId,
+        companyId,
+        agentId,
+        status: "running",
+        invocationSource: "manual",
+      });
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        title: "Stale checkout recovery test",
+        status: "in_progress",
+        priority: "medium",
+        assigneeAgentId: agentId,
+        checkoutRunId,
+        executionRunId: opts.executionRunId,
+        executionAgentNameKey: opts.executionRunId ? "testagent" : null,
+        executionLockedAt: opts.executionRunId ? new Date() : null,
+      });
+
+      return { issueId, agentId, companyId, checkoutRunId, actorRunId };
+    }
+
+    it("allows same-agent R2 to adopt when executionRunId is null and checkoutRunId is stale (Option 2 path)", async () => {
+      // Simulate: R1 ran and terminal status was set, clearExecutionRunIfTerminal already
+      // cleared executionRunId but checkoutRunId still points to R1.
+      const { issueId, agentId, checkoutRunId, actorRunId } =
+        await seedStaleCheckoutScenario({
+          checkoutRunStatus: "succeeded",
+          executionRunId: null, // already cleared — activeRun is null
+        });
+
+      const result = await svc.assertCheckoutOwner(issueId, agentId, actorRunId);
+
+      expect(result.checkoutRunId).toBe(actorRunId);
+      expect(result.adoptedFromRunId).toBe(checkoutRunId);
+    });
+
+    it("same-agent R2 adoption via clearExecutionRunIfTerminal path (Option 1+2 end-to-end)", async () => {
+      // R1 is terminal; both checkoutRunId and executionRunId point to R1.
+      // assertCheckoutOwner calls clearExecutionRunIfTerminal which clears both,
+      // then CASE 2 (unowned checkout) handles adoption.
+      const r1RunId = randomUUID();
+      const { issueId, agentId, actorRunId } = await seedStaleCheckoutScenario({
+        checkoutRunStatus: "succeeded",
+        executionRunId: r1RunId,
+        overrideCheckoutRunId: r1RunId,
+      });
+
+      // assertCheckoutOwner internally calls clearExecutionRunIfTerminal, which (Option 1)
+      // clears both executionRunId and checkoutRunId. Then CASE 2 (unowned checkout) or
+      // Option 2 CASE (null executionRunId) adopts.
+      const result = await svc.assertCheckoutOwner(issueId, agentId, actorRunId);
+
+      expect(result.checkoutRunId).toBe(actorRunId);
+    });
+
+    it("rejects cross-agent adoption even when executionRunId is null", async () => {
+      const otherAgentId = randomUUID();
+      const { issueId, companyId, actorRunId } = await seedStaleCheckoutScenario({
+        checkoutRunStatus: "succeeded",
+        executionRunId: null,
+      });
+      // Register the other agent
+      await db.insert(agents).values({
+        id: otherAgentId,
+        companyId,
+        name: "OtherAgent",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+
+      await expect(
+        svc.assertCheckoutOwner(issueId, otherAgentId, actorRunId),
+      ).rejects.toThrow("Issue run ownership conflict");
+    });
+
+    it("rejects when executionRunId is non-null and checkoutRunId belongs to live run (live checkout protected)", async () => {
+      const r1RunId = randomUUID();
+      const { issueId, agentId, actorRunId } = await seedStaleCheckoutScenario({
+        checkoutRunStatus: "running", // R1 is live — not stale
+        executionRunId: r1RunId,
+        overrideCheckoutRunId: r1RunId,
+      });
+
+      await expect(
+        svc.assertCheckoutOwner(issueId, agentId, actorRunId),
+      ).rejects.toThrow("Issue run ownership conflict");
+    });
+  },
+);
