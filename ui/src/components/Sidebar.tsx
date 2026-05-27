@@ -46,7 +46,7 @@ export function Sidebar() {
     queryKey: queryKeys.liveRuns(selectedCompanyId!),
     queryFn: () => heartbeatsApi.liveRunsForCompany(selectedCompanyId!),
     enabled: !!selectedCompanyId,
-    refetchInterval: isWsHealthy ? false : (isPageVisible ? 10_000 : false),
+    refetchInterval: isWsHealthy ? false : (isPageVisible ? 30_000 : false),
     refetchIntervalInBackground: false,
   });
   const liveRunCount = liveRuns?.length ?? 0;

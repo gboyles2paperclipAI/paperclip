@@ -796,6 +796,7 @@ export function Inbox() {
     queryKey: queryKeys.dashboard(selectedCompanyId!),
     queryFn: () => dashboardApi.summary(selectedCompanyId!),
     enabled: !!selectedCompanyId,
+    staleTime: 30_000,
   });
 
   const { data: issues, isLoading: isIssuesLoading } = useQuery({
@@ -806,6 +807,7 @@ export function Inbox() {
         limit: INBOX_ISSUE_LIST_LIMIT,
       }),
     enabled: !!selectedCompanyId,
+    staleTime: 30_000,
   });
   const {
     data: mineIssuesRaw = [],
@@ -821,6 +823,7 @@ export function Inbox() {
         limit: INBOX_ISSUE_LIST_LIMIT,
       }),
     enabled: !!selectedCompanyId,
+    staleTime: 30_000,
   });
   const {
     data: touchedIssuesRaw = [],
@@ -835,6 +838,7 @@ export function Inbox() {
         limit: INBOX_ISSUE_LIST_LIMIT,
       }),
     enabled: !!selectedCompanyId,
+    staleTime: 30_000,
   });
 
   const { data: heartbeatRuns, isLoading: isRunsLoading } = useQuery({

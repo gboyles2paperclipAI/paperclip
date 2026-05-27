@@ -19,6 +19,8 @@ import { heartbeatsApi } from "../api/heartbeats";
 import { SIDEBAR_SCROLL_RESET_STATE } from "../lib/navigation-scroll";
 import { queryKeys } from "../lib/queryKeys";
 import { cn, agentRouteRef, agentUrl } from "../lib/utils";
+import { useLiveUpdatesHealth } from "../context/LiveUpdatesProvider";
+import { usePageVisible } from "../lib/issue-run-polling";
 import { useAgentOrder } from "../hooks/useAgentOrder";
 import {
   AGENT_SORT_MODE_UPDATED_EVENT,
@@ -197,6 +199,8 @@ export function SidebarAgents() {
   const [pendingAgentIds, setPendingAgentIds] = useState<Set<string>>(() => new Set());
   const queryClient = useQueryClient();
   const { selectedCompanyId } = useCompany();
+  const { isWsHealthy } = useLiveUpdatesHealth();
+  const isPageVisible = usePageVisible();
   const { openNewAgent } = useDialogActions();
   const { isMobile, setSidebarOpen } = useSidebar();
   const { pushToast } = useToastActions();
@@ -216,7 +220,7 @@ export function SidebarAgents() {
     queryKey: queryKeys.liveRuns(selectedCompanyId!),
     queryFn: () => heartbeatsApi.liveRunsForCompany(selectedCompanyId!),
     enabled: !!selectedCompanyId,
-    refetchInterval: 10_000,
+    refetchInterval: isWsHealthy ? false : (isPageVisible ? 30_000 : false),
     refetchIntervalInBackground: false,
   });
 

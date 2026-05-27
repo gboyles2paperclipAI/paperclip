@@ -634,8 +634,8 @@ function invalidateHeartbeatQueries(
 
   const agentId = readString(payload.agentId);
   if (agentId) {
-    queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentId) });
-    queryClient.invalidateQueries({ queryKey: queryKeys.heartbeats(companyId, agentId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentId), refetchType: "none" });
+    queryClient.invalidateQueries({ queryKey: queryKeys.heartbeats(companyId, agentId), refetchType: "none" });
   }
 }
 
@@ -839,11 +839,11 @@ function handleLiveEvent(
   }
 
   if (event.type === "agent.status") {
-    queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(expectedCompanyId) });
-    queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(expectedCompanyId) });
-    queryClient.invalidateQueries({ queryKey: queryKeys.org(expectedCompanyId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(expectedCompanyId), refetchType: "none" });
+    queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(expectedCompanyId), refetchType: "none" });
+    queryClient.invalidateQueries({ queryKey: queryKeys.org(expectedCompanyId), refetchType: "none" });
     const agentId = readString(payload.agentId);
-    if (agentId) queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentId) });
+    if (agentId) queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentId), refetchType: "none" });
     const toast = buildAgentStatusToast(payload, nameOf, queryClient, expectedCompanyId);
     if (
       toast &&
