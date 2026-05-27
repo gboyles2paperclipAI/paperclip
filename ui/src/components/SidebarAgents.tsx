@@ -217,6 +217,7 @@ export function SidebarAgents() {
     queryFn: () => heartbeatsApi.liveRunsForCompany(selectedCompanyId!),
     enabled: !!selectedCompanyId,
     refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
   });
 
   const liveCountByAgent = useMemo(() => {

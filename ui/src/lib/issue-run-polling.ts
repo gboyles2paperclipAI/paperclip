@@ -33,5 +33,5 @@ export function resolveIssueRunPollInterval({
   if (wsHealthy) return false;
   if (!isPageVisible) return false;
   if (hasLiveRuns) return ISSUE_RUN_POLL_MS;
-  return ISSUE_RUN_POLL_MS;
+  return false;
 }

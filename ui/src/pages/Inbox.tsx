@@ -31,6 +31,8 @@ import {
   type IssueFilterState,
 } from "../lib/issue-filters";
 import { collectLiveIssueIds } from "../lib/liveIssueIds";
+import { usePageVisible } from "../lib/issue-run-polling";
+import { useLiveUpdatesHealth } from "../context/LiveUpdatesProvider";
 import { formatAssigneeUserLabel } from "../lib/assignees";
 import { buildCompanyUserLabelMap, buildCompanyUserProfileMap } from "../lib/company-members";
 import {
@@ -662,6 +664,8 @@ function JoinRequestInboxRow({
 
 export function Inbox() {
   const { selectedCompanyId } = useCompany();
+  const isPageVisible = usePageVisible();
+  const { isWsHealthy } = useLiveUpdatesHealth();
   const { setBreadcrumbs } = useBreadcrumbs();
   const { openNewIssue } = useDialogActions();
   const { isMobile } = useSidebar();
@@ -842,7 +846,8 @@ export function Inbox() {
     queryKey: queryKeys.liveRuns(selectedCompanyId!),
     queryFn: () => heartbeatsApi.liveRunsForCompany(selectedCompanyId!),
     enabled: !!selectedCompanyId,
-    refetchInterval: 5000,
+    refetchInterval: isWsHealthy ? false : (isPageVisible ? 15_000 : false),
+    refetchIntervalInBackground: false,
   });
   const liveIssueIds = useMemo(() => collectLiveIssueIds(liveRuns), [liveRuns]);
   const { data: companyMembers } = useQuery({

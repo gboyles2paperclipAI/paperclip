@@ -4,6 +4,11 @@ import { Link, useLocation, useNavigate, useNavigationType, useParams } from "@/
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient, type InfiniteData, type QueryClient } from "@tanstack/react-query";
 import { ApiError } from "../api/client";
 import { issuesApi } from "../api/issues";
+import {
+  fetchAndStoreBoardKey,
+  getStoredBoardKey,
+  isLocalImplicitBoardAuthError,
+} from "../lib/local-board-auth";
 import { approvalsApi } from "../api/approvals";
 import { activityApi, type RunForIssue } from "../api/activity";
 import { heartbeatsApi, type ActiveRunForIssue, type LiveRunForIssue } from "../api/heartbeats";
@@ -34,6 +39,7 @@ import {
 } from "../lib/issueDetailBreadcrumb";
 import { resolveIssueActiveRun, shouldTrackIssueActiveRun } from "../lib/issueActiveRun";
 import { usePageVisible, ISSUE_RUN_POLL_MS, ISSUE_RUN_BACKGROUND_POLL_MS } from "../lib/issue-run-polling";
+import { useLiveUpdatesHealth } from "../context/LiveUpdatesProvider";
 import { getIssueDetailQueryOptions } from "../lib/issueDetailCache";
 import {
   hasBlockingShortcutDialog,
@@ -740,6 +746,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   resumeFromBacklogPending,
 }: IssueDetailChatTabProps) {
   const isPageVisible = usePageVisible();
+  const { isWsHealthy } = useLiveUpdatesHealth();
   const { data: activity } = useQuery({
     queryKey: queryKeys.issues.activity(issueId),
     queryFn: () => activityApi.forIssue(issueId),
@@ -749,8 +756,8 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     queryKey: queryKeys.issues.liveRuns(issueId),
     queryFn: () => heartbeatsApi.liveRunsForIssue(issueId),
     // Poll only as a WS fallback; WS events invalidate immediately when healthy.
-    // Background tabs back off to avoid hammering the API.
-    refetchInterval: isPageVisible ? ISSUE_RUN_POLL_MS : ISSUE_RUN_BACKGROUND_POLL_MS,
+    // Background tabs suppress polling entirely.
+    refetchInterval: isWsHealthy ? false : (isPageVisible ? ISSUE_RUN_POLL_MS : false),
     refetchIntervalInBackground: false,
     placeholderData: keepPreviousDataForSameQueryTail<LiveRunForIssue[]>(issueId),
   });
@@ -760,7 +767,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     queryKey: queryKeys.issues.activeRun(issueId),
     queryFn: () => heartbeatsApi.activeRunForIssue(issueId),
     enabled: !!executionRunId || issueStatus === "in_progress",
-    refetchInterval: liveRunCount > 0 ? false : (isPageVisible ? ISSUE_RUN_POLL_MS : ISSUE_RUN_BACKGROUND_POLL_MS),
+    refetchInterval: liveRunCount > 0 ? false : (isWsHealthy ? false : (isPageVisible ? ISSUE_RUN_POLL_MS : false)),
     refetchIntervalInBackground: false,
     placeholderData: keepPreviousDataForSameQueryTail<ActiveRunForIssue | null>(issueId),
   });
@@ -1242,6 +1249,7 @@ export function IssueDetail() {
   const { pushToast } = useToastActions();
   const { isMobile } = useSidebar();
   const isPageVisible = usePageVisible();
+  const { isWsHealthy } = useLiveUpdatesHealth();
   const [moreOpen, setMoreOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [mobilePropsOpen, setMobilePropsOpen] = useState(false);
@@ -1349,7 +1357,7 @@ export function IssueDetail() {
     queryKey: queryKeys.issues.liveRuns(issueId!),
     queryFn: () => heartbeatsApi.liveRunsForIssue(issueId!),
     enabled: !!issueId,
-    refetchInterval: isPageVisible ? ISSUE_RUN_POLL_MS : ISSUE_RUN_BACKGROUND_POLL_MS,
+    refetchInterval: isWsHealthy ? false : (isPageVisible ? ISSUE_RUN_POLL_MS : false),
     refetchIntervalInBackground: false,
     select: (runs) => runs.length,
     placeholderData: keepPreviousDataForSameQueryTail<LiveRunForIssue[]>(issueId ?? "pending"),
@@ -1359,7 +1367,7 @@ export function IssueDetail() {
     queryKey: queryKeys.issues.activeRun(issueId!),
     queryFn: () => heartbeatsApi.activeRunForIssue(issueId!),
     enabled: !!issueId && (!!issue?.executionRunId || issue?.status === "in_progress"),
-    refetchInterval: liveRunCount > 0 ? false : (isPageVisible ? ISSUE_RUN_POLL_MS : ISSUE_RUN_BACKGROUND_POLL_MS),
+    refetchInterval: liveRunCount > 0 ? false : (isWsHealthy ? false : (isPageVisible ? ISSUE_RUN_POLL_MS : false)),
     refetchIntervalInBackground: false,
     select: (run) => !!run,
     placeholderData: keepPreviousDataForSameQueryTail<ActiveRunForIssue | null>(issueId ?? "pending"),
@@ -1401,7 +1409,9 @@ export function IssueDetail() {
     queryKey: resolvedCompanyId ? queryKeys.liveRuns(resolvedCompanyId) : ["live-runs", "pending"],
     queryFn: () => heartbeatsApi.liveRunsForCompany(resolvedCompanyId!),
     enabled: !!resolvedCompanyId,
-    refetchInterval: 5000,
+    // WS events keep this stale for immediate refresh; fallback poll guards background tabs.
+    refetchInterval: isPageVisible ? 15_000 : false,
+    refetchIntervalInBackground: false,
     placeholderData: keepPreviousDataForSameQueryTail<LiveRunForIssue[]>(resolvedCompanyId ?? "pending"),
   });
 
@@ -2108,13 +2118,24 @@ export function IssueDetail() {
     },
   });
   const acceptInteraction = useMutation({
-    mutationFn: ({
+    mutationFn: async ({
       interaction,
       selectedClientKeys,
     }: {
       interaction: ActionableIssueThreadInteraction;
       selectedClientKeys?: string[];
-    }) => issuesApi.acceptInteraction(issueId!, interaction.id, { selectedClientKeys }),
+    }) => {
+      const opts = { boardKey: getStoredBoardKey() ?? undefined };
+      try {
+        return await issuesApi.acceptInteraction(issueId!, interaction.id, { selectedClientKeys }, opts);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 403 && isLocalImplicitBoardAuthError(err)) {
+          const boardKey = await fetchAndStoreBoardKey();
+          return await issuesApi.acceptInteraction(issueId!, interaction.id, { selectedClientKeys }, { boardKey });
+        }
+        throw err;
+      }
+    },
     onSuccess: (interaction) => {
       upsertInteractionInCache(interaction);
       if (interaction.kind === "suggest_tasks" && resolvedCompanyId && issue?.id) {
@@ -2146,8 +2167,18 @@ export function IssueDetail() {
     },
   });
   const rejectInteraction = useMutation({
-    mutationFn: ({ interaction, reason }: { interaction: ActionableIssueThreadInteraction; reason?: string }) =>
-      issuesApi.rejectInteraction(issueId!, interaction.id, reason),
+    mutationFn: async ({ interaction, reason }: { interaction: ActionableIssueThreadInteraction; reason?: string }) => {
+      const opts = { boardKey: getStoredBoardKey() ?? undefined };
+      try {
+        return await issuesApi.rejectInteraction(issueId!, interaction.id, reason, opts);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 403 && isLocalImplicitBoardAuthError(err)) {
+          const boardKey = await fetchAndStoreBoardKey();
+          return await issuesApi.rejectInteraction(issueId!, interaction.id, reason, { boardKey });
+        }
+        throw err;
+      }
+    },
     onSuccess: (interaction) => {
       upsertInteractionInCache(interaction);
       invalidateIssueDetail();
