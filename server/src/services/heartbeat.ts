@@ -1792,6 +1792,14 @@ function isCheckoutRejectedBlockedError(error: unknown): boolean {
   );
 }
 
+function isCheckoutTerminalTransitionError(error: unknown): boolean {
+  return (
+    error instanceof HttpError &&
+    error.status === 409 &&
+    /Cannot transition terminal issue from (done|cancelled) to in_progress/.test(error.message)
+  );
+}
+
 function deriveCommentId(
   contextSnapshot: Record<string, unknown> | null | undefined,
   payload: Record<string, unknown> | null | undefined,
@@ -4935,6 +4943,26 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return { outcome: "not_applicable" as const, queuedRun: null };
     }
 
+    const issueStatus = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(and(eq(issues.companyId, run.companyId), eq(issues.id, issueId)))
+      .then((rows) => rows[0]?.status ?? null);
+    if (issueStatus === "done" || issueStatus === "cancelled") {
+      await patchRunIssueCommentStatus(run.id, {
+        issueCommentStatus: "not_applicable",
+        issueCommentSatisfiedByCommentId: null,
+        issueCommentRetryQueuedAt: null,
+      });
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: `Run ended without an issue comment; follow-up wake suppressed because issue is terminal (${issueStatus})`,
+      });
+      return { outcome: "not_applicable" as const, queuedRun: null };
+    }
+
     if (await hasDeferredIssueCommentWake(run.companyId, issueId, run.agentId)) {
       await patchRunIssueCommentStatus(run.id, {
         issueCommentStatus: "not_applicable",
@@ -6416,6 +6444,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           details: { issueId, currentStatus: issue.status },
         };
       }
+      if (
+        wakeCommentId &&
+        wakeReason !== "issue_commented" &&
+        wakeReason !== "issue_reopened_via_comment"
+      ) {
+        return {
+          stale: true,
+          errorCode: "issue_terminal_status",
+          reason:
+            `Cancelled because issue reached terminal status (${issue.status}) and this comment wake does not request reopen`,
+          details: { issueId, currentStatus: issue.status, wakeReason },
+        };
+      }
     }
 
     if (retryReason === MAX_TURN_CONTINUATION_RETRY_REASON && issue.status !== "in_progress") {
@@ -7179,10 +7220,40 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             error: reason,
           });
           if (cancelledRun) {
-            await appendRunEvent(cancelledRun, seq++, {
+            await appendRunEvent(cancelledRun, 0, {
               eventType: "lifecycle",
               stream: "system",
               level: "warn",
+              message: reason,
+              payload: { issueId },
+            });
+            await releaseIssueExecutionAndPromote(cancelledRun);
+          }
+          await finalizeAgentStatus(agent.id, "cancelled");
+          return;
+        }
+        if (isCheckoutTerminalTransitionError(error)) {
+          context[PAPERCLIP_HARNESS_CHECKOUT_KEY] = false;
+          const now = new Date();
+          const reason = "Cancelled because issue reached terminal status before checkout";
+          const cancelledRun = await setRunStatus(run.id, "cancelled", {
+            error: reason,
+            errorCode: "issue_terminal_status",
+            finishedAt: now,
+            resultJson: mergeRunStopMetadataForAgent(agent, "cancelled", {
+              errorCode: "issue_terminal_status",
+              errorMessage: reason,
+            }),
+          });
+          await setWakeupStatus(run.wakeupRequestId, "skipped", {
+            finishedAt: now,
+            error: reason,
+          });
+          if (cancelledRun) {
+            await appendRunEvent(cancelledRun, await nextRunEventSeq(cancelledRun.id), {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "info",
               message: reason,
               payload: { issueId },
             });
@@ -8335,6 +8406,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
       }
       await finalizeAgentStatus(agent.id, outcome);
+      await startNextQueuedRunForAgent(agent.id);
     } catch (err) {
       const message = redactCurrentUserText(
         err instanceof Error ? err.message : "Unknown adapter failure",
@@ -8413,6 +8485,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
 
       await finalizeAgentStatus(agent.id, "failed");
+      await startNextQueuedRunForAgent(agent.id);
     }
     } catch (outerErr) {
           // Setup code before adapter.execute threw (e.g. ensureRuntimeState, resolveWorkspaceForRun).
@@ -8456,6 +8529,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           // Ensure the agent is not left stuck in "running" if the inner catch handler's
           // DB calls threw (e.g. a transient DB error in finalizeAgentStatus).
           await finalizeAgentStatus(run.agentId, "failed").catch(() => undefined);
+          await startNextQueuedRunForAgent(run.agentId).catch(() => undefined);
         } finally {
           const latestRun = await getRun(run.id).catch(() => null);
           await releaseEnvironmentLeasesForRun({
@@ -8560,6 +8634,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
         if (!deferred) break;
 
+        const latestIssueState = await tx
+          .select({
+            id: issues.id,
+            identifier: issues.identifier,
+            status: issues.status,
+            executionRunId: issues.executionRunId,
+          })
+          .from(issues)
+          .where(and(eq(issues.id, issue.id), eq(issues.companyId, issue.companyId)))
+          .then((rows) => rows[0] ?? null);
+        if (!latestIssueState) break;
+        issue = {
+          ...issue,
+          identifier: latestIssueState.identifier,
+          status: latestIssueState.status,
+          executionRunId: latestIssueState.executionRunId,
+        };
+
         const deferredAgent = await tx
           .select()
           .from(agents)
@@ -8622,28 +8714,57 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           };
         }
         const deferredCommentIds = extractWakeCommentIds(deferredContextSeed);
+        const hasDeferredCommentContext = Boolean(deriveCommentId(deferredContextSeed, deferredPayload));
+        const hasDeferredCommentSignal =
+          hasDeferredCommentContext ||
+          deferredCommentIds.length > 0 ||
+          Boolean(readNonEmptyString(deferredContextSeed.commentId)) ||
+          Boolean(readNonEmptyString(deferredContextSeed.wakeCommentId)) ||
+          Boolean(readNonEmptyString(deferredPayload.commentId));
         const deferredWakeReason = readNonEmptyString(deferredContextSeed.wakeReason);
         // Only human/comment-reopen interactions should revive completed issues;
         // system follow-ups such as retry or cleanup wakes must not reopen closed work.
+        const hasExplicitTerminalReopenIntent =
+          deferred.requestedByActorType === "user" ||
+          deferredWakeReason === "issue_reopened_via_comment";
         const shouldReopenDeferredCommentWake =
-          deferredCommentIds.length > 0 &&
+          hasDeferredCommentSignal &&
           (issue.status === "done" || issue.status === "cancelled") &&
-          (
-            deferred.requestedByActorType === "user" ||
-            deferredWakeReason === "issue_reopened_via_comment"
-          );
+          hasExplicitTerminalReopenIntent;
+        const shouldSkipTerminalDeferredCommentWake =
+          hasDeferredCommentSignal &&
+          (issue.status === "done" || issue.status === "cancelled") &&
+          !shouldReopenDeferredCommentWake;
         let reopenedActivity: LogActivityInput | null = null;
+
+        if (shouldSkipTerminalDeferredCommentWake) {
+          await tx
+            .update(agentWakeupRequests)
+            .set({
+              status: "skipped",
+              finishedAt: new Date(),
+              error: "Deferred comment wake skipped because issue is already terminal and no explicit reopen was requested",
+              updatedAt: new Date(),
+            })
+            .where(eq(agentWakeupRequests.id, deferred.id));
+          continue;
+        }
 
         if (shouldReopenDeferredCommentWake) {
           const reopenedFromStatus = issue.status;
-          const reopenedIssue = await issuesSvc.update(
-            issue.id,
-            {
-              status: "todo",
+          const reopenedIssue = await tx
+            .update(issues)
+            .set({
+              status: "in_progress",
               executionState: null,
-            },
-            tx,
-          );
+              completedAt: null,
+              cancelledAt: null,
+              startedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(eq(issues.id, issue.id))
+            .returning()
+            .then((rows) => rows[0] ?? null);
           if (reopenedIssue) {
             issue = {
               ...issue,
@@ -8664,7 +8785,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               entityType: "issue",
               entityId: issue.id,
               details: {
-                status: "todo",
+                status: "in_progress",
                 reopened: true,
                 reopenedFrom: reopenedFromStatus,
                 source: "deferred_comment_wake",
@@ -9342,8 +9463,47 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           issuePriority: issue.priority,
           wakeReason,
         });
+        const isSystemAssignmentWake =
+          wakeReason === "issue_assigned" && source === "assignment" && triggerDetail === "system";
 
-        if (!activeExecutionRun && issue.status === "blocked" && !bypassSuppression) {
+        if (isSystemAssignmentWake && issue.priority !== "critical") {
+          const assignmentSuppressionThreshold = new Date(now.getTime() - BLOCKED_ISSUE_WAKE_SUPPRESSION_MS);
+          const recentSystemAssignmentRun = await tx
+            .select({ id: heartbeatRuns.id })
+            .from(heartbeatRuns)
+            .where(
+              and(
+                eq(heartbeatRuns.companyId, issue.companyId),
+                eq(heartbeatRuns.agentId, agentId),
+                inArray(heartbeatRuns.status, [...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES]),
+                sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+                sql`${heartbeatRuns.contextSnapshot} ->> 'wakeReason' = 'issue_assigned'`,
+                gte(heartbeatRuns.createdAt, assignmentSuppressionThreshold),
+              ),
+            )
+            .orderBy(desc(heartbeatRuns.createdAt))
+            .limit(1)
+            .then((rows) => rows[0] ?? null);
+
+          if (recentSystemAssignmentRun) {
+            await tx.insert(agentWakeupRequests).values({
+              companyId: agent.companyId,
+              agentId,
+              source,
+              triggerDetail,
+              reason: "issue_blocked_duplicate_suppressed",
+              payload,
+              status: "skipped",
+              requestedByActorType: opts.requestedByActorType ?? null,
+              requestedByActorId: opts.requestedByActorId ?? null,
+              idempotencyKey: opts.idempotencyKey ?? null,
+              finishedAt: now,
+            });
+            return { kind: "skipped" as const };
+          }
+        }
+
+        if (issue.status === "blocked" && !bypassSuppression) {
           const blockedSuppressionThreshold = new Date(now.getTime() - BLOCKED_ISSUE_WAKE_SUPPRESSION_MS);
           const recentlySuppressedBlockedWake = await tx
             .select({ id: agentWakeupRequests.id })
@@ -9353,7 +9513,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 eq(agentWakeupRequests.companyId, issue.companyId),
                 eq(agentWakeupRequests.agentId, agentId),
                 sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
-                gte(agentWakeupRequests.requestedAt, blockedSuppressionThreshold),
+                or(
+                  gte(agentWakeupRequests.requestedAt, blockedSuppressionThreshold),
+                  gte(agentWakeupRequests.createdAt, blockedSuppressionThreshold),
+                ),
               ),
             )
             .orderBy(desc(agentWakeupRequests.requestedAt))
@@ -9379,6 +9542,46 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
 
         if (activeExecutionRun) {
+          const blockedSuppressionThreshold = new Date(now.getTime() - BLOCKED_ISSUE_WAKE_SUPPRESSION_MS);
+          const hasRecentSameIssueWake = await tx
+            .select({ id: agentWakeupRequests.id })
+            .from(agentWakeupRequests)
+            .where(
+              and(
+                eq(agentWakeupRequests.companyId, issue.companyId),
+                eq(agentWakeupRequests.agentId, agentId),
+                sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+                or(
+                  gte(agentWakeupRequests.requestedAt, blockedSuppressionThreshold),
+                  gte(agentWakeupRequests.createdAt, blockedSuppressionThreshold),
+                ),
+              ),
+            )
+            .orderBy(desc(agentWakeupRequests.createdAt))
+            .limit(1)
+            .then((rows) => rows[0] ?? null);
+          const shouldSuppressBlockedDuplicateWake =
+            !bypassSuppression &&
+            wakeReason === "issue_assigned" &&
+            triggerDetail === "system" &&
+            hasRecentSameIssueWake;
+          if (shouldSuppressBlockedDuplicateWake) {
+            await tx.insert(agentWakeupRequests).values({
+              companyId: agent.companyId,
+              agentId,
+              source,
+              triggerDetail,
+              reason: "issue_blocked_duplicate_suppressed",
+              payload,
+              status: "skipped",
+              requestedByActorType: opts.requestedByActorType ?? null,
+              requestedByActorId: opts.requestedByActorId ?? null,
+              idempotencyKey: opts.idempotencyKey ?? null,
+              finishedAt: now,
+            });
+            return { kind: "skipped" as const };
+          }
+
           const executionAgent = await tx
             .select({ name: agents.name })
             .from(agents)
@@ -9587,7 +9790,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         // doesn't start it). It will be stamped in claimQueuedRun() once the run
         // transitions to "running" — Fix A (lazy locking).
 
-        return { kind: "queued" as const, run: newRun };
+        return {
+          kind: "queued" as const,
+          run: newRun,
+          startImmediately: !(issue.status === "blocked" && !bypassSuppression),
+        };
       });
 
       if (outcome.kind === "deferred" || outcome.kind === "skipped") return null;
@@ -9609,7 +9816,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         },
       });
 
-      await startNextQueuedRunForAgent(agent.id);
+      if (outcome.startImmediately !== false) {
+        await startNextQueuedRunForAgent(agent.id);
+      }
       return newRun;
     }
 
