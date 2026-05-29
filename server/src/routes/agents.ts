@@ -1,8 +1,4 @@
 import { Router, type Request, type Response } from "express";
-
-const LIVE_RUNS_CACHE_TTL_MS = 5_000;
-interface LiveRunsCacheEntry { data: unknown; expiresAt: number; }
-const liveRunsCache = new Map<string, LiveRunsCacheEntry>();
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
@@ -103,6 +99,24 @@ import {
 import { getTelemetryClient } from "../telemetry.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { recoveryService } from "../services/recovery/service.js";
+
+const LIVE_RUNS_CACHE_TTL_MS = 5_000;
+const LIVE_RUNS_CACHE_MAX_SIZE = 500;
+interface LiveRunsCacheEntry { data: unknown; expiresAt: number; }
+const liveRunsCache = new Map<string, LiveRunsCacheEntry>();
+
+function setLiveRunsCache(key: string, entry: LiveRunsCacheEntry) {
+  if (liveRunsCache.size >= LIVE_RUNS_CACHE_MAX_SIZE) {
+    const now = Date.now();
+    for (const [k, v] of liveRunsCache) {
+      if (now >= v.expiresAt) liveRunsCache.delete(k);
+    }
+    while (liveRunsCache.size >= LIVE_RUNS_CACHE_MAX_SIZE) {
+      liveRunsCache.delete(liveRunsCache.keys().next().value!);
+    }
+  }
+  liveRunsCache.set(key, entry);
+}
 
 const RUN_LOG_DEFAULT_LIMIT_BYTES = 256_000;
 const RUN_LOG_MAX_LIMIT_BYTES = 1024 * 1024;
@@ -3192,7 +3206,7 @@ export function agentRoutes(
         ...run,
         outputSilence: await heartbeat.buildRunOutputSilence(run),
       })));
-      liveRunsCache.set(cacheKey, { data: paddedResult, expiresAt: nowMs + LIVE_RUNS_CACHE_TTL_MS });
+      setLiveRunsCache(cacheKey, { data: paddedResult, expiresAt: nowMs + LIVE_RUNS_CACHE_TTL_MS });
       res.json(paddedResult);
       return;
     }
@@ -3201,7 +3215,7 @@ export function agentRoutes(
       ...run,
       outputSilence: await heartbeat.buildRunOutputSilence(run),
     })));
-    liveRunsCache.set(cacheKey, { data: liveResult, expiresAt: nowMs + LIVE_RUNS_CACHE_TTL_MS });
+    setLiveRunsCache(cacheKey, { data: liveResult, expiresAt: nowMs + LIVE_RUNS_CACHE_TTL_MS });
     res.json(liveResult);
   });
 
