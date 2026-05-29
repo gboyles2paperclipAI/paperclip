@@ -98,6 +98,15 @@ function assertTransition(from: string, to: string) {
   }
 }
 
+function isDeadlockError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  // PostgresError (from postgres.js) surfaces the error code directly on the error
+  // object (via Object.assign), not on error.cause. We check both forms to be safe.
+  if ("code" in error && (error as unknown as { code?: string }).code === "40P01") return true;
+  const cause = error.cause;
+  return !!cause && typeof cause === "object" && "code" in cause && (cause as { code?: string }).code === "40P01";
+}
+
 function applyStatusSideEffects(
   status: string | undefined,
   patch: Partial<typeof issues.$inferInsert>,
@@ -4696,7 +4705,6 @@ export function issueService(db: Db) {
       if (!issueCompany) throw notFound("Issue not found");
       await assertAssignableAgent(issueCompany.companyId, agentId);
 
-      const now = new Date();
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(issueCompany.companyId, id);
       if (
         activePauseHold &&
@@ -4711,14 +4719,19 @@ export function issueService(db: Db) {
         });
       }
 
-      await clearExecutionRunIfTerminal(id);
+      // Retry on PostgreSQL deadlock (40P01): concurrent transactions on issues+agents+heartbeat_runs
+      // can form a cycle through index/page locks. Two retries with jitter break the cycle.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await clearExecutionRunIfTerminal(id);
 
-      const dependencyReadiness = await listIssueDependencyReadinessMap(db, issueCompany.companyId, [id]);
-      const unresolvedBlockerIssueIds = dependencyReadiness.get(id)?.unresolvedBlockerIssueIds ?? [];
-      if (unresolvedBlockerIssueIds.length > 0) {
-        throw unprocessable("Issue is blocked by unresolved blockers", { unresolvedBlockerIssueIds });
-      }
-      return db.transaction(async (tx) => {
+          const dependencyReadiness = await listIssueDependencyReadinessMap(db, issueCompany.companyId, [id]);
+          const unresolvedBlockerIssueIds = dependencyReadiness.get(id)?.unresolvedBlockerIssueIds ?? [];
+          if (unresolvedBlockerIssueIds.length > 0) {
+            throw unprocessable("Issue is blocked by unresolved blockers", { unresolvedBlockerIssueIds });
+          }
+          const now = new Date();
+          return await db.transaction(async (tx) => {
         await tx.execute(
           sql`select ${agents.id} from ${agents}
               where ${and(eq(agents.id, agentId), eq(agents.companyId, issueCompany.companyId))}
@@ -4861,7 +4874,15 @@ export function issueService(db: Db) {
           checkoutRunId: current.checkoutRunId,
           executionRunId: current.executionRunId,
         });
-      });
+          });
+        } catch (error) {
+          if (attempt < 2 && isDeadlockError(error)) {
+            await new Promise(resolve => setTimeout(resolve, Math.round(Math.random() * 50)));
+            continue;
+          }
+          throw error;
+        }
+      }
     },
 
     assertCheckoutOwner: async (id: string, actorAgentId: string, actorRunId: string | null) => {
