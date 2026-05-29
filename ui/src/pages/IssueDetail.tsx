@@ -389,6 +389,24 @@ function ActorIdentity({ evt, agentMap, userProfileMap }: { evt: ActivityEvent; 
   return <Identity name={id || "Unknown"} size="sm" />;
 }
 
+export function resolveStageParticipantLabel(
+  participant: Issue["executionState"] extends infer T
+    ? T extends { currentParticipant: infer P } | null | undefined
+      ? P
+      : never
+    : never,
+  agentMap: Map<string, Agent>,
+  userProfileMap?: Map<string, import("../lib/company-members").CompanyUserProfile> | null,
+) {
+  if (!participant) return "Approver";
+  if (participant.type === "agent") {
+    const agentName = participant.agentId ? agentMap.get(participant.agentId)?.name : null;
+    return agentName ?? "Assigned agent approver";
+  }
+  const userLabel = participant.userId ? userProfileMap?.get(participant.userId)?.label : null;
+  return userLabel ?? "Board approver";
+}
+
 function IssueSectionSkeleton({
   titleWidth = "w-28",
   rows = 3,
@@ -1108,6 +1126,15 @@ function IssueDetailActivityTab({
       || issueTreeCostSummary.issueCount > 1);
   const shouldShowCostSummary =
     (linkedRuns && linkedRuns.length > 0) || hasIssueTreeCost;
+  const isAwaitingApproval = issue.executionState?.currentStageType === "approval";
+  const approvalParticipantLabel = resolveStageParticipantLabel(
+    issue.executionState?.currentParticipant ?? null,
+    agentMap,
+    userProfileMap,
+  );
+  const actionableApproval = linkedApprovals?.find(
+    (approval) => approval.status === "pending" || approval.status === "revision_requested",
+  ) ?? null;
 
   if (initialLoading) {
     return <IssueSectionSkeleton titleWidth="w-20" rows={4} />;
@@ -1115,6 +1142,40 @@ function IssueDetailActivityTab({
 
   return (
     <>
+      {isAwaitingApproval ? (
+        <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-100">
+          <div className="font-medium">Awaiting Approval</div>
+          <div className="mt-0.5 text-xs text-amber-800/90 dark:text-amber-200/90">
+            Current approver: {approvalParticipantLabel}
+          </div>
+          {actionableApproval ? (
+            <div className="mt-2 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                className="bg-green-700 text-white hover:bg-green-600"
+                onClick={() => onApprovalAction(actionableApproval.id, "approve")}
+                disabled={pendingApprovalAction?.approvalId === actionableApproval.id}
+              >
+                {pendingApprovalAction?.approvalId === actionableApproval.id
+                  && pendingApprovalAction.action === "approve"
+                  ? "Approving..."
+                  : "Approve"}
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={() => onApprovalAction(actionableApproval.id, "reject")}
+                disabled={pendingApprovalAction?.approvalId === actionableApproval.id}
+              >
+                {pendingApprovalAction?.approvalId === actionableApproval.id
+                  && pendingApprovalAction.action === "reject"
+                  ? "Rejecting..."
+                  : "Reject"}
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {shouldShowCostSummary && (
         <div className="mb-3 px-3 py-2 rounded-lg border border-border">
           <div className="text-sm font-medium text-muted-foreground mb-1">Cost Summary</div>
@@ -1411,7 +1472,8 @@ export function IssueDetail() {
     queryFn: () => heartbeatsApi.liveRunsForCompany(resolvedCompanyId!),
     enabled: !!resolvedCompanyId,
     // WS events keep this stale for immediate refresh; fallback poll guards background tabs.
-    refetchInterval: isWsHealthy ? false : (isPageVisible ? 15_000 : false),
+    // 30s aligns with Sidebar/Issues.tsx so React Query uses one shared interval (not the lower of competing subscribers).
+    refetchInterval: isWsHealthy ? false : (isPageVisible ? 30_000 : false),
     refetchIntervalInBackground: false,
     placeholderData: keepPreviousDataForSameQueryTail<LiveRunForIssue[]>(resolvedCompanyId ?? "pending"),
   });
