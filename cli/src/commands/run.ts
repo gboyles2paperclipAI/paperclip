@@ -45,8 +45,9 @@ export async function runCommand(opts: RunOptions): Promise<void> {
 
   // ── Single-runtime lock ───────────────────────────────────────────────────
   // Prevent multiple `paperclipai run` processes for the same instance.
+  let runLock;
   try {
-    acquireRunLock(paths.instanceRoot);
+    runLock = acquireRunLock(paths.instanceRoot);
   } catch (err) {
     p.log.error(err instanceof Error ? err.message : String(err));
     process.exit(1);

@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -115,7 +115,7 @@ export function checkRunLock(instanceRoot: string): number | null {
  */
 export function isSystemdServiceActive(serviceName: string): boolean {
   try {
-    execSync(`systemctl is-active --quiet ${serviceName}`, { stdio: "ignore" });
+    execFileSync("systemctl", ["is-active", "--quiet", serviceName], { stdio: "ignore" });
     return true;
   } catch {
     return false;
