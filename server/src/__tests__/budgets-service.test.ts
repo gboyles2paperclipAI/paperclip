@@ -308,4 +308,40 @@ describe("budgetService", () => {
       }),
     );
   });
+
+  it("blocks a new run when an issue has exceeded the $20 per-issue budget cap", async () => {
+    // Select order: agent → company → companyPolicy → agentPolicy → issueCost
+    const dbStub = createDbStub([
+      [{ status: "running", pauseReason: null, companyId: "company-1", name: "Test Agent" }],
+      [{ status: "active", pauseReason: null, name: "Paperclip" }],
+      [], // no company policy
+      [], // no agent policy
+      [{ totalCents: 2100 }], // $21 — over the $20 cap
+    ]);
+
+    const service = budgetService(dbStub.db as any);
+    const block = await service.getInvocationBlock("company-1", "agent-1", { issueId: "issue-1" });
+
+    expect(block).toMatchObject({
+      scopeType: "issue",
+      scopeId: "issue-1",
+      reason: expect.stringContaining("$20.00 per-issue budget cap"),
+    });
+  });
+
+  it("does not block a new run when issue cost is below the $20 cap", async () => {
+    const dbStub = createDbStub([
+      [{ status: "running", pauseReason: null, companyId: "company-1", name: "Test Agent" }],
+      [{ status: "active", pauseReason: null, name: "Paperclip" }],
+      [], // no company policy
+      [], // no agent policy
+      [{ totalCents: 1999 }], // $19.99 — under cap
+    ]);
+
+    const service = budgetService(dbStub.db as any);
+    // No projectId → returns null (no project check needed)
+    const block = await service.getInvocationBlock("company-1", "agent-1", { issueId: "issue-1" });
+
+    expect(block).toBeNull();
+  });
 });

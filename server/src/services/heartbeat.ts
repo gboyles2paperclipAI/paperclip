@@ -8983,6 +8983,55 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     await startNextQueuedRunForAgent(promotedRun.agentId);
   }
 
+  async function autoPauseIssueForBudgetCap(
+    issueId: string,
+    companyId: string,
+    reason: string,
+    agentId: string,
+  ) {
+    // Idempotent: only pause/comment if the issue is not already in a terminal state.
+    const issue = await db
+      .select({ status: issues.status, identifier: issues.identifier })
+      .from(issues)
+      .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)))
+      .then((rows) => rows[0] ?? null);
+    if (!issue || issue.status === "blocked" || issue.status === "done" || issue.status === "cancelled") return;
+
+    await db
+      .update(issues)
+      .set({ status: "blocked", updatedAt: new Date() })
+      .where(eq(issues.id, issueId));
+
+    const commentBody =
+      `## Issue Auto-Paused: Per-Issue Budget Cap Exceeded\n\n${reason}\n\n` +
+      `**Action required:** A board member must review spend on this issue and manually unblock it.\n\n` +
+      `Triggering agent: \`${agentId}\``;
+    await issuesSvc.addComment(issueId, commentBody, { agentId, runId: undefined });
+
+    await logActivity(db, {
+      companyId,
+      actorType: "system",
+      actorId: "budget_cap",
+      action: "budget.issue_cap_exceeded",
+      entityType: "issue",
+      entityId: issueId,
+      details: { reason, agentId },
+    });
+
+    // Optional Discord alert via webhook (best-effort, non-blocking).
+    const discordWebhook = process.env.PAPERCLIP_DISCORD_BUDGET_WEBHOOK_URL;
+    if (discordWebhook) {
+      const issueRef = issue.identifier ?? issueId;
+      fetch(discordWebhook, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: `**Per-issue budget cap hit** — ${issueRef} auto-paused.\n${reason}\nAgent: \`${agentId}\`\nUnblock: review spend in the board dashboard then set the issue to \`todo\`.`,
+        }),
+      }).catch(() => {/* best-effort */});
+    }
+  }
+
   async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}) {
     const source = opts.source ?? "on_demand";
     const triggerDetail = opts.triggerDetail ?? null;
@@ -9084,6 +9133,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
     if (budgetBlock) {
       await writeSkippedRequest("budget.blocked");
+      if (budgetBlock.scopeType === "issue" && issueId) {
+        await autoPauseIssueForBudgetCap(issueId, agent.companyId, budgetBlock.reason, agentId);
+      }
       throw conflict(budgetBlock.reason, {
         scopeType: budgetBlock.scopeType,
         scopeId: budgetBlock.scopeId,

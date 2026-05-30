@@ -811,6 +811,31 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         }
       }
 
+      // Per-issue hard cap: $20 lifetime ceiling per issue.
+      const candidateIssueId = context?.issueId ?? null;
+      if (candidateIssueId) {
+        const ISSUE_CAP_CENTS = 2000; // $20.00
+        const issueCostRow = await db
+          .select({ totalCents: sql<number>`coalesce(sum(${costEvents.costCents}), 0)` })
+          .from(costEvents)
+          .where(
+            and(
+              eq(costEvents.companyId, companyId),
+              eq(costEvents.issueId, candidateIssueId),
+            ),
+          )
+          .then((rows) => rows[0] ?? null);
+        const totalCents = Number(issueCostRow?.totalCents ?? 0);
+        if (totalCents >= ISSUE_CAP_CENTS) {
+          return {
+            scopeType: "issue" as const,
+            scopeId: candidateIssueId,
+            scopeName: candidateIssueId,
+            reason: `Issue exceeded the $20.00 per-issue budget cap (cumulative spend: $${(totalCents / 100).toFixed(2)}). Unblock: Grant must clear the cap via the board dashboard.`,
+          };
+        }
+      }
+
       const candidateProjectId = context?.projectId ?? null;
       if (!candidateProjectId) return null;
 
