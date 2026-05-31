@@ -54,6 +54,7 @@ import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import { getServerAdapter, listAdapterModelProfiles, runningProcesses } from "../adapters/index.js";
+import { runAgentPreflight, PREFLIGHT_CONSECUTIVE_FAILURE_THRESHOLD } from "./agent-preflight.js";
 import type {
   AdapterExecutionResult,
   AdapterInvocationMeta,
@@ -8031,6 +8032,66 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
       try {
+        const preflightResult = await runAgentPreflight({
+          db,
+          agentId: agent.id,
+          companyId: agent.companyId,
+          adapterType: agent.adapterType,
+          config: runtimeConfig,
+          currentRunId: run.id,
+          commandOverride: adapter.getRuntimeCommandSpec?.(runtimeConfig)?.command ?? null,
+        });
+        for (const check of preflightResult.checks) {
+          if (check.level !== "info") {
+            await onLog(
+              "stderr",
+              `[paperclip] preflight [${check.code}] ${check.ok ? "warn" : "FAIL"}: ${check.message}\n`,
+            );
+          }
+        }
+        if (!preflightResult.ok) {
+          // When the agent is quarantined due to a failure loop, notify manager via issue comment.
+          const quarantineCheck = preflightResult.checks.find((c) => c.code === "agent_quarantined");
+          if (quarantineCheck && issueId && agent.reportsTo) {
+            try {
+              const managerRow = await db
+                .select({ id: agents.id, name: agents.name })
+                .from(agents)
+                .where(eq(agents.id, agent.reportsTo))
+                .then((rows) => rows[0] ?? null);
+              const mention = managerRow
+                ? `[@${managerRow.name}](agent://${managerRow.id})`
+                : null;
+              const errorCodeMatch = quarantineCheck.message.match(/error code "([^"]+)"/);
+              const errorCode = errorCodeMatch ? errorCodeMatch[1] : "unknown";
+              const commentLines = [
+                "## Agent Quarantined — Preflight Failure Loop",
+                "",
+                mention ? `${mention} — halting for manager review.` : "Halting to prevent a run loop.",
+                "",
+                `- **Agent:** ${agent.name} (\`${agent.id}\`)`,
+                `- **Error code:** \`${errorCode}\``,
+                `- **Consecutive failures:** ${PREFLIGHT_CONSECUTIVE_FAILURE_THRESHOLD}`,
+                "- **Action required:** Fix the underlying issue (invalid model, missing CLI, misconfigured sandbox, etc.), then trigger a new run.",
+              ];
+              await issuesSvc.addComment(issueId, commentLines.join("\n"), {
+                agentId: agent.id,
+                runId: run.id,
+              });
+            } catch (notifyErr) {
+              logger.warn(
+                { err: notifyErr, agentId: agent.id, runId: run.id },
+                "failed to post quarantine notification comment; run will still be failed",
+              );
+            }
+          }
+          const failed = preflightResult.checks.filter((c) => !c.ok && c.level === "error");
+          const summary = failed.map((c) => `${c.code}: ${c.message}`).join("; ");
+          const err = new Error(`Agent preflight failed — ${summary}`);
+          (err as Error & { errorCode?: string }).errorCode = "agent_preflight_failed";
+          throw err;
+        }
+
         adapterResult = await adapter.execute({
           runId: run.id,
           agent,
