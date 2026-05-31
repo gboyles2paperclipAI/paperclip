@@ -141,7 +141,7 @@ function readLiveRunsQueryInt(value: unknown, max: number, fallback = 0) {
 
 export function agentRoutes(
   db: Db,
-  options: { pluginWorkerManager?: PluginWorkerManager } = {},
+  options: { pluginWorkerManager?: PluginWorkerManager; providerCooldownService?: import("../services/provider-cooldown.js").ProviderCooldownService } = {},
 ) {
   // Legacy hardcoded maps — used as fallback when adapter module does not
   // declare capability flags explicitly.
@@ -193,6 +193,7 @@ export function agentRoutes(
   });
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
+    providerCooldownService: options.providerCooldownService,
   });
   const recovery = recoveryService(db, { enqueueWakeup: heartbeat.wakeup });
   const issueApprovalsSvc = issueApprovalService(db);
