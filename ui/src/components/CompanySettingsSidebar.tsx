@@ -34,7 +34,7 @@ export function CompanySettingsSidebar() {
     },
     enabled: !!selectedCompanyId,
     retry: false,
-    refetchInterval: 15_000,
+    refetchInterval: () => (document.visibilityState === "visible" ? 15_000 : false),
   });
   const { data: experimentalSettings } = useQuery({
     queryKey: queryKeys.instance.experimentalSettings,
