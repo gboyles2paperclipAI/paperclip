@@ -5,7 +5,13 @@ import { fileURLToPath } from "node:url";
 import type { Db } from "@paperclipai/db";
 import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
 import type { StorageService } from "./storage/types.js";
-import { httpLogger, errorHandler } from "./middleware/index.js";
+import {
+  apiRouteTimeoutMiddleware,
+  httpLogger,
+  errorHandler,
+  pollingBackpressureMiddleware,
+  pollingRateLimitAndCoalescingMiddleware,
+} from "./middleware/index.js";
 import { actorMiddleware } from "./middleware/auth.js";
 import { boardMutationGuard } from "./middleware/board-mutation-guard.js";
 import { privateHostnameGuard, resolvePrivateHostnameAllowSet } from "./middleware/private-hostname-guard.js";
@@ -46,6 +52,8 @@ import { logger } from "./middleware/logger.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createPluginJobScheduler } from "./services/plugin-job-scheduler.js";
+import { createProviderCooldownService, type ProviderCooldownService } from "./services/provider-cooldown.js";
+import { resolvePaperclipInstanceRoot } from "./home-paths.js";
 import { pluginJobStore } from "./services/plugin-job-store.js";
 import { createPluginToolDispatcher } from "./services/plugin-tool-dispatcher.js";
 import { pluginLifecycleManager } from "./services/plugin-lifecycle.js";
@@ -139,6 +147,7 @@ export async function createApp(
     localPluginDir?: string;
     pluginMigrationDb?: Db;
     pluginWorkerManager?: PluginWorkerManager;
+    providerCooldownService?: ProviderCooldownService;
     betterAuthHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
   },
@@ -185,10 +194,16 @@ export async function createApp(
   app.use(llmRoutes(db));
 
   const hostServicesDisposers = new Map<string, () => void>();
-  const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager();
+  const providerCooldownService = opts.providerCooldownService ?? createProviderCooldownService({
+    persistPath: path.join(resolvePaperclipInstanceRoot(), "cooldown-state.json"),
+  });
+  const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager({ providerCooldownService });
 
   // Mount API routes
   const api = Router();
+  api.use(apiRouteTimeoutMiddleware);
+  api.use(pollingRateLimitAndCoalescingMiddleware);
+  api.use(pollingBackpressureMiddleware);
   api.use(boardMutationGuard());
   api.use(
     "/health",
@@ -201,7 +216,7 @@ export async function createApp(
   );
   api.use("/companies", companyRoutes(db, opts.storageService));
   api.use(companySkillRoutes(db));
-  api.use(agentRoutes(db, { pluginWorkerManager: workerManager }));
+  api.use(agentRoutes(db, { pluginWorkerManager: workerManager, providerCooldownService }));
   api.use(assetRoutes(db, opts.storageService));
   api.use(projectRoutes(db));
   api.use(issueRoutes(db, opts.storageService, {
@@ -210,7 +225,7 @@ export async function createApp(
     deploymentMode: opts.deploymentMode,
   }));
   api.use(issueTreeControlRoutes(db));
-  api.use(routineRoutes(db, { pluginWorkerManager: workerManager }));
+  api.use(routineRoutes(db, { pluginWorkerManager: workerManager, providerCooldownService }));
   api.use(environmentRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(executionWorkspaceRoutes(db));
   api.use(goalRoutes(db));
@@ -236,6 +251,7 @@ export async function createApp(
     db,
     jobStore,
     workerManager,
+    providerCooldownService,
   });
   const toolDispatcher = createPluginToolDispatcher({
     workerManager,
@@ -277,6 +293,7 @@ export async function createApp(
         const services = buildHostServices(db, pluginId, manifest.id, eventBus, notifyWorker, {
           pluginWorkerManager: workerManager,
           manifest,
+          providerCooldownService,
         });
         hostServicesDisposers.set(pluginId, () => services.dispose());
         return createHostClientHandlers({
