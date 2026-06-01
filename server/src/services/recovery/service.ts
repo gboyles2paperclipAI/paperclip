@@ -3643,6 +3643,31 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return { kind: "created" as const, escalationIssueId: escalation.id };
   }
 
+  async function reuseIssueGraphLivenessEscalation(input: {
+    finding: IssueLivenessFinding;
+    runId?: string | null;
+  }) {
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, input.finding.issueId))
+      .then((rows) => rows[0] ?? null);
+    if (!issue || issue.companyId !== input.finding.companyId) return null;
+
+    const existing =
+      await findOpenLivenessEscalation(issue.companyId, input.finding.incidentKey) ??
+      await findOpenLivenessRecoveryIssueForLeaf(input.finding);
+    if (!existing) return null;
+
+    await ensureIssueBlockedByEscalation({
+      issue,
+      escalationIssueId: existing.id,
+      finding: input.finding,
+      runId: input.runId ?? null,
+    });
+    return existing.id;
+  }
+
   async function reconcileIssueGraphLiveness(opts?: {
     runId?: string | null;
     force?: boolean;
@@ -3695,8 +3720,18 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         continue;
       }
       if (seenEscalationStates.has(finding.state)) {
-        result.skippedPerCategoryCap += 1;
-        result.skipped += 1;
+        const existingEscalationIssueId = await reuseIssueGraphLivenessEscalation({
+          finding,
+          runId: opts?.runId ?? null,
+        });
+        if (existingEscalationIssueId) {
+          result.existingEscalations += 1;
+          result.issueIds.push(finding.issueId);
+          result.escalationIssueIds.push(existingEscalationIssueId);
+        } else {
+          result.skippedPerCategoryCap += 1;
+          result.skipped += 1;
+        }
         continue;
       }
       const escalation = await createIssueGraphLivenessEscalation({
