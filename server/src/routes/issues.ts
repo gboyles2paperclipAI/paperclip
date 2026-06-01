@@ -40,6 +40,7 @@ import {
   linkIssueApprovalSchema,
   issueDocumentKeySchema,
   ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
+  isUuidLike,
   rejectIssueThreadInteractionSchema,
   restoreIssueDocumentRevisionSchema,
   respondIssueThreadInteractionSchema,
@@ -674,10 +675,11 @@ function shouldImplicitlyMoveCommentedIssueToTodo(input: {
   actorType: "agent" | "user";
   actorId: string;
 }) {
-  // Only human comments should implicitly reopen finished work.
-  // Agent-authored comments remain communicative unless reopen was explicit.
+  // Generic comments are communicative by default.
+  // Closed work (done/cancelled) must only reopen on explicit intent (resume/reopen).
+  // Dependency-blocked work can still move back to todo on human nudges when assigned.
   if (input.actorType !== "user") return false;
-  if (!isClosedIssueStatus(input.issueStatus) && input.issueStatus !== "blocked") return false;
+  if (input.issueStatus !== "blocked") return false;
   if (typeof input.assigneeAgentId !== "string" || input.assigneeAgentId.length === 0) return false;
   return true;
 }
@@ -1507,7 +1509,7 @@ export function issueRoutes(
   function requireAgentRunId(req: Request, res: Response) {
     if (req.actor.type !== "agent") return null;
     const runId = req.actor.runId?.trim();
-    if (runId) return runId;
+    if (runId && isUuidLike(runId)) return runId;
     res.status(401).json({ error: "Agent run id required" });
     return null;
   }
@@ -2740,6 +2742,19 @@ export function issueRoutes(
         }
       }
 
+      const recoveryAction = await recoveryActionsSvc.resolveActiveForIssue(
+        {
+          companyId: existing.companyId,
+          sourceIssueId: existing.id,
+          actionId: actionId ?? null,
+          status: actionStatus,
+          outcome,
+          resolutionNote: resolutionNote ?? null,
+        },
+        tx,
+      );
+      if (!recoveryAction) throw notFound("Active recovery action not found");
+
       if (sourceIssueStatus) {
         const updatedIssue = await svc.update(
           id,
@@ -2753,19 +2768,6 @@ export function issueRoutes(
         if (!updatedIssue) throw notFound("Issue not found");
         issue = updatedIssue;
       }
-
-      const recoveryAction = await recoveryActionsSvc.resolveActiveForIssue(
-        {
-          companyId: existing.companyId,
-          sourceIssueId: existing.id,
-          actionId: actionId ?? null,
-          status: actionStatus,
-          outcome,
-          resolutionNote: resolutionNote ?? null,
-        },
-        tx,
-      );
-      if (!recoveryAction) throw notFound("Active recovery action not found");
 
       return { issue, recoveryAction };
     });

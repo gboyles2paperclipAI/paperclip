@@ -4859,6 +4859,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }
 
   async function clearDetachedRunWarning(runId: string) {
+    if (!isUuidLike(runId)) return null;
+
     const updated = await db
       .update(heartbeatRuns)
       .set({
@@ -6508,6 +6510,28 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
     }
 
+    const claimedContext = parseObject(run.contextSnapshot);
+    const claimedIssueId = readNonEmptyString(claimedContext.issueId);
+    const claimedWakeReason = readNonEmptyString(claimedContext.wakeReason);
+    if (claimedIssueId) {
+      const issueContext = await getIssueExecutionContext(agent.companyId, claimedIssueId);
+      const issueDependencyReadiness = await issuesSvc
+        .listDependencyReadiness(agent.companyId, [claimedIssueId])
+        .then((rows) => rows.get(claimedIssueId) ?? null);
+      if (
+        issueContext &&
+        shouldAutoCheckoutIssueForWake({
+          contextSnapshot: claimedContext,
+          issueStatus: issueContext.status,
+          issueAssigneeAgentId: issueContext.assigneeAgentId,
+          isDependencyReady: issueDependencyReadiness?.isDependencyReady ?? true,
+          agentId: agent.id,
+        })
+      ) {
+        await issuesSvc.checkout(claimedIssueId, agent.id, ["todo", "backlog", "blocked", "in_progress"], run.id);
+      }
+    }
+
     const claimedAt = new Date();
     const claimed = await db
       .update(heartbeatRuns)
@@ -6542,9 +6566,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     // Fix A (lazy locking): stamp executionRunId now that the run is actually running,
     // not at queue time. Guard is idempotent — safe if called more than once.
-    const claimedContext = parseObject(claimed.contextSnapshot);
-    const claimedIssueId = readNonEmptyString(claimedContext.issueId);
-    const claimedWakeReason = readNonEmptyString(claimedContext.wakeReason);
     if (claimedIssueId && claimedWakeReason !== "source_scoped_recovery_action") {
       const claimedAgent = await getAgent(claimed.agentId);
       await db
@@ -6731,6 +6752,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (
         wakeCommentId &&
         wakeReason !== "issue_commented" &&
+        wakeReason !== "issue_comment_mentioned" &&
         wakeReason !== "issue_reopened_via_comment"
       ) {
         return {
@@ -9284,6 +9306,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const shouldSkipTerminalDeferredCommentWake =
           hasDeferredCommentSignal &&
           (issue.status === "done" || issue.status === "cancelled") &&
+          deferred.requestedByActorType !== "user" &&
+          deferred.requestedByActorType !== "agent" &&
           !shouldReopenDeferredCommentWake;
         let reopenedActivity: LogActivityInput | null = null;
 
