@@ -1791,6 +1791,8 @@ function shouldAutoCheckoutIssueForWake(input: {
   contextSnapshot: Record<string, unknown> | null | undefined;
   issueStatus: string | null;
   issueAssigneeAgentId: string | null;
+  issueCheckoutRunId: string | null;
+  issueExecutionRunId: string | null;
   isDependencyReady: boolean;
   agentId: string;
 }) {
@@ -1812,6 +1814,7 @@ function shouldAutoCheckoutIssueForWake(input: {
   if (wakeReason === "issue_comment_mentioned") return false;
   if (wakeReason === "source_scoped_recovery_action") return false;
   if (wakeReason.startsWith("execution_")) return false;
+  if (issueStatus === "in_progress" && (input.issueCheckoutRunId || input.issueExecutionRunId)) return false;
 
   return true;
 }
@@ -2717,6 +2720,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         assigneeAgentId: issues.assigneeAgentId,
         assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
         executionWorkspaceSettings: issues.executionWorkspaceSettings,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
         originKind: issues.originKind,
         originId: issues.originId,
         originRunId: issues.originRunId,
@@ -6520,6 +6525,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           contextSnapshot: claimedContext,
           issueStatus: issueContext.status,
           issueAssigneeAgentId: issueContext.assigneeAgentId,
+          issueCheckoutRunId: issueContext.checkoutRunId,
+          issueExecutionRunId: issueContext.executionRunId,
           isDependencyReady: issueDependencyReadiness?.isDependencyReady ?? true,
           agentId: agent.id,
         })
@@ -6691,6 +6698,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const isInteractionWake = allowsIssueInteractionWake(context);
     const resumeIntent = context.resumeIntent === true || context.followUpRequested === true;
     const wakeReason = readNonEmptyString(context.wakeReason);
+    const isIssueMentionWake = wakeReason === "issue_comment_mentioned" && Boolean(wakeCommentId);
     const retryReason = readNonEmptyString(context.retryReason) ?? run.scheduledRetryReason ?? null;
 
     if (
@@ -6722,7 +6730,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
     }
 
-    if (issue.assigneeAgentId !== run.agentId && !isInteractionWake) {
+    if (issue.assigneeAgentId !== run.agentId && !isInteractionWake && !isIssueMentionWake) {
       return {
         stale: true,
         errorCode: "issue_assignee_changed",
@@ -7520,6 +7528,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         contextSnapshot: context,
         issueStatus: issueContext.status,
         issueAssigneeAgentId: issueContext.assigneeAgentId,
+        issueCheckoutRunId: issueContext.checkoutRunId,
+        issueExecutionRunId: issueContext.executionRunId,
         isDependencyReady: issueDependencyReadiness?.isDependencyReady ?? true,
         agentId: agent.id,
       })
