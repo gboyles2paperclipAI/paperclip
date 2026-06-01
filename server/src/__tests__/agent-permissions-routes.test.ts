@@ -435,6 +435,72 @@ describe.sequential("agent permission routes", () => {
     ]);
   });
 
+  it("redacts plaintext secret env values in privileged agent detail responses", async () => {
+    mockAgentService.getById.mockResolvedValue({
+      ...baseAgent,
+      adapterConfig: {
+        env: {
+          SAFE_TIMEOUT: "30",
+          CUSTOM_SECRET: "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+        },
+      },
+    });
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl).get(`/api/agents/${agentId}`));
+
+    expect(res.status).toBe(200);
+    expect(res.body.adapterConfig).toEqual({
+      env: {
+        SAFE_TIMEOUT: "30",
+        CUSTOM_SECRET: "***REDACTED***",
+      },
+    });
+  });
+
+  it("redacts plaintext secret env values in privileged company agent list responses", async () => {
+    mockAgentService.list.mockResolvedValue([
+      {
+        ...baseAgent,
+        adapterConfig: {
+          env: {
+            SAFE_TIMEOUT: "30",
+            CUSTOM_SECRET: "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+          },
+        },
+      },
+    ]);
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl).get(`/api/companies/${companyId}/agents`));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([
+      expect.objectContaining({
+        adapterConfig: {
+          env: {
+            SAFE_TIMEOUT: "30",
+            CUSTOM_SECRET: "***REDACTED***",
+          },
+        },
+      }),
+    ]);
+  });
+
   it("blocks agent updates for authenticated company members without agent admin permission", async () => {
     mockAccessService.canUser.mockResolvedValue(false);
 

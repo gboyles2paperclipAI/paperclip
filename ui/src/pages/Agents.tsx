@@ -97,7 +97,7 @@ export function Agents() {
     queryKey: [...queryKeys.liveRuns(selectedCompanyId!), "agents-page"],
     queryFn: () => heartbeatsApi.liveRunsForCompany(selectedCompanyId!),
     enabled: !!selectedCompanyId,
-    refetchInterval: 15_000,
+    refetchInterval: () => (document.visibilityState === "visible" ? 15_000 : false),
   });
   const membershipsQuery = useResourceMemberships(selectedCompanyId);
   const membershipMutation = useResourceMembershipMutation(selectedCompanyId);

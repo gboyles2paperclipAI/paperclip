@@ -249,6 +249,27 @@ function dedupeLiveRunsById(liveRuns: readonly LiveRunForIssue[]) {
   });
 }
 
+function isDocumentVisible() {
+  if (typeof document === "undefined") return true;
+  return document.visibilityState === "visible";
+}
+const LIVE_RUNS_POLL_HIDDEN_PAUSE_MS = false;
+const LIVE_RUNS_POLL_ACTIVE_MS = 30_000;
+const LIVE_RUNS_POLL_RESUME_MS = 30_000;
+
+function useVisibilityAwarePollInterval() {
+  const [pollMs, setPollMs] = useState(LIVE_RUNS_POLL_ACTIVE_MS);
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") return;
+      setPollMs(LIVE_RUNS_POLL_RESUME_MS);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
+  return pollMs;
+}
+
 function readIssueRunStateFromCache(queryClient: QueryClient, issueId: string) {
   const liveRuns = queryClient.getQueryData<LiveRunForIssue[]>(
     queryKeys.issues.liveRuns(issueId),
@@ -739,6 +760,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   onResumeFromBacklog,
   resumeFromBacklogPending,
 }: IssueDetailChatTabProps) {
+  const liveRunsPollMs = useVisibilityAwarePollInterval();
   const { data: activity } = useQuery({
     queryKey: queryKeys.issues.activity(issueId),
     queryFn: () => activityApi.forIssue(issueId),
@@ -747,7 +769,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   const { data: liveRuns } = useQuery({
     queryKey: queryKeys.issues.liveRuns(issueId),
     queryFn: () => heartbeatsApi.liveRunsForIssue(issueId),
-    refetchInterval: 3000,
+    refetchInterval: () => (isDocumentVisible() ? liveRunsPollMs : LIVE_RUNS_POLL_HIDDEN_PAUSE_MS),
     placeholderData: keepPreviousDataForSameQueryTail<LiveRunForIssue[]>(issueId),
   });
   const resolvedLiveRuns = liveRuns ?? [];
@@ -756,7 +778,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     queryKey: queryKeys.issues.activeRun(issueId),
     queryFn: () => heartbeatsApi.activeRunForIssue(issueId),
     enabled: !!executionRunId || issueStatus === "in_progress",
-    refetchInterval: liveRunCount > 0 ? false : 3000,
+    refetchInterval: () => (isDocumentVisible() && liveRunCount === 0 ? liveRunsPollMs : LIVE_RUNS_POLL_HIDDEN_PAUSE_MS),
     placeholderData: keepPreviousDataForSameQueryTail<ActiveRunForIssue | null>(issueId),
   });
   const resolvedActiveRun = useMemo(
@@ -767,7 +789,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   const { data: linkedRuns } = useQuery({
     queryKey: queryKeys.issues.runs(issueId),
     queryFn: () => activityApi.runsForIssue(issueId),
-    refetchInterval: hasLiveRuns ? 5000 : false,
+    refetchInterval: () => (isDocumentVisible() && hasLiveRuns ? liveRunsPollMs : LIVE_RUNS_POLL_HIDDEN_PAUSE_MS),
     placeholderData: keepPreviousDataForSameQueryTail<RunForIssue[]>(issueId),
   });
   const resolvedActivity = activity ?? [];
@@ -873,9 +895,33 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     () => extractIssueTimelineEvents(resolvedActivity),
     [resolvedActivity],
   );
+  const pendingDecisionInteractions = useMemo(
+    () =>
+      interactions.filter(
+        (interaction) =>
+          interaction.status === "pending"
+          && (interaction.kind === "suggest_tasks" || interaction.kind === "ask_user_questions"),
+      ),
+    [interactions],
+  );
 
   return (
     <div className="space-y-3">
+      {pendingDecisionInteractions.length > 0 ? (
+        <section
+          className="rounded-md border border-sky-500/45 bg-sky-50/70 px-4 py-3 text-sky-900 dark:border-sky-300/35 dark:bg-sky-400/10 dark:text-sky-100"
+          role="status"
+          aria-live="polite"
+          data-testid="issue-awaiting-board-decision-banner"
+        >
+          <p className="text-sm font-semibold">Awaiting Board Decision</p>
+          <p className="mt-1 text-xs leading-5 text-sky-800/90 dark:text-sky-100/90">
+            {pendingDecisionInteractions.length} pending interaction
+            {pendingDecisionInteractions.length === 1 ? "" : "s"} require response below.
+            Use the decision buttons to proceed without posting a free-form comment.
+          </p>
+        </section>
+      ) : null}
       {hasOlderComments ? (
         <div className="flex justify-center">
           <Button
@@ -1343,7 +1389,7 @@ export function IssueDetail() {
     queryKey: queryKeys.issues.liveRuns(issueId!),
     queryFn: () => heartbeatsApi.liveRunsForIssue(issueId!),
     enabled: !!issueId,
-    refetchInterval: 3000,
+    refetchInterval: () => (isDocumentVisible() ? liveRunsPollMs : LIVE_RUNS_POLL_HIDDEN_PAUSE_MS),
     select: (runs) => runs.length,
     placeholderData: keepPreviousDataForSameQueryTail<LiveRunForIssue[]>(issueId ?? "pending"),
   });
@@ -1352,7 +1398,7 @@ export function IssueDetail() {
     queryKey: queryKeys.issues.activeRun(issueId!),
     queryFn: () => heartbeatsApi.activeRunForIssue(issueId!),
     enabled: !!issueId && (!!issue?.executionRunId || issue?.status === "in_progress"),
-    refetchInterval: liveRunCount > 0 ? false : 3000,
+    refetchInterval: () => (isDocumentVisible() && liveRunCount === 0 ? liveRunsPollMs : LIVE_RUNS_POLL_HIDDEN_PAUSE_MS),
     select: (run) => !!run,
     placeholderData: keepPreviousDataForSameQueryTail<ActiveRunForIssue | null>(issueId ?? "pending"),
   });
@@ -1375,6 +1421,7 @@ export function IssueDetail() {
         : ["issues", "parent", "pending"],
     queryFn: () => issuesApi.list(resolvedCompanyId!, { descendantOf: issue!.id, includeBlockedBy: true }),
     enabled: !!resolvedCompanyId && !!issue?.id,
+    staleTime: 60_000,
     placeholderData: keepPreviousDataForSameQueryTail<Issue[]>(issue?.id ?? "pending"),
   });
   const {
@@ -1388,12 +1435,13 @@ export function IssueDetail() {
         : ["issues", "siblings", "pending"],
     queryFn: () => issuesApi.list(resolvedCompanyId!, { parentId: issue!.parentId!, includeBlockedBy: true }),
     enabled: !!resolvedCompanyId && !!issue?.parentId,
+    staleTime: 60_000,
   });
   const { data: companyLiveRuns } = useQuery({
     queryKey: resolvedCompanyId ? queryKeys.liveRuns(resolvedCompanyId) : ["live-runs", "pending"],
     queryFn: () => heartbeatsApi.liveRunsForCompany(resolvedCompanyId!),
     enabled: !!resolvedCompanyId,
-    refetchInterval: 5000,
+    refetchInterval: () => (isDocumentVisible() ? liveRunsPollMs : LIVE_RUNS_POLL_HIDDEN_PAUSE_MS),
     placeholderData: keepPreviousDataForSameQueryTail<LiveRunForIssue[]>(resolvedCompanyId ?? "pending"),
   });
 
@@ -4220,3 +4268,4 @@ export function IssueDetail() {
     </div>
   );
 }
+  const liveRunsPollMs = useVisibilityAwarePollInterval();

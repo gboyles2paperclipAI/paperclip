@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, isNotNull, lte } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   documents,
@@ -41,6 +41,8 @@ import { issueService, listUnfinalizedExecutionWorkspaceIds } from "./issues.js"
 type InteractionActor = {
   agentId?: string | null;
   userId?: string | null;
+  requestId?: string | null;
+  resolutionMethod?: string | null;
 };
 
 const ISSUE_THREAD_INTERACTION_IDEMPOTENCY_CONSTRAINT =
@@ -651,6 +653,31 @@ export function issueThreadInteractionService(db: Db) {
         .orderBy(asc(issueThreadInteractions.createdAt), asc(issueThreadInteractions.id));
 
       return rows.map((row) => hydrateInteraction(row));
+    },
+
+    listForCompany: async (input: {
+      companyId: string;
+      resolvedAfter?: Date | null;
+      resolvedBefore?: Date | null;
+      method?: string | null;
+    }) => {
+      const conditions = [
+        eq(issueThreadInteractions.companyId, input.companyId),
+        isNotNull(issueThreadInteractions.resolvedAt),
+      ];
+      if (input.resolvedAfter) conditions.push(gte(issueThreadInteractions.resolvedAt, input.resolvedAfter));
+      if (input.resolvedBefore) conditions.push(lte(issueThreadInteractions.resolvedAt, input.resolvedBefore));
+
+      const rows = await db
+        .select()
+        .from(issueThreadInteractions)
+        .where(and(...conditions))
+        .orderBy(asc(issueThreadInteractions.resolvedAt), asc(issueThreadInteractions.id));
+
+      return rows.map((row) => ({
+        ...hydrateInteraction(row),
+        resolutionMethod: input.method ?? "unknown",
+      }));
     },
 
     getById: async (interactionId: string) => {

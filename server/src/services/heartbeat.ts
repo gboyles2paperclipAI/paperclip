@@ -3,7 +3,7 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, getTableColumns, gt, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
@@ -37,6 +37,7 @@ import {
   heartbeatRuns,
   issueApprovals,
   issueComments,
+  issueExecutionDecisions,
   issuePlanDecompositions,
   issueRelations,
   issueThreadInteractions,
@@ -173,6 +174,8 @@ import { environmentRuntimeService } from "./environment-runtime.js";
 import { environmentRunOrchestrator } from "./environment-run-orchestrator.js";
 import { isUnsafeSessionWorkspaceCwd } from "./session-workspace-cwd.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
+import type { ProviderCooldownService } from "./provider-cooldown.js";
+import { detectQuotaError } from "./quota-error-detector.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const MAX_PERSISTED_LOG_CHUNK_CHARS = 64 * 1024;
@@ -193,12 +196,18 @@ const MAX_RUN_EVENT_PAYLOAD_DEPTH = 6;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MIN = 1;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 50;
+// Concurrency caps (FUL-4341)
+const GLOBAL_MAX_CONCURRENT_RUNS = 6;
+const PREMIUM_MAX_CONCURRENT_RUNS = 1;
+const PER_AGENT_MAX_CONCURRENT_RUNS_HARD_CAP = 1;
+const PREMIUM_ADAPTER_TYPES: ReadonlyArray<string> = ["claude_local"];
 const LIVENESS_BOOKKEEPING_ACTIVITY_ACTIONS = [
   "environment.lease_acquired",
   "environment.lease_released",
 ];
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 const WAKE_COMMENT_IDS_KEY = "wakeCommentIds";
+const STALE_IN_REVIEW_WINDOW_MS = 2 * 60 * 60 * 1000;
 const PAPERCLIP_WAKE_PAYLOAD_KEY = "paperclipWake";
 const PAPERCLIP_HARNESS_CHECKOUT_KEY = "paperclipHarnessCheckedOut";
 const DETACHED_PROCESS_ERROR_CODE = "process_detached";
@@ -220,9 +229,9 @@ export {
 export const ACTIVE_RUN_OUTPUT_PROGRESS_FLUSH_INTERVAL_MS = 60 * 1000;
 export const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS = [
   2 * 60 * 1000,
-  10 * 60 * 1000,
-  30 * 60 * 1000,
-  2 * 60 * 60 * 1000,
+  5 * 60 * 1000,
+  15 * 60 * 1000,
+  60 * 60 * 1000,
 ] as const;
 const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_JITTER_RATIO = 0.25;
 const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON = "transient_failure";
@@ -235,6 +244,18 @@ const MAX_TURN_CONTINUATION_MAX_ATTEMPTS_CAP = 10;
 const MAX_TURN_CONTINUATION_DEFAULT_DELAY_MS = 1_000;
 const MAX_TURN_CONTINUATION_MAX_DELAY_MS = 5 * 60 * 1000;
 const MAX_TURN_CONTINUATION_LIVE_RUN_STATUSES = ["scheduled_retry", "queued", "running"] as const;
+// Checkout 409 exponential backoff (FUL-4342)
+const CHECKOUT_CONFLICT_RETRY_REASON = "checkout_conflict_backoff";
+const CHECKOUT_CONFLICT_WAKE_REASON = "checkout_conflict_retry";
+const CHECKOUT_CONFLICT_BASE_DELAY_MS = 2_000;
+const CHECKOUT_CONFLICT_MAX_DELAY_MS = 60_000;
+const CHECKOUT_CONFLICT_MAX_ATTEMPTS = 5;
+const CHECKOUT_CONFLICT_CIRCUIT_BREAKER_THRESHOLD = 3;
+const CHECKOUT_409_WINDOW_MS = 60_000;
+const PAUSED_AGENT_WAKE_BACKOFF_BASE_MS = 5 * 60 * 1000;
+const PAUSED_AGENT_WAKE_BACKOFF_MAX_MS = 60 * 60 * 1000;
+const PAUSED_AGENT_WAKE_BACKOFF_REASON = "agent_paused_wakeup_backoff";
+const PAUSED_AGENT_WAKE_BACKOFF_WAKE_REASON = "agent_paused_wakeup";
 type CodexTransientFallbackMode =
   | "same_session"
   | "safer_invocation"
@@ -252,6 +273,12 @@ function resolveCodexTransientFallbackMode(attempt: number): CodexTransientFallb
   if (attempt === 2) return "safer_invocation";
   if (attempt === 3) return "fresh_session";
   return "fresh_session_safer_invocation";
+}
+
+function pausedWakeBackoffDelayMs(attempt: number) {
+  const normalizedAttempt = Math.max(1, Math.trunc(attempt));
+  const exponential = PAUSED_AGENT_WAKE_BACKOFF_BASE_MS * (2 ** (normalizedAttempt - 1));
+  return Math.min(PAUSED_AGENT_WAKE_BACKOFF_MAX_MS, exponential);
 }
 
 function readHeartbeatRunErrorFamily(
@@ -319,6 +346,9 @@ function mergeAdapterRecoveryMetadata(input: {
   };
 }
 const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set(["approval_approved"]);
+const SAME_ISSUE_WAKE_COALESCE_WINDOW_MS = 90 * 1000;
+const BLOCKED_ISSUE_WAKE_SUPPRESSION_MS = 20 * 60 * 1000;
+const URGENT_WAKE_REASON_RE = /\b(urgent|security|incident|prod|production[-_\s]?down|sev[0-2])\b/i;
 const SESSIONED_LOCAL_ADAPTERS = new Set([
   "claude_local",
   "codex_local",
@@ -496,6 +526,16 @@ export function computeBoundedTransientHeartbeatRetrySchedule(
     dueAt: new Date(now.getTime() + delayMs),
     maxAttempts: BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS,
   };
+}
+
+export function computeCheckoutConflictRetryDelayMs(
+  attempt: number,
+  random: () => number = Math.random,
+): number {
+  const raw = CHECKOUT_CONFLICT_BASE_DELAY_MS * Math.pow(2, Math.max(0, attempt - 1));
+  const capped = Math.min(raw, CHECKOUT_CONFLICT_MAX_DELAY_MS);
+  const jitter = capped * 0.25 * ((random() * 2) - 1);
+  return Math.max(CHECKOUT_CONFLICT_BASE_DELAY_MS, Math.round(capped + jitter));
 }
 
 async function resolveRunScopedMentionedSkillKeys(input: {
@@ -1785,8 +1825,35 @@ function shouldQueueFollowupForRunningIssueWake(input: {
   return Boolean(wakeReason && RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP.has(wakeReason));
 }
 
+function shouldBypassWakeSuppression(input: {
+  issueStatus: string;
+  issuePriority: string | null;
+  wakeReason: string | null;
+}) {
+  if (input.issueStatus !== "blocked") return true;
+  if (input.issuePriority === "critical") return true;
+  if (input.wakeReason === "source_scoped_recovery_action") return true;
+  return Boolean(input.wakeReason && URGENT_WAKE_REASON_RE.test(input.wakeReason));
+}
+
 function isCheckoutConflictError(error: unknown): boolean {
   return error instanceof HttpError && error.status === 409 && error.message === "Issue checkout conflict";
+}
+
+function isCheckoutRejectedBlockedError(error: unknown): boolean {
+  return (
+    error instanceof HttpError &&
+    error.status === 409 &&
+    error.message === "Issue checkout blocked by active subtree pause hold"
+  );
+}
+
+function isCheckoutTerminalTransitionError(error: unknown): boolean {
+  return (
+    error instanceof HttpError &&
+    error.status === 409 &&
+    /Cannot transition terminal issue from (done|cancelled) to in_progress/.test(error.message)
+  );
 }
 
 function deriveCommentId(
@@ -2503,9 +2570,31 @@ export type HeartbeatEnvironmentRuntime = ReturnType<typeof environmentRuntimeSe
 export interface HeartbeatServiceOptions {
   pluginWorkerManager?: PluginWorkerManager;
   environmentRuntime?: HeartbeatEnvironmentRuntime;
+  /** When provided, quota-exhausted run failures automatically quarantine the adapter route. */
+  providerCooldownService?: ProviderCooldownService;
 }
 
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
+  // Per-agent checkout 409 counters for circuit breaker (FUL-4342)
+  const checkout409CountByAgent = new Map<string, { count: number; windowStartMs: number }>();
+
+  function incrementCheckout409Count(agentId: string): void {
+    const now = Date.now();
+    const entry = checkout409CountByAgent.get(agentId);
+    if (!entry || now - entry.windowStartMs > CHECKOUT_409_WINDOW_MS) {
+      checkout409CountByAgent.set(agentId, { count: 1, windowStartMs: now });
+    } else {
+      entry.count += 1;
+    }
+  }
+
+  function isCheckout409CircuitOpen(agentId: string): boolean {
+    const now = Date.now();
+    const entry = checkout409CountByAgent.get(agentId);
+    if (!entry || now - entry.windowStartMs > CHECKOUT_409_WINDOW_MS) return false;
+    return entry.count >= CHECKOUT_CONFLICT_CIRCUIT_BREAKER_THRESHOLD;
+  }
+
   const instanceSettings = instanceSettingsService(db);
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
@@ -2526,6 +2615,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     environmentRuntime,
   });
   const workspaceOperationsSvc = workspaceOperationService(db);
+  const { providerCooldownService } = options;
   const activeRunExecutions = new Set<string>();
   const budgetHooks = {
     cancelWorkForScope: cancelBudgetScopeWork,
@@ -3419,6 +3509,210 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     return {
       checked: dueMonitors.length,
+      triggered,
+      skipped,
+    };
+  }
+
+  async function tickStaleInReviewEscalations(now = new Date()) {
+    const staleThreshold = new Date(now.getTime() - STALE_IN_REVIEW_WINDOW_MS);
+    const staleIssues = await db
+      .select({
+        id: issues.id,
+        companyId: issues.companyId,
+        identifier: issues.identifier,
+        title: issues.title,
+        assigneeAgentId: issues.assigneeAgentId,
+        updatedAt: issues.updatedAt,
+      })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.status, "in_review"),
+          isNull(issues.assigneeUserId),
+          sql`${issues.assigneeAgentId} is not null`,
+          isNull(issues.hiddenAt),
+          lte(issues.updatedAt, staleThreshold),
+        ),
+      )
+      .orderBy(asc(issues.updatedAt))
+      .limit(50);
+
+    let triggered = 0;
+    let skipped = 0;
+
+    for (const issue of staleIssues) {
+      const staleSince = issue.updatedAt;
+      const hasRecentReviewerComment = await db
+        .select({ id: issueComments.id })
+        .from(issueComments)
+        .where(
+          and(
+            eq(issueComments.companyId, issue.companyId),
+            eq(issueComments.issueId, issue.id),
+            gt(issueComments.createdAt, staleSince),
+            lte(issueComments.createdAt, now),
+            or(
+              sql`${issueComments.authorUserId} is not null`,
+              sql`${issueComments.authorAgentId} is null`,
+              issue.assigneeAgentId ? sql`${issueComments.authorAgentId} <> ${issue.assigneeAgentId}` : sql`true`,
+            ),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (hasRecentReviewerComment) {
+        skipped += 1;
+        continue;
+      }
+
+      const hasRecentReviewerDecision = await db
+        .select({ id: issueExecutionDecisions.id })
+        .from(issueExecutionDecisions)
+        .where(
+          and(
+            eq(issueExecutionDecisions.companyId, issue.companyId),
+            eq(issueExecutionDecisions.issueId, issue.id),
+            gt(issueExecutionDecisions.createdAt, staleSince),
+            lte(issueExecutionDecisions.createdAt, now),
+            or(
+              sql`${issueExecutionDecisions.actorUserId} is not null`,
+              sql`${issueExecutionDecisions.actorAgentId} is null`,
+              issue.assigneeAgentId
+                ? sql`${issueExecutionDecisions.actorAgentId} <> ${issue.assigneeAgentId}`
+                : sql`true`,
+            ),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (hasRecentReviewerDecision) {
+        skipped += 1;
+        continue;
+      }
+
+      const assignee = issue.assigneeAgentId
+        ? await db
+          .select({ id: agents.id, status: agents.status })
+          .from(agents)
+          .where(and(eq(agents.companyId, issue.companyId), eq(agents.id, issue.assigneeAgentId)))
+          .limit(1)
+          .then((rows) => rows[0] ?? null)
+        : null;
+      const cto = await db
+        .select({ id: agents.id, status: agents.status })
+        .from(agents)
+        .where(and(eq(agents.companyId, issue.companyId), eq(agents.role, "cto")))
+        .orderBy(asc(agents.createdAt))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      const assigneeIsRunnable = assignee && assignee.status === "active";
+      const targetAgentId = assigneeIsRunnable ? assignee.id : (cto?.status === "active" ? cto.id : null);
+      if (!targetAgentId) {
+        skipped += 1;
+        continue;
+      }
+
+      const staleSinceIso = staleSince.toISOString();
+      const idempotencyKey = `issue-review-stale:${issue.id}:${staleSinceIso}`;
+      const existingWake = await db
+        .select({ id: agentWakeupRequests.id })
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, issue.companyId),
+            eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (existingWake) {
+        skipped += 1;
+        continue;
+      }
+
+      const staleHours = ((now.getTime() - staleSince.getTime()) / (60 * 60 * 1000)).toFixed(1);
+      const wake = await enqueueWakeup(targetAgentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_review_stale",
+        idempotencyKey,
+        payload: {
+          issueId: issue.id,
+          issueIdentifier: issue.identifier,
+          staleSince: staleSinceIso,
+          staleHours,
+          escalatedToCto: !assigneeIsRunnable,
+        },
+        requestedByActorType: "system",
+        requestedByActorId: "heartbeat_scheduler",
+        contextSnapshot: {
+          issueId: issue.id,
+          source: "review.stale",
+          wakeReason: "issue_review_stale",
+          staleSince: staleSinceIso,
+          staleHours,
+          escalatedToCto: !assigneeIsRunnable,
+        },
+      });
+      if (!wake) {
+        skipped += 1;
+        continue;
+      }
+
+      const existingComment = await db
+        .select({ id: issueComments.id })
+        .from(issueComments)
+        .where(
+          and(
+            eq(issueComments.companyId, issue.companyId),
+            eq(issueComments.issueId, issue.id),
+            eq(issueComments.authorType, "system"),
+            sql`${issueComments.body} like ${`%stale in_review auto-escalation%`}`,
+            gt(issueComments.createdAt, staleSince),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (!existingComment) {
+        const notice = [
+          "System monitor: stale in_review auto-escalation",
+          `Issue has been in \`in_review\` for ~${staleHours}h without reviewer action since ${staleSinceIso}.`,
+          assigneeIsRunnable
+            ? "Queued a deduplicated wake to the assignee (`issue_review_stale`)."
+            : "Assignee is not runnable; queued a deduplicated wake to CTO (`issue_review_stale`).",
+        ].join("\n");
+        await issuesSvc.addComment(
+          issue.id,
+          notice,
+          {},
+          { authorType: "system" },
+        );
+      }
+
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: "system",
+        actorId: "heartbeat_scheduler",
+        agentId: null,
+        runId: null,
+        action: "issue.review_stale_wake_queued",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          identifier: issue.identifier,
+          staleSince: staleSinceIso,
+          staleHours,
+          targetAgentId,
+          escalatedToCto: !assigneeIsRunnable,
+        },
+      });
+
+      triggered += 1;
+    }
+
+    return {
+      checked: staleIssues.length,
       triggered,
       skipped,
     };
@@ -4844,6 +5138,26 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return { outcome: "not_applicable" as const, queuedRun: null };
     }
 
+    const issueStatus = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(and(eq(issues.companyId, run.companyId), eq(issues.id, issueId)))
+      .then((rows) => rows[0]?.status ?? null);
+    if (issueStatus === "done" || issueStatus === "cancelled") {
+      await patchRunIssueCommentStatus(run.id, {
+        issueCommentStatus: "not_applicable",
+        issueCommentSatisfiedByCommentId: null,
+        issueCommentRetryQueuedAt: null,
+      });
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: `Run ended without an issue comment; follow-up wake suppressed because issue is terminal (${issueStatus})`,
+      });
+      return { outcome: "not_applicable" as const, queuedRun: null };
+    }
+
     if (await hasDeferredIssueCommentWake(run.companyId, issueId, run.agentId)) {
       await patchRunIssueCommentStatus(run.id, {
         issueCommentStatus: "not_applicable",
@@ -4894,6 +5208,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }, "normal_model");
 
     const queued = await db.transaction(async (tx) => {
+      if (issueId) {
+        const sourceIssue = await tx.query.issues.findFirst({
+          where: and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)),
+          columns: { status: true },
+        });
+        if (sourceIssue && (sourceIssue.status === "done" || sourceIssue.status === "cancelled")) {
+          return null;
+        }
+      }
+
       const wakeupRequest = await tx
         .insert(agentWakeupRequests)
         .values({
@@ -4954,6 +5278,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       return retryRun;
     });
+
+    if (!queued) {
+      return null;
+    }
 
     publishLiveEvent({
       companyId: queued.companyId,
@@ -6030,6 +6358,40 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(count ?? 0);
   }
 
+  async function countGlobalRunningRuns() {
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.status, "running"));
+    return Number(count ?? 0);
+  }
+
+  async function countGlobalQueuedRuns() {
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.status, "queued"));
+    return Number(count ?? 0);
+  }
+
+  async function listPremiumRunningRuns() {
+    return db
+      .select({
+        id: heartbeatRuns.id,
+        agentId: heartbeatRuns.agentId,
+        processGroupId: heartbeatRuns.processGroupId,
+      })
+      .from(heartbeatRuns)
+      .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
+      .where(
+        and(
+          eq(heartbeatRuns.status, "running"),
+          inArray(agents.adapterType, [...PREMIUM_ADAPTER_TYPES]),
+          sql`coalesce(${heartbeatRuns.contextSnapshot} ->> 'modelProfile', '') != 'cheap'`,
+        ),
+      );
+  }
+
   async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
@@ -6050,6 +6412,43 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (budgetBlock) {
       await cancelRunInternal(run.id, budgetBlock.reason);
       return null;
+    }
+
+    // Defer (not cancel) if adapter route is cooling down from a quota event.
+    if (providerCooldownService?.isCoolingDown(agent.adapterType ?? "")) {
+      logger.info(
+        { agentId: agent.id, adapterType: agent.adapterType },
+        "claimQueuedRun: deferred — adapter on cooldown",
+      );
+      return null; // null = defer; DO NOT cancel the run
+    }
+
+    // Premium cap: defer (leave queued) if premium slot is occupied
+    if (PREMIUM_ADAPTER_TYPES.includes(agent.adapterType ?? "")) {
+      const contextModelProfile = readContextModelProfile(context);
+      if (contextModelProfile !== "cheap") {
+        const premiumRunningRuns = await listPremiumRunningRuns();
+        let activePremiumRunningCount = 0;
+        for (const run of premiumRunningRuns) {
+          if (run.processGroupId && !isProcessGroupAlive(run.processGroupId)) {
+            // Orphaned-blocked premium run, record process loss to initiate recovery
+            logger.warn(
+              {
+                runId: run.id,
+                agentId: run.agentId,
+                processGroupId: run.processGroupId,
+              },
+              "Detected orphaned-blocked premium run, recording process loss.",
+            );
+            continue;
+          }
+          activePremiumRunningCount++;
+        }
+
+        if (activePremiumRunningCount >= PREMIUM_MAX_CONCURRENT_RUNS) {
+          return null; // Defer — do not cancel
+        }
+      }
     }
 
     const issueId = readNonEmptyString(context.issueId);
@@ -6323,6 +6722,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           errorCode: "issue_terminal_status",
           reason: `Cancelled because issue reached terminal status (${issue.status}) before the queued run could start`,
           details: { issueId, currentStatus: issue.status },
+        };
+      }
+      if (
+        wakeCommentId &&
+        wakeReason !== "issue_commented" &&
+        wakeReason !== "issue_reopened_via_comment"
+      ) {
+        return {
+          stale: true,
+          errorCode: "issue_terminal_status",
+          reason:
+            `Cancelled because issue reached terminal status (${issue.status}) and this comment wake does not request reopen`,
+          details: { issueId, currentStatus: issue.status, wakeReason },
         };
       }
     }
@@ -6947,9 +7359,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") {
         return [];
       }
-      const policy = parseHeartbeatPolicy(agent);
+      const globalRunningCount = await countGlobalRunningRuns();
+      if (globalRunningCount >= GLOBAL_MAX_CONCURRENT_RUNS) return [];
+
       const runningCount = await countRunningRunsForAgent(agentId);
-      const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
+      if (runningCount >= PER_AGENT_MAX_CONCURRENT_RUNS_HARD_CAP) return [];
+      const availableSlots = Math.min(
+        PER_AGENT_MAX_CONCURRENT_RUNS_HARD_CAP - runningCount,
+        GLOBAL_MAX_CONCURRENT_RUNS - globalRunningCount,
+      );
       if (availableSlots <= 0) return [];
 
       const queuedRuns = await db
@@ -6978,6 +7396,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             : sql`false`,
         );
       const issueById = new Map(issueRows.map((row) => [row.id, row]));
+      // Circuit breaker: skip dispatch if agent has too many recent checkout 409s (FUL-4342)
+      if (isCheckout409CircuitOpen(agent.id)) {
+        logger.warn({ agentId }, "checkout 409 circuit breaker active: deferring run dispatch for agent");
+        return [];
+      }
       const prioritizedRuns = [...queuedRuns].sort((left, right) => {
         const leftIssueId = readNonEmptyString(parseObject(left.contextSnapshot).issueId);
         const rightIssueId = readNonEmptyString(parseObject(right.contextSnapshot).issueId);
@@ -6998,7 +7421,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
       for (const queuedRun of prioritizedRuns) {
-        if (claimedRuns.length >= availableSlots) break;
+        if (claimedRuns.length >= availableSlots) {
+          // Slots full — still run claimQueuedRun for its cancellation side effects
+          // (dependency-blocked, stale, pause-hold) without dispatching the run.
+          // claimQueuedRun cancels and returns null for these cases, so we won't
+          // accidentally claim a run we can't execute.
+          const runCtx = parseObject(queuedRun.contextSnapshot);
+          const runIssueId = readNonEmptyString(runCtx.issueId);
+          if (!runIssueId) continue;
+          const runReadiness = dependencyReadiness.get(runIssueId);
+          if ((runReadiness?.unresolvedBlockerCount ?? 0) > 0) {
+            await claimQueuedRun(queuedRun); // cancels and returns null
+          }
+          continue;
+        }
         const claimed = await claimQueuedRun(queuedRun);
         if (claimed) claimedRuns.push(claimed);
       }
@@ -7070,8 +7506,106 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         await issuesSvc.checkout(issueId, agent.id, ["todo", "backlog", "blocked"], run.id);
         context[PAPERCLIP_HARNESS_CHECKOUT_KEY] = true;
       } catch (error) {
+        if (isCheckoutRejectedBlockedError(error)) {
+          context[PAPERCLIP_HARNESS_CHECKOUT_KEY] = false;
+          const now = new Date();
+          const reason = "Cancelled because issue checkout was rejected by an active subtree pause hold";
+          const cancelledRun = await setRunStatus(run.id, "cancelled", {
+            error: reason,
+            errorCode: "checkout_rejected_blocked",
+            finishedAt: now,
+            resultJson: mergeRunStopMetadataForAgent(agent, "cancelled", {
+              errorCode: "checkout_rejected_blocked",
+              errorMessage: reason,
+            }),
+          });
+          await setWakeupStatus(run.wakeupRequestId, "skipped", {
+            finishedAt: now,
+            error: reason,
+          });
+          if (cancelledRun) {
+            await appendRunEvent(cancelledRun, 0, {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "warn",
+              message: reason,
+              payload: { issueId },
+            });
+            await releaseIssueExecutionAndPromote(cancelledRun);
+          }
+          await finalizeAgentStatus(agent.id, "cancelled");
+          return;
+        }
+        if (isCheckoutTerminalTransitionError(error)) {
+          context[PAPERCLIP_HARNESS_CHECKOUT_KEY] = false;
+          const now = new Date();
+          const reason = "Cancelled because issue reached terminal status before checkout";
+          const cancelledRun = await setRunStatus(run.id, "cancelled", {
+            error: reason,
+            errorCode: "issue_terminal_status",
+            finishedAt: now,
+            resultJson: mergeRunStopMetadataForAgent(agent, "cancelled", {
+              errorCode: "issue_terminal_status",
+              errorMessage: reason,
+            }),
+          });
+          await setWakeupStatus(run.wakeupRequestId, "skipped", {
+            finishedAt: now,
+            error: reason,
+          });
+          if (cancelledRun) {
+            await appendRunEvent(cancelledRun, await nextRunEventSeq(cancelledRun.id), {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "info",
+              message: reason,
+              payload: { issueId },
+            });
+            await releaseIssueExecutionAndPromote(cancelledRun);
+          }
+          await finalizeAgentStatus(agent.id, "cancelled");
+          return;
+        }
         if (!isCheckoutConflictError(error)) throw error;
-        context[PAPERCLIP_HARNESS_CHECKOUT_KEY] = false;
+        // Issue held by another agent — cancel and schedule exponential backoff retry (FUL-4342)
+        {
+          const now = new Date();
+          const attempt = (run.scheduledRetryAttempt ?? 0) + 1;
+          const delayMs = computeCheckoutConflictRetryDelayMs(attempt);
+          const conflictReason = `Checkout conflict (409): issue ${issueId ?? "unknown"} held by another agent; retrying after ${delayMs}ms (attempt ${attempt}/${CHECKOUT_CONFLICT_MAX_ATTEMPTS})`;
+          incrementCheckout409Count(agent.id);
+          const cancelledRun = await setRunStatus(run.id, "cancelled", {
+            error: conflictReason,
+            errorCode: "checkout_conflict",
+            finishedAt: now,
+            resultJson: mergeRunStopMetadataForAgent(agent, "cancelled", {
+              errorCode: "checkout_conflict",
+              errorMessage: conflictReason,
+            }),
+          });
+          await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: now, error: conflictReason });
+          if (cancelledRun) {
+            if (attempt <= CHECKOUT_CONFLICT_MAX_ATTEMPTS) {
+              await scheduleBoundedRetryForRun(cancelledRun, agent, {
+                now,
+                retryReason: CHECKOUT_CONFLICT_RETRY_REASON,
+                wakeReason: CHECKOUT_CONFLICT_WAKE_REASON,
+                maxAttempts: CHECKOUT_CONFLICT_MAX_ATTEMPTS,
+                delayMs,
+              });
+            }
+            await appendRunEvent(cancelledRun, await nextRunEventSeq(cancelledRun.id), {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "warn",
+              message: conflictReason,
+              payload: { issueId, delayMs, attempt, maxAttempts: CHECKOUT_CONFLICT_MAX_ATTEMPTS },
+            });
+            await releaseIssueExecutionAndPromote(cancelledRun);
+          }
+          await finalizeAgentStatus(agent.id, "cancelled");
+          return;
+        }
       }
       issueContext = await getIssueExecutionContext(agent.companyId, issueId);
     }
@@ -8401,11 +8935,29 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
       }
       await finalizeAgentStatus(agent.id, outcome);
+      await startNextQueuedRunForAgent(agent.id);
     } catch (err) {
       const message = redactCurrentUserText(
         err instanceof Error ? err.message : "Unknown adapter failure",
         await getCurrentUserRedactionOptions(),
       );
+
+      // FUL-5634: Automatically quarantine this adapter/model route on quota exhaustion.
+      if (providerCooldownService) {
+        const quotaDetection = detectQuotaError(message);
+        if (quotaDetection.isQuotaExhausted) {
+          providerCooldownService.setCooldown(
+            agent.adapterType,
+            quotaDetection.cooldownMs,
+            quotaDetection.reason,
+          );
+          logger.warn(
+            { adapterType: agent.adapterType, cooldownMs: quotaDetection.cooldownMs },
+            "quota exhaustion detected in run failure — adapter route quarantined",
+          );
+        }
+      }
+
       logger.error({ err, runId }, "heartbeat execution failed");
 
       let logSummary: { bytes: number; sha256?: string; compressed: boolean } | null = null;
@@ -8479,6 +9031,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
 
       await finalizeAgentStatus(agent.id, "failed");
+      await startNextQueuedRunForAgent(agent.id);
     }
     } catch (outerErr) {
           // Setup code before adapter.execute threw (e.g. ensureRuntimeState, resolveWorkspaceForRun).
@@ -8522,6 +9075,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           // Ensure the agent is not left stuck in "running" if the inner catch handler's
           // DB calls threw (e.g. a transient DB error in finalizeAgentStatus).
           await finalizeAgentStatus(run.agentId, "failed").catch(() => undefined);
+          await startNextQueuedRunForAgent(run.agentId).catch(() => undefined);
         } finally {
           const latestRun = await getRun(run.id).catch(() => null);
           await releaseEnvironmentLeasesForRun({
@@ -8626,6 +9180,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
         if (!deferred) break;
 
+        const latestIssueState = await tx
+          .select({
+            id: issues.id,
+            identifier: issues.identifier,
+            status: issues.status,
+            executionRunId: issues.executionRunId,
+          })
+          .from(issues)
+          .where(and(eq(issues.id, issue.id), eq(issues.companyId, issue.companyId)))
+          .then((rows) => rows[0] ?? null);
+        if (!latestIssueState) break;
+        issue = {
+          ...issue,
+          identifier: latestIssueState.identifier,
+          status: latestIssueState.status,
+          executionRunId: latestIssueState.executionRunId,
+        };
+
         const deferredAgent = await tx
           .select()
           .from(agents)
@@ -8688,28 +9260,57 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           };
         }
         const deferredCommentIds = extractWakeCommentIds(deferredContextSeed);
+        const hasDeferredCommentContext = Boolean(deriveCommentId(deferredContextSeed, deferredPayload));
+        const hasDeferredCommentSignal =
+          hasDeferredCommentContext ||
+          deferredCommentIds.length > 0 ||
+          Boolean(readNonEmptyString(deferredContextSeed.commentId)) ||
+          Boolean(readNonEmptyString(deferredContextSeed.wakeCommentId)) ||
+          Boolean(readNonEmptyString(deferredPayload.commentId));
         const deferredWakeReason = readNonEmptyString(deferredContextSeed.wakeReason);
         // Only human/comment-reopen interactions should revive completed issues;
         // system follow-ups such as retry or cleanup wakes must not reopen closed work.
+        const hasExplicitTerminalReopenIntent =
+          deferred.requestedByActorType === "user" ||
+          deferredWakeReason === "issue_reopened_via_comment";
         const shouldReopenDeferredCommentWake =
-          deferredCommentIds.length > 0 &&
+          hasDeferredCommentSignal &&
           (issue.status === "done" || issue.status === "cancelled") &&
-          (
-            deferred.requestedByActorType === "user" ||
-            deferredWakeReason === "issue_reopened_via_comment"
-          );
+          hasExplicitTerminalReopenIntent;
+        const shouldSkipTerminalDeferredCommentWake =
+          hasDeferredCommentSignal &&
+          (issue.status === "done" || issue.status === "cancelled") &&
+          !shouldReopenDeferredCommentWake;
         let reopenedActivity: LogActivityInput | null = null;
+
+        if (shouldSkipTerminalDeferredCommentWake) {
+          await tx
+            .update(agentWakeupRequests)
+            .set({
+              status: "skipped",
+              finishedAt: new Date(),
+              error: "Deferred comment wake skipped because issue is already terminal and no explicit reopen was requested",
+              updatedAt: new Date(),
+            })
+            .where(eq(agentWakeupRequests.id, deferred.id));
+          continue;
+        }
 
         if (shouldReopenDeferredCommentWake) {
           const reopenedFromStatus = issue.status;
-          const reopenedIssue = await issuesSvc.update(
-            issue.id,
-            {
-              status: "todo",
+          const reopenedIssue = await tx
+            .update(issues)
+            .set({
+              status: "in_progress",
               executionState: null,
-            },
-            tx,
-          );
+              completedAt: null,
+              cancelledAt: null,
+              startedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(eq(issues.id, issue.id))
+            .returning()
+            .then((rows) => rows[0] ?? null);
           if (reopenedIssue) {
             issue = {
               ...issue,
@@ -8730,7 +9331,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               entityType: "issue",
               entityId: issue.id,
               details: {
-                status: "todo",
+                status: "in_progress",
                 reopened: true,
                 reopenedFrom: reopenedFromStatus,
                 source: "deferred_comment_wake",
@@ -9090,8 +9691,133 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       });
     }
 
+    if (agent.status === "paused") {
+      const now = new Date();
+      const scheduledRun = await db.transaction(async (tx) => {
+        const existing = await tx
+          .select({
+            run: heartbeatRuns,
+            wake: agentWakeupRequests,
+          })
+          .from(heartbeatRuns)
+          .innerJoin(
+            agentWakeupRequests,
+            and(
+              eq(agentWakeupRequests.id, heartbeatRuns.wakeupRequestId),
+              eq(agentWakeupRequests.companyId, agent.companyId),
+              eq(agentWakeupRequests.agentId, agent.id),
+              eq(agentWakeupRequests.reason, PAUSED_AGENT_WAKE_BACKOFF_REASON),
+              inArray(agentWakeupRequests.status, ["queued", "claimed"]),
+            ),
+          )
+          .where(
+            and(
+              eq(heartbeatRuns.companyId, agent.companyId),
+              eq(heartbeatRuns.agentId, agent.id),
+              eq(heartbeatRuns.status, "scheduled_retry"),
+              eq(heartbeatRuns.scheduledRetryReason, PAUSED_AGENT_WAKE_BACKOFF_REASON),
+            ),
+          )
+          .orderBy(desc(heartbeatRuns.createdAt))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+
+        const nextAttempt = Math.max(1, (existing?.run.scheduledRetryAttempt ?? 0) + 1);
+        const scheduledRetryAt = new Date(now.getTime() + pausedWakeBackoffDelayMs(nextAttempt));
+        const scheduledIso = scheduledRetryAt.toISOString();
+        const pausedContextSnapshot = {
+          ...enrichedContextSnapshot,
+          wakeReason: PAUSED_AGENT_WAKE_BACKOFF_WAKE_REASON,
+          pausedWakeAttempt: nextAttempt,
+          pausedWakeScheduledRetryAt: scheduledIso,
+        };
+
+        if (existing) {
+          const mergedPayload = {
+            ...(parseObject(existing.wake.payload) ?? {}),
+            ...(payload ?? {}),
+            pausedWakeAttempt: nextAttempt,
+            pausedWakeScheduledRetryAt: scheduledIso,
+          };
+          await tx
+            .update(agentWakeupRequests)
+            .set({
+              payload: mergedPayload,
+              coalescedCount: (existing.wake.coalescedCount ?? 0) + 1,
+              requestedAt: now,
+              updatedAt: now,
+            })
+            .where(eq(agentWakeupRequests.id, existing.wake.id));
+
+          const mergedContext = mergeCoalescedContextSnapshot(existing.run.contextSnapshot, pausedContextSnapshot);
+          const [updatedRun] = await tx
+            .update(heartbeatRuns)
+            .set({
+              contextSnapshot: mergedContext,
+              scheduledRetryAt,
+              scheduledRetryAttempt: nextAttempt,
+              updatedAt: now,
+            })
+            .where(eq(heartbeatRuns.id, existing.run.id))
+            .returning();
+          return updatedRun ?? existing.run;
+        }
+
+        const [wakeupRequest] = await tx
+          .insert(agentWakeupRequests)
+          .values({
+            companyId: agent.companyId,
+            agentId,
+            source,
+            triggerDetail,
+            reason: PAUSED_AGENT_WAKE_BACKOFF_REASON,
+            payload: {
+              ...(payload ?? {}),
+              pausedWakeAttempt: nextAttempt,
+              pausedWakeScheduledRetryAt: scheduledIso,
+            },
+            status: "queued",
+            requestedByActorType: opts.requestedByActorType ?? null,
+            requestedByActorId: opts.requestedByActorId ?? null,
+            idempotencyKey: opts.idempotencyKey ?? null,
+            requestedAt: now,
+          })
+          .returning();
+        if (!wakeupRequest) throw new Error("Failed to create paused wakeup request");
+
+        const [createdRun] = await tx
+          .insert(heartbeatRuns)
+          .values({
+            companyId: agent.companyId,
+            agentId,
+            invocationSource: source,
+            triggerDetail,
+            status: "scheduled_retry",
+            wakeupRequestId: wakeupRequest.id,
+            contextSnapshot: pausedContextSnapshot,
+            sessionIdBefore: sessionBefore,
+            scheduledRetryAt,
+            scheduledRetryAttempt: nextAttempt,
+            scheduledRetryReason: PAUSED_AGENT_WAKE_BACKOFF_REASON,
+            continuationAttempt,
+          })
+          .returning();
+        if (!createdRun) throw new Error("Failed to create paused wakeup run");
+
+        await tx
+          .update(agentWakeupRequests)
+          .set({
+            runId: createdRun.id,
+            updatedAt: now,
+          })
+          .where(eq(agentWakeupRequests.id, wakeupRequest.id));
+
+        return createdRun;
+      });
+      return scheduledRun;
+    }
+
     if (
-      agent.status === "paused" ||
       agent.status === "terminated" ||
       agent.status === "pending_approval"
     ) {
@@ -9172,6 +9898,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             id: issues.id,
             companyId: issues.companyId,
             status: issues.status,
+            priority: issues.priority,
             assigneeAgentId: issues.assigneeAgentId,
             executionRunId: issues.executionRunId,
             executionAgentNameKey: issues.executionAgentNameKey,
@@ -9400,7 +10127,132 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           return { kind: "skipped" as const };
         }
 
+        const now = new Date();
+        const wakeReason = readNonEmptyString(reason);
+        const bypassSuppression = shouldBypassWakeSuppression({
+          issueStatus: issue.status,
+          issuePriority: issue.priority,
+          wakeReason,
+        });
+        const isSystemAssignmentWake =
+          wakeReason === "issue_assigned" && source === "assignment" && triggerDetail === "system";
+
+        if (isSystemAssignmentWake && issue.priority !== "critical") {
+          const assignmentSuppressionThreshold = new Date(now.getTime() - BLOCKED_ISSUE_WAKE_SUPPRESSION_MS);
+          const recentSystemAssignmentRun = await tx
+            .select({ id: heartbeatRuns.id })
+            .from(heartbeatRuns)
+            .where(
+              and(
+                eq(heartbeatRuns.companyId, issue.companyId),
+                eq(heartbeatRuns.agentId, agentId),
+                inArray(heartbeatRuns.status, [...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES]),
+                sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+                sql`${heartbeatRuns.contextSnapshot} ->> 'wakeReason' = 'issue_assigned'`,
+                gte(heartbeatRuns.createdAt, assignmentSuppressionThreshold),
+              ),
+            )
+            .orderBy(desc(heartbeatRuns.createdAt))
+            .limit(1)
+            .then((rows) => rows[0] ?? null);
+
+          if (recentSystemAssignmentRun) {
+            await tx.insert(agentWakeupRequests).values({
+              companyId: agent.companyId,
+              agentId,
+              source,
+              triggerDetail,
+              reason: "issue_blocked_duplicate_suppressed",
+              payload,
+              status: "skipped",
+              requestedByActorType: opts.requestedByActorType ?? null,
+              requestedByActorId: opts.requestedByActorId ?? null,
+              idempotencyKey: opts.idempotencyKey ?? null,
+              finishedAt: now,
+            });
+            return { kind: "skipped" as const };
+          }
+        }
+
+        if (issue.status === "blocked" && !bypassSuppression) {
+          const blockedSuppressionThreshold = new Date(now.getTime() - BLOCKED_ISSUE_WAKE_SUPPRESSION_MS);
+          const recentlySuppressedBlockedWake = await tx
+            .select({ id: agentWakeupRequests.id })
+            .from(agentWakeupRequests)
+            .where(
+              and(
+                eq(agentWakeupRequests.companyId, issue.companyId),
+                eq(agentWakeupRequests.agentId, agentId),
+                sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+                or(
+                  gte(agentWakeupRequests.requestedAt, blockedSuppressionThreshold),
+                  gte(agentWakeupRequests.createdAt, blockedSuppressionThreshold),
+                ),
+              ),
+            )
+            .orderBy(desc(agentWakeupRequests.requestedAt))
+            .limit(1)
+            .then((rows) => rows[0] ?? null);
+
+          if (recentlySuppressedBlockedWake) {
+            await tx.insert(agentWakeupRequests).values({
+              companyId: agent.companyId,
+              agentId,
+              source,
+              triggerDetail,
+              reason: "issue_blocked_duplicate_suppressed",
+              payload,
+              status: "skipped",
+              requestedByActorType: opts.requestedByActorType ?? null,
+              requestedByActorId: opts.requestedByActorId ?? null,
+              idempotencyKey: opts.idempotencyKey ?? null,
+              finishedAt: now,
+            });
+            return { kind: "skipped" as const };
+          }
+        }
+
         if (activeExecutionRun) {
+          const blockedSuppressionThreshold = new Date(now.getTime() - BLOCKED_ISSUE_WAKE_SUPPRESSION_MS);
+          const hasRecentSameIssueWake = await tx
+            .select({ id: agentWakeupRequests.id })
+            .from(agentWakeupRequests)
+            .where(
+              and(
+                eq(agentWakeupRequests.companyId, issue.companyId),
+                eq(agentWakeupRequests.agentId, agentId),
+                sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+                or(
+                  gte(agentWakeupRequests.requestedAt, blockedSuppressionThreshold),
+                  gte(agentWakeupRequests.createdAt, blockedSuppressionThreshold),
+                ),
+              ),
+            )
+            .orderBy(desc(agentWakeupRequests.createdAt))
+            .limit(1)
+            .then((rows) => rows[0] ?? null);
+          const shouldSuppressBlockedDuplicateWake =
+            !bypassSuppression &&
+            wakeReason === "issue_assigned" &&
+            triggerDetail === "system" &&
+            hasRecentSameIssueWake;
+          if (shouldSuppressBlockedDuplicateWake) {
+            await tx.insert(agentWakeupRequests).values({
+              companyId: agent.companyId,
+              agentId,
+              source,
+              triggerDetail,
+              reason: "issue_blocked_duplicate_suppressed",
+              payload,
+              status: "skipped",
+              requestedByActorType: opts.requestedByActorType ?? null,
+              requestedByActorId: opts.requestedByActorId ?? null,
+              idempotencyKey: opts.idempotencyKey ?? null,
+              finishedAt: now,
+            });
+            return { kind: "skipped" as const };
+          }
+
           const executionAgent = await tx
             .select({ name: agents.name })
             .from(agents)
@@ -9513,6 +10365,57 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           return { kind: "deferred" as const };
         }
 
+        const wakeCoalesceThreshold = new Date(now.getTime() - SAME_ISSUE_WAKE_COALESCE_WINDOW_MS);
+        const recentSameIssueRun = await tx
+          .select()
+          .from(heartbeatRuns)
+          .where(
+            and(
+              eq(heartbeatRuns.companyId, issue.companyId),
+              eq(heartbeatRuns.agentId, agentId),
+              inArray(heartbeatRuns.status, [...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES]),
+              sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+              gte(heartbeatRuns.createdAt, wakeCoalesceThreshold),
+            ),
+          )
+          .orderBy(desc(heartbeatRuns.createdAt))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+
+        if (recentSameIssueRun) {
+          const mergedContextSnapshot = mergeCoalescedContextSnapshot(
+            recentSameIssueRun.contextSnapshot,
+            enrichedContextSnapshot,
+          );
+          const mergedRun = await tx
+            .update(heartbeatRuns)
+            .set({
+              contextSnapshot: mergedContextSnapshot,
+              updatedAt: now,
+            })
+            .where(eq(heartbeatRuns.id, recentSameIssueRun.id))
+            .returning()
+            .then((rows) => rows[0] ?? recentSameIssueRun);
+
+          await tx.insert(agentWakeupRequests).values({
+            companyId: agent.companyId,
+            agentId,
+            source,
+            triggerDetail,
+            reason: "issue_wake_recently_coalesced",
+            payload,
+            status: "coalesced",
+            coalescedCount: 1,
+            requestedByActorType: opts.requestedByActorType ?? null,
+            requestedByActorId: opts.requestedByActorId ?? null,
+            idempotencyKey: opts.idempotencyKey ?? null,
+            runId: mergedRun.id,
+            finishedAt: now,
+          });
+
+          return { kind: "coalesced" as const, run: mergedRun };
+        }
+
         const wakeupRequest = await tx
           .insert(agentWakeupRequests)
           .values({
@@ -9558,7 +10461,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         // doesn't start it). It will be stamped in claimQueuedRun() once the run
         // transitions to "running" — Fix A (lazy locking).
 
-        return { kind: "queued" as const, run: newRun };
+        return {
+          kind: "queued" as const,
+          run: newRun,
+          startImmediately: !(issue.status === "blocked" && !bypassSuppression),
+        };
       });
 
       if (outcome.kind === "deferred" || outcome.kind === "skipped") return null;
@@ -9580,7 +10487,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         },
       });
 
-      await startNextQueuedRunForAgent(agent.id);
+      if (outcome.startImmediately !== false) {
+        await startNextQueuedRunForAgent(agent.id);
+      }
       return newRun;
     }
 
@@ -9927,6 +10836,88 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     await cancelPendingWakeupsForBudgetScope(scope);
   }
 
+  async function getStorageReport() {
+    const rows = await db.execute(sql`
+      WITH run_payload AS (
+        SELECT
+          hr.id,
+          hr.company_id,
+          hr.agent_id,
+          hr.status,
+          hr.compacted_at,
+          COALESCE(pg_column_size(hr.result_json), 0) AS result_json_bytes,
+          COALESCE(pg_column_size(hr.context_snapshot), 0) AS context_snapshot_bytes,
+          COALESCE(pg_column_size(hr.stdout_excerpt), 0) AS stdout_excerpt_bytes,
+          COALESCE(pg_column_size(hr.stderr_excerpt), 0) AS stderr_excerpt_bytes
+        FROM heartbeat_runs hr
+      ),
+      event_payload AS (
+        SELECT
+          hre.run_id,
+          hre.event_type,
+          COUNT(*) AS event_count,
+          COALESCE(SUM(pg_column_size(hre.payload)), 0) AS event_payload_bytes
+        FROM heartbeat_run_events hre
+        GROUP BY hre.run_id, hre.event_type
+      ),
+      run_rows AS (
+        SELECT
+          rp.company_id,
+          rp.agent_id,
+          rp.status,
+          rp.compacted_at,
+          rp.result_json_bytes,
+          rp.context_snapshot_bytes,
+          rp.stdout_excerpt_bytes,
+          rp.stderr_excerpt_bytes,
+          ep.event_type,
+          COALESCE(ep.event_count, 0) AS event_count,
+          COALESCE(ep.event_payload_bytes, 0) AS event_payload_bytes
+        FROM run_payload rp
+        LEFT JOIN event_payload ep ON ep.run_id = rp.id
+      )
+      SELECT
+        c.name AS company_name,
+        a.name AS agent_name,
+        rr.status,
+        rr.event_type,
+        COUNT(*)::bigint AS run_count,
+        COUNT(rr.compacted_at) AS compacted_count,
+        ROUND(SUM(rr.result_json_bytes) / 1024.0 / 1024.0, 4) AS result_json_mb,
+        ROUND(SUM(rr.context_snapshot_bytes) / 1024.0 / 1024.0, 4) AS context_snapshot_mb,
+        ROUND(SUM(rr.stdout_excerpt_bytes) / 1024.0 / 1024.0, 4) AS stdout_mb,
+        ROUND(SUM(rr.stderr_excerpt_bytes) / 1024.0 / 1024.0, 4) AS stderr_mb,
+        ROUND(SUM(rr.event_payload_bytes) / 1024.0 / 1024.0, 4) AS event_payload_mb,
+        COALESCE(SUM(rr.event_count), 0) AS event_count
+      FROM run_rows rr
+      JOIN companies c ON c.id = rr.company_id
+      LEFT JOIN agents a ON a.id = rr.agent_id
+      GROUP BY c.name, a.name, rr.status, rr.event_type
+      ORDER BY COALESCE(ROUND(SUM(rr.result_json_bytes) / 1024.0 / 1024.0, 4), 0) DESC NULLS LAST
+    `);
+
+    return {
+      generatedAt: new Date().toISOString(),
+      rows: rows.map((row) => {
+        const value = row as Record<string, unknown>;
+        return {
+          companyName: value.company_name as string,
+          agentName: value.agent_name as string,
+          status: value.status as string,
+          eventType: value.event_type as string | null,
+          runCount: Number(value.run_count ?? 0),
+          compactedCount: Number(value.compacted_count ?? 0),
+          resultJsonMb: Number(value.result_json_mb ?? 0),
+          contextSnapshotMb: Number(value.context_snapshot_mb ?? 0),
+          stdoutMb: Number(value.stdout_mb ?? 0),
+          stderrMb: Number(value.stderr_mb ?? 0),
+          eventPayloadMb: Number(value.event_payload_mb ?? 0),
+          eventCount: Number(value.event_count ?? 0),
+        };
+      }),
+    };
+  }
+
   return {
     list: async (companyId: string, agentId?: string, limit?: number) => {
       const safeForLegacyEncoding = await hasUnsafeTextProjectionDatabase();
@@ -10227,11 +11218,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
 
       const issueMonitors = await tickDueIssueMonitors(now);
+      const staleInReview = await tickStaleInReviewEscalations(now);
 
       return {
-        checked: checked + issueMonitors.checked,
-        enqueued: enqueued + issueMonitors.triggered,
-        skipped: skipped + issueMonitors.skipped,
+        checked: checked + issueMonitors.checked + staleInReview.checked,
+        enqueued: enqueued + issueMonitors.triggered + staleInReview.triggered,
+        skipped: skipped + issueMonitors.skipped + staleInReview.skipped,
       };
     },
 
@@ -10240,6 +11232,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     cancelActiveForAgent: (agentId: string) => cancelActiveForAgentInternal(agentId),
 
     cancelBudgetScopeWork,
+
+    getStorageReport,
 
     getRunIssueSummary: async (runId: string) => {
       const [run] = await db
@@ -10278,6 +11272,48 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .orderBy(desc(heartbeatRuns.startedAt))
         .limit(1);
       return run ?? null;
+    },
+
+    getExecutionCapSummary: async () => {
+      const [globalRunning, globalQueued, premiumRunning, pausedWakeBackoffRows] = await Promise.all([
+        countGlobalRunningRuns(),
+        countGlobalQueuedRuns(),
+        listPremiumRunningRuns().then((runs) => runs.length),
+        db
+          .select({
+            agentId: heartbeatRuns.agentId,
+            attemptCount: heartbeatRuns.scheduledRetryAttempt,
+            scheduledRetryAt: heartbeatRuns.scheduledRetryAt,
+          })
+          .from(heartbeatRuns)
+          .innerJoin(agents, eq(agents.id, heartbeatRuns.agentId))
+          .where(
+            and(
+              eq(heartbeatRuns.status, "scheduled_retry"),
+              eq(heartbeatRuns.scheduledRetryReason, PAUSED_AGENT_WAKE_BACKOFF_REASON),
+              eq(agents.status, "paused"),
+            ),
+          ),
+      ]);
+      return {
+        global: {
+          max: GLOBAL_MAX_CONCURRENT_RUNS,
+          running: globalRunning,
+          queued: globalQueued,
+        },
+        premium: {
+          max: PREMIUM_MAX_CONCURRENT_RUNS,
+          running: premiumRunning,
+        },
+        perAgent: {
+          hardCap: PER_AGENT_MAX_CONCURRENT_RUNS_HARD_CAP,
+        },
+        pausedWakeBackoff: pausedWakeBackoffRows.map((row) => ({
+          agentId: row.agentId,
+          pausedWakeAttemptCount: Number(row.attemptCount ?? 0),
+          lastScheduledRetryAt: row.scheduledRetryAt ? new Date(row.scheduledRetryAt).toISOString() : null,
+        })),
+      };
     },
   };
 }

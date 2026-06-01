@@ -33,6 +33,15 @@ import type { IssueWorkProduct } from "./work-product.js";
 
 export type { IssueWorkMode };
 
+export type InteractionResolutionMethod = "ui_click" | "api_explicit" | "api_automated" | "unknown";
+
+export interface InteractionResolutionAudit {
+  method: InteractionResolutionMethod;
+  resolvedAt: Date | string | null;
+  resolvedByAgentId: string | null;
+  resolvedByUserId: string | null;
+}
+
 export interface IssueAncestorProject {
   id: string;
   name: string;

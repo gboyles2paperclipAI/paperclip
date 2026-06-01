@@ -39,6 +39,7 @@ import type { Db } from "@paperclipai/db";
 import { pluginJobs, pluginJobRuns } from "@paperclipai/db";
 import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
+import type { ProviderCooldownService } from "./provider-cooldown.js";
 import { parseCron, nextCronTick, validateCron } from "./cron.js";
 import { logger } from "../middleware/logger.js";
 
@@ -69,6 +70,8 @@ export interface PluginJobSchedulerOptions {
   jobStore: PluginJobStore;
   /** Worker process manager for RPC calls. */
   workerManager: PluginWorkerManager;
+  /** Service for managing provider cooldown states. */
+  providerCooldownService?: ProviderCooldownService;
   /** Interval between scheduler ticks in ms (default: 30s). */
   tickIntervalMs?: number;
   /** Timeout for individual job RPC calls in ms (default: 5min). */

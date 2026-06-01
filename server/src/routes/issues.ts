@@ -8,6 +8,7 @@ import {
   activityLog,
   executionWorkspaces,
   heartbeatRuns,
+  issueRecoveryActions,
   issueExecutionDecisions,
   issueRelations,
   issues as issueRows,
@@ -15,6 +16,7 @@ import {
 } from "@paperclipai/db";
 import {
   addIssueCommentSchema,
+  addIssueMarkerSchema,
   acceptIssueThreadInteractionSchema,
   cancelIssueThreadInteractionSchema,
   companySearchQuerySchema,
@@ -50,6 +52,7 @@ import {
   type CompanySearchQuery,
   type CompanySearchResponse,
   type ExecutionWorkspace,
+  type InteractionResolutionMethod,
   type IssueRelationIssueSummary,
   type SuccessfulRunHandoffState,
 } from "@paperclipai/shared";
@@ -83,7 +86,7 @@ import {
 } from "../services/index.js";
 import { logger } from "../middleware/logger.js";
 import { conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
-import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, assertInstanceAdmin, getActorInfo } from "./authz.js";
 import {
   assertNoAgentHostWorkspaceCommandMutation,
   collectIssueWorkspaceCommandPaths,
@@ -849,6 +852,7 @@ export function issueRoutes(
     searchService?: CompanySearchService;
     searchRateLimiter?: CompanySearchRateLimiter;
     pluginWorkerManager?: PluginWorkerManager;
+    deploymentMode?: "local_trusted" | "authenticated";
   } = {},
 ) {
   const router = Router();
@@ -1037,6 +1041,34 @@ export function issueRoutes(
         ? await recoveryActionsSvc.getActiveForIssue(input.issue.companyId, input.issue.id)
         : input.activeRecoveryAction;
     if (!activeRecoveryAction) return null;
+
+    // FIX (FUL-4002): Prevent recovery action from being cancelled during recovery-owner
+    // checkout. When recovery sets an issue to `blocked` and wakes the recovery owner,
+    // that checkout transitions the issue back to `in_progress`, which normally marks the
+    // recovery action as "stale" and cancels it. The cancel resets attemptCount → 1,
+    // so the next recovery cycle creates a fresh action and posts a duplicate comment.
+    // Skip cancellation when the issue's current checkoutRunId belongs to a run that
+    // was woken by this recovery action — the agent is actively working on the recovery.
+    if (
+      input.statusChanged === true &&
+      input.issue.status === "in_progress" &&
+      input.issue.checkoutRunId &&
+      (activeRecoveryAction.kind === "stranded_assigned_issue" ||
+        activeRecoveryAction.kind === "missing_disposition")
+    ) {
+      const checkoutRun = await db
+        .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, input.issue.checkoutRunId))
+        .then((rows) => rows[0] ?? null);
+      const ctx = checkoutRun?.contextSnapshot ?? {};
+      if (
+        readNonEmptyString(ctx.wakeReason) === "source_scoped_recovery_action" &&
+        readNonEmptyString(ctx.recoveryActionId) === activeRecoveryAction.id
+      ) {
+        return activeRecoveryAction;
+      }
+    }
 
     const resolutionNote = await classifySourceRecoveryRevalidation(input);
     if (!resolutionNote) return activeRecoveryAction;
@@ -1381,10 +1413,142 @@ export function issueRoutes(
     return decision.allowed;
   }
 
+  const TRIAGE_AUTHORITY_FIELDS_DEFAULT = ["status", "assigneeAgentId", "blockedByIssueIds"];
+  const TRIAGE_HARD_BLOCKED_FIELDS = new Set(["title", "description", "body", "documents", "assigneeUserId"]);
+  const TRIAGE_STALE_ACTIVITY_MS = 15 * 60 * 1000;
+
+  function getTriageAuthorityFields(input: unknown) {
+    if (!Array.isArray(input)) return TRIAGE_AUTHORITY_FIELDS_DEFAULT;
+    const candidate = input.filter((field): field is string => typeof field === "string");
+    return candidate.length > 0 ? candidate : TRIAGE_AUTHORITY_FIELDS_DEFAULT;
+  }
+
+  type IssueTriageAuthorityPatchDecision = {
+    skipOwnership: boolean;
+    allowed: boolean;
+  };
+
+  async function assertBoardTriageAuthorityForIssuePatch(
+    req: Request,
+    res: Response,
+    existing: {
+      id: string;
+      companyId: string;
+      assigneeAgentId: string | null;
+      status: string;
+      labels?: Array<{ name?: string | null }> | null;
+      updatedAt: string | Date;
+      lastActivityAt?: string | Date | null;
+    },
+    body: Record<string, unknown>,
+  ): Promise<IssueTriageAuthorityPatchDecision> {
+    if (req.actor.type !== "agent" || !req.actor.agentId) return { skipOwnership: false, allowed: true };
+
+    const actorAgent = await agentsSvc.getById(req.actor.agentId);
+    if (!actorAgent || actorAgent.companyId !== existing.companyId) {
+      res.status(403).json({ error: "Forbidden" });
+      return { skipOwnership: false, allowed: false };
+    }
+
+    const patchKeys = Object.keys(body);
+    const hasTriageAuthority = actorAgent.permissions?.triageAuthority === true;
+    if (!hasTriageAuthority) return { skipOwnership: false, allowed: true };
+
+    const triageCandidateFields = ["status", "assigneeAgentId", "blockedByIssueIds"];
+    const hardBlockedField = patchKeys.find((field) => TRIAGE_HARD_BLOCKED_FIELDS.has(field));
+    if (hardBlockedField) {
+      res.status(403).json({
+        error: "Issue patch contains triage-authority restricted fields",
+        details: {
+          issueId: existing.id,
+          field: hardBlockedField,
+          securityPrinciples: ["Board Triage Authority", "Least Privilege"],
+        },
+      });
+      return { skipOwnership: false, allowed: false };
+    }
+
+    const triagePatchFields = patchKeys.filter((field) => triageCandidateFields.includes(field));
+    if (triagePatchFields.length === 0) return { skipOwnership: false, allowed: true };
+
+    const nonTriagePatchField = patchKeys.find((field) => !triageCandidateFields.includes(field));
+    if (nonTriagePatchField) {
+      res.status(403).json({
+        error: "Triage authority patches may only include triage fields",
+        details: {
+          issueId: existing.id,
+          field: nonTriagePatchField,
+          allowedFields: triageCandidateFields,
+          securityPrinciples: ["Board Triage Authority", "Least Privilege"],
+        },
+      });
+      return { skipOwnership: false, allowed: false };
+    }
+
+    if (body.assigneeAgentId === req.actor.agentId) {
+      res.status(403).json({
+        error: "Agent cannot assign issue to self",
+        details: {
+          issueId: existing.id,
+          actorAgentId: req.actor.agentId,
+          securityPrinciples: ["Board Triage Authority", "Owner Separation"],
+        },
+      });
+      return { skipOwnership: false, allowed: false };
+    }
+
+    if (existing.status === "done" || existing.status === "cancelled") {
+      res.status(403).json({ error: "Cannot patch done or cancelled issues through triage authority" });
+      return { skipOwnership: false, allowed: false };
+    }
+
+    const triageAuthorityFields = new Set(getTriageAuthorityFields(actorAgent.permissions?.triageAuthorityFields));
+    const disallowedField = triagePatchFields.find((field) => !triageAuthorityFields.has(field));
+    if (disallowedField) {
+      res.status(403).json({
+        error: "Request contains fields outside triage authority",
+        details: {
+          issueId: existing.id,
+          field: disallowedField,
+          allowedTriageFields: [...triageAuthorityFields],
+          securityPrinciples: ["Board Triage Authority", "Least Privilege"],
+        },
+      });
+      return { skipOwnership: false, allowed: false };
+    }
+
+    const latestActivityAt = existing.lastActivityAt
+      ? new Date(existing.lastActivityAt).getTime()
+      : new Date(existing.updatedAt).getTime();
+    const stalenessMs = Date.now() - latestActivityAt;
+    if (stalenessMs < TRIAGE_STALE_ACTIVITY_MS) {
+      res.status(422).json({
+        error: "Issue is too recent for triage-authority patch",
+        details: {
+          issueId: existing.id,
+          lastActivityAt: new Date(latestActivityAt).toISOString(),
+          stalenessMs,
+          requiredStalenessMs: TRIAGE_STALE_ACTIVITY_MS,
+        },
+      });
+      return { skipOwnership: false, allowed: false };
+    }
+
+    return { skipOwnership: true, allowed: true };
+  }
+
   async function assertAgentIssueMutationAllowed(
     req: Request,
     res: Response,
-    issue: { id: string; companyId: string; status: string; assigneeAgentId: string | null },
+    issue: {
+      id: string;
+      companyId: string;
+      status: string;
+      assigneeAgentId: string | null;
+      assigneeUserId?: string | null;
+      labels?: Array<{ name?: string | null }> | null;
+    },
+    options: { allowBoardOwned?: boolean; skipOwnershipForTriagePatch?: boolean } = {},
   ) {
     if (req.actor.type !== "agent") return true;
     const actorAgentId = req.actor.agentId;
@@ -1392,10 +1556,39 @@ export function issueRoutes(
       res.status(403).json({ error: "Agent authentication required" });
       return false;
     }
+    const hasAwaitingBoardLabel = (issue.labels ?? []).some((label) => label?.name === "awaiting-board");
+    if ((issue.assigneeUserId || hasAwaitingBoardLabel) && !options.allowBoardOwned) {
+      res.status(403).json({
+        error: "Agent cannot mutate board-owned or board-hold issues",
+        details: {
+          issueId: issue.id,
+          assigneeUserId: issue.assigneeUserId ?? null,
+          hasAwaitingBoardLabel,
+          actorAgentId,
+        },
+      });
+      return false;
+    }
+    if (issue.status === "in_review") {
+      const interactions = await issueThreadInteractionsSvc.listForIssue(issue.id);
+      if (interactions.some((interaction) => interaction.status === "pending")) {
+        res.status(403).json({
+          error: "Agent cannot mutate in_review issues with pending interactions",
+          details: {
+            issueId: issue.id,
+            actorAgentId,
+          },
+        });
+        return false;
+      }
+    }
     if (issue.assigneeAgentId === null) {
       return true;
     }
     if (issue.assigneeAgentId !== actorAgentId) {
+      if (options.skipOwnershipForTriagePatch) {
+        return true;
+      }
       if (await hasActiveCheckoutManagementOverride(actorAgentId, issue.companyId, issue.assigneeAgentId)) {
         return true;
       }
@@ -1421,6 +1614,9 @@ export function issueRoutes(
         });
       }
       return false;
+    }
+    if (options.skipOwnershipForTriagePatch) {
+      return true;
     }
     if (issue.status !== "in_progress") {
       return true;
@@ -1503,6 +1699,28 @@ export function issueRoutes(
         modelProfile: "cheap",
         recoveryIntent: "status_only",
         resumeRequiresNormalModel: true,
+      },
+    });
+    return false;
+  }
+
+  async function assertBoardTriageAuthorityForIssueAssigneeUserPatch(
+    req: Request,
+    res: Response,
+    existing: { id: string; assigneeUserId: string | null },
+    requestedAssigneeUserId: unknown,
+  ) {
+    if (req.actor.type !== "agent") return true;
+    if (typeof requestedAssigneeUserId !== "string" || requestedAssigneeUserId.trim().length === 0) return true;
+    if (existing.assigneeUserId === requestedAssigneeUserId) return true;
+
+    res.status(403).json({
+      error: "Agent cannot assign issues directly to board users",
+      details: {
+        issueId: existing.id,
+        actorAgentId: req.actor.agentId,
+        requestedAssigneeUserId,
+        securityPrinciples: ["Least Privilege", "Board Triage Authority", "Secure Defaults"],
       },
     });
     return false;
@@ -1971,11 +2189,18 @@ export function issueRoutes(
       if (revalidated) recoveryActionByIssue.set(issue.id, revalidated);
       else recoveryActionByIssue.delete(issue.id);
     }));
-    res.json(result.map((issue) => ({
-      ...issue,
-      successfulRunHandoff: handoffStates.get(issue.id) ?? null,
-      activeRecoveryAction: recoveryActionByIssue.get(issue.id) ?? null,
-    })));
+    res.json(result.map((issue) => {
+      const issueAny = issue as { blockedBy?: { id: string }[] };
+      const blockedByIssueIds = Array.isArray(issueAny.blockedBy)
+        ? issueAny.blockedBy.map((blocker) => blocker.id)
+        : [];
+      return {
+        ...issue,
+        blockedByIssueIds,
+        successfulRunHandoff: handoffStates.get(issue.id) ?? null,
+        activeRecoveryAction: recoveryActionByIssue.get(issue.id) ?? null,
+      };
+    }));
   });
 
   router.get("/companies/:companyId/issues/count", async (req, res) => {
@@ -2017,6 +2242,44 @@ export function issueRoutes(
       q: req.query.q as string | undefined,
     });
     res.json({ count });
+  });
+
+  router.get("/companies/:companyId/interactions", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+
+    const resolvedAfterRaw = typeof req.query.resolvedAfter === "string" ? req.query.resolvedAfter.trim() : null;
+    const resolvedBeforeRaw = typeof req.query.resolvedBefore === "string" ? req.query.resolvedBefore.trim() : null;
+    const methodRaw = typeof req.query.method === "string" ? req.query.method.trim() : null;
+
+    const resolvedAfter = resolvedAfterRaw ? new Date(resolvedAfterRaw) : null;
+    if (resolvedAfterRaw && (!resolvedAfter || Number.isNaN(resolvedAfter.getTime()))) {
+      throw unprocessable("resolvedAfter must be a valid ISO-8601 timestamp");
+    }
+
+    const resolvedBefore = resolvedBeforeRaw ? new Date(resolvedBeforeRaw) : null;
+    if (resolvedBeforeRaw && (!resolvedBefore || Number.isNaN(resolvedBefore.getTime()))) {
+      throw unprocessable("resolvedBefore must be a valid ISO-8601 timestamp");
+    }
+
+    const allowedMethods: Set<InteractionResolutionMethod> =
+      new Set(["ui_click", "api_explicit", "api_automated", "unknown"]);
+    const method = methodRaw
+      ? (allowedMethods.has(methodRaw as InteractionResolutionMethod)
+        ? methodRaw as InteractionResolutionMethod
+        : null)
+      : null;
+    if (methodRaw && !method) {
+      throw unprocessable("method must be one of ui_click, api_explicit, api_automated, unknown");
+    }
+
+    const interactions = await issueThreadInteractionService(db).listForCompany({
+      companyId,
+      resolvedAfter,
+      resolvedBefore,
+      method,
+    });
+    res.json(interactions);
   });
 
   router.get("/companies/:companyId/labels", async (req, res) => {
@@ -2229,6 +2492,7 @@ export function issueRoutes(
       successfulRunHandoffStates,
       scheduledRetry,
       activeRecoveryAction,
+      commentCursor,
     ] = await Promise.all([
       resolveIssueProjectAndGoal(issue),
       svc.getAncestors(issue.id),
@@ -2241,6 +2505,7 @@ export function issueRoutes(
       listSuccessfulRunHandoffStates(db, issue.companyId, [issue.id]),
       svc.getCurrentScheduledRetry(issue.id),
       recoveryActionsSvc.getActiveForIssue(issue.companyId, issue.id),
+      svc.getCommentCursor(issue.id),
     ]);
     const recoveryActionsByRelationIssue = await relationRecoveryActionMap(
       recoveryActionsSvc,
@@ -2283,6 +2548,7 @@ export function issueRoutes(
       mentionedProjects,
       currentExecutionWorkspace,
       workProducts,
+      commentCount: commentCursor.totalComments,
     });
   });
 
@@ -2313,7 +2579,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, existing.companyId);
-    if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
+    if (!(await assertAgentIssueMutationAllowed(req, res, existing, { allowBoardOwned: true }))) return;
     const activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(existing.companyId, existing.id);
     if (
       !(await assertRecoveryActionAuthority(
@@ -3907,7 +4173,25 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, existing.companyId);
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
-    if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
+    if (!(await assertBoardTriageAuthorityForIssueAssigneeUserPatch(
+      req,
+      res,
+      existing,
+      req.body.assigneeUserId,
+    ))) return;
+    const triageAuthorityPatch = await assertBoardTriageAuthorityForIssuePatch(
+      req,
+      res,
+      existing,
+      req.body as Record<string, unknown>,
+    );
+    if (!triageAuthorityPatch.allowed) return;
+    if (!(await assertAgentIssueMutationAllowed(
+      req,
+      res,
+      existing,
+      { skipOwnershipForTriagePatch: triageAuthorityPatch.skipOwnership },
+    ))) return;
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, existing, req.body))) return;
 
     const actor = getActorInfo(req);
@@ -3940,6 +4224,16 @@ export function issueRoutes(
     if (resumeRequested === true && !(await assertExplicitResumeIntentAllowed(req, res, existing))) return;
     if (resumeRequested !== true && reopenRequested === true && req.actor.type === "agent") {
       if (!(await assertExplicitResumeIntentAllowed(req, res, existing))) return;
+    }
+    if (req.actor.type === "agent" && updateFields.status === "done" && !commentBody) {
+      res.status(422).json({
+        error: "Agent done requires comment",
+        details: {
+          rule: "Terminal status requires terminal evidence",
+          fix: "Include a completion comment in the same PATCH request as status=done",
+        },
+      });
+      return;
     }
     await assertIssueEnvironmentSelection(existing.companyId, updateFields.executionWorkspaceSettings?.environmentId);
     const requestedAssigneeAgentId =
@@ -4151,7 +4445,7 @@ export function issueRoutes(
       nextAssigneeUserId === existing.createdByUserId;
 
     if (assigneeWillChange && !transition.workflowControlledAssignment) {
-      if (!isAgentReturningIssueToCreator) {
+      if (!isAgentReturningIssueToCreator && !triageAuthorityPatch.skipOwnership) {
         await assertCanAssignTasks(req, existing.companyId, {
           issueId: existing.id,
           projectId: await resolveAssignmentProjectId({
@@ -4173,6 +4467,7 @@ export function issueRoutes(
     }
 
     let issue;
+    let commentCreatedInPatch: Awaited<ReturnType<typeof svc.addComment>> | null = null;
     try {
       if (transition.decision && decisionId) {
         const decision = transition.decision;
@@ -4204,11 +4499,38 @@ export function issueRoutes(
           return updated;
         });
       } else {
-        issue = await svc.update(id, {
-          ...updateFields,
-          actorAgentId: actor.agentId ?? null,
-          actorUserId: actor.actorType === "user" ? actor.actorId : null,
-        });
+        if (commentBody) {
+          issue = await db.transaction(async (tx) => {
+            const updated = await svc.update(
+              id,
+              {
+                ...updateFields,
+                actorAgentId: actor.agentId ?? null,
+                actorUserId: actor.actorType === "user" ? actor.actorId : null,
+              },
+              tx,
+            );
+            if (!updated) return null;
+            commentCreatedInPatch = await svc.addComment(
+              id,
+              commentBody,
+              {
+                agentId: actor.agentId ?? undefined,
+                userId: actor.actorType === "user" ? actor.actorId : undefined,
+                runId: actor.runId,
+              },
+              undefined,
+              tx,
+            );
+            return updated;
+          });
+        } else {
+          issue = await svc.update(id, {
+            ...updateFields,
+            actorAgentId: actor.agentId ?? null,
+            actorUserId: actor.actorType === "user" ? actor.actorId : null,
+          });
+        }
       }
     } catch (err) {
       if (err instanceof HttpError && err.status === 422) {
@@ -4404,6 +4726,24 @@ export function issueRoutes(
         ),
       },
     });
+    if (triageAuthorityPatch.skipOwnership) {
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.triage_authority_patch",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          issueId: issue.id,
+          fields: Object.keys(req.body),
+          stalenessMs: TRIAGE_STALE_ACTIVITY_MS,
+          actorAgentId: actor.agentId,
+        },
+      });
+    }
 
     if (existing.status === "in_progress" && issue.status !== existing.status && issue.status !== "in_progress") {
       await listSuccessfulRunHandoffStates(db, issue.companyId, [issue.id])
@@ -4571,7 +4911,7 @@ export function issueRoutes(
     if (commentBody) {
       const commentReferenceSummaryBefore = updateReferenceSummaryAfter
         ?? await issueReferencesSvc.listIssueReferenceSummary(issue.id);
-      comment = await svc.addComment(id, commentBody, {
+      comment = commentCreatedInPatch ?? await svc.addComment(id, commentBody, {
         agentId: actor.agentId ?? undefined,
         userId: actor.actorType === "user" ? actor.actorId : undefined,
         runId: actor.runId,
@@ -4678,7 +5018,7 @@ export function issueRoutes(
           wakeup.payload && typeof wakeup.payload === "object" && typeof wakeup.payload.issueId === "string"
             ? wakeup.payload.issueId
             : issue.id;
-        wakeups.set(`${agentId}:${wakeIssueId}`, { agentId, wakeup });
+        wakeups.set(`${agentId}:${wakeIssueId}:${wakeup.reason}`, { agentId, wakeup });
       };
 
       if (executionStageWakeup) {
@@ -5078,6 +5418,152 @@ export function issueRoutes(
     res.json(result);
   });
 
+  router.post("/issues/:id/admin/repair-recovery-action", async (req, res) => {
+    if (req.actor.type !== "board") {
+      res.status(403).json({ error: "Board access required" });
+      return;
+    }
+    if (!req.actor.userId) {
+      throw forbidden("Board user context required");
+    }
+
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+
+    if (issue.status !== "done" && issue.status !== "cancelled") {
+      res.status(409).json({
+        error: "Issue must be in terminal status",
+        details: { status: issue.status },
+      });
+      return;
+    }
+
+    const resolutionNote = `Admin repair: cancelled stale recovery action after source issue reached ${issue.status}.`;
+    const repairedAction = await recoveryActionsSvc.resolveActiveForIssue({
+      companyId: issue.companyId,
+      sourceIssueId: issue.id,
+      status: "cancelled",
+      outcome: "cancelled",
+      resolutionNote,
+    });
+
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.admin_repair_recovery_action",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        issueId: issue.id,
+        actorUserId: req.actor.userId,
+        repaired: Boolean(repairedAction),
+        issueStatus: issue.status,
+        recoveryActionId: repairedAction?.id ?? null,
+      },
+    });
+
+    res.json({
+      issueId: issue.id,
+      repaired: Boolean(repairedAction),
+      recoveryAction: repairedAction,
+    });
+  });
+
+  router.post("/admin/recovery-actions/repair", async (req, res) => {
+    if (req.actor.type !== "board") {
+      res.status(403).json({ error: "Board access required" });
+      return;
+    }
+    if (!req.actor.userId) {
+      throw forbidden("Board user context required");
+    }
+
+    const companyIdInput =
+      req.body && typeof req.body === "object" && typeof (req.body as Record<string, unknown>).companyId === "string"
+        ? ((req.body as Record<string, unknown>).companyId as string).trim()
+        : "";
+    if (!companyIdInput) {
+      res.status(400).json({ error: "companyId is required" });
+      return;
+    }
+    assertCompanyAccess(req, companyIdInput);
+
+    const staleActions = await db
+      .select({
+        id: issueRecoveryActions.id,
+      })
+      .from(issueRecoveryActions)
+      .innerJoin(issueRows, eq(issueRecoveryActions.sourceIssueId, issueRows.id))
+      .where(
+        and(
+          eq(issueRecoveryActions.companyId, companyIdInput),
+          eq(issueRows.companyId, companyIdInput),
+          inArray(issueRecoveryActions.status, ["active", "escalated"]),
+          inArray(issueRows.status, ["done", "cancelled"]),
+        ),
+      );
+    const staleActionIds = staleActions.map((row) => row.id);
+
+    let repairedCount = 0;
+    if (staleActionIds.length > 0) {
+      const repaired = await db
+        .update(issueRecoveryActions)
+        .set({
+          status: "cancelled",
+          outcome: "cancelled",
+          resolutionNote: "Admin repair sweep: source issue already in terminal status.",
+          resolvedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(issueRecoveryActions.companyId, companyIdInput),
+            inArray(issueRecoveryActions.id, staleActionIds),
+          ),
+        )
+        .returning({ id: issueRecoveryActions.id });
+      repairedCount = repaired.length;
+    }
+
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId: companyIdInput,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.admin_repair_recovery_actions",
+      entityType: "company",
+      entityId: companyIdInput,
+      details: {
+        actorUserId: req.actor.userId,
+        scannedCount: staleActionIds.length,
+        repairedCount,
+      },
+    });
+
+    res.json({
+      companyId: companyIdInput,
+      scannedCount: staleActionIds.length,
+      repairedCount,
+    });
+  });
+
+  router.get("/admin/heartbeat/storage-report", async (req, res) => {
+    assertInstanceAdmin(req);
+    const report = await heartbeat.getStorageReport();
+    res.json(report);
+  });
+
   router.get("/issues/:id/comments", async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
@@ -5194,10 +5680,28 @@ export function issueRoutes(
       assertCompanyAccess(req, issue.companyId);
       assertBoard(req);
 
+      // Block unauthenticated implicit requests from resolving request_confirmation in
+      // authenticated mode. In that mode, local_implicit means a truly unauthenticated API
+      // call that cannot prove explicit human intent; board authentication (board claim +
+      // board API key) is required for governance confirmations.
+      // In local_trusted mode the machine operator IS the board user — there is no board
+      // claim or session auth flow, so local_implicit is the legitimate auth path.
+      if (req.actor.source === "local_implicit" && opts.deploymentMode !== "local_trusted") {
+        const candidate = await issueThreadInteractionService(db).getById(interactionId);
+        if (candidate && candidate.issueId === issue.id && candidate.kind === "request_confirmation") {
+          res.status(403).json({
+            error: "request_confirmation interactions require an authenticated board user. Please claim the board and authenticate with a board API key before confirming.",
+          });
+          return;
+        }
+      }
+
       const actor = getActorInfo(req);
       const { interaction, createdIssues, continuationIssue } = await issueThreadInteractionService(db).acceptInteraction(issue, interactionId, req.body, {
         agentId: actor.agentId,
         userId: actor.actorType === "user" ? actor.actorId : null,
+        requestId: (req as Request & { id?: string }).id ?? null,
+        resolutionMethod: req.actor.source === "local_implicit" ? "api_explicit" : req.actor.type === "board" ? "ui_click" : "api_explicit",
       });
       const continuationWakeIssue = continuationIssue ?? issue;
 
@@ -5299,10 +5803,25 @@ export function issueRoutes(
       assertCompanyAccess(req, issue.companyId);
       assertBoard(req);
 
+      // Block unauthenticated implicit requests from rejecting request_confirmation in
+      // authenticated mode. Same reasoning as the accept guard above.
+      // In local_trusted mode, local_implicit is the legitimate auth path for the board user.
+      if (req.actor.source === "local_implicit" && opts.deploymentMode !== "local_trusted") {
+        const candidate = await issueThreadInteractionService(db).getById(interactionId);
+        if (candidate && candidate.issueId === issue.id && candidate.kind === "request_confirmation") {
+          res.status(403).json({
+            error: "request_confirmation interactions require an authenticated board user. Please claim the board and authenticate with a board API key before declining.",
+          });
+          return;
+        }
+      }
+
       const actor = getActorInfo(req);
       const interaction = await issueThreadInteractionService(db).rejectInteraction(issue, interactionId, req.body, {
         agentId: actor.agentId,
         userId: actor.actorType === "user" ? actor.actorId : null,
+        requestId: (req as Request & { id?: string }).id ?? null,
+        resolutionMethod: req.actor.source === "local_implicit" ? "api_explicit" : req.actor.type === "board" ? "ui_click" : "api_explicit",
       });
 
       await logActivity(db, {
@@ -5359,6 +5878,8 @@ export function issueRoutes(
       const interaction = await issueThreadInteractionService(db).answerQuestions(issue, interactionId, req.body, {
         agentId: actor.agentId,
         userId: actor.actorType === "user" ? actor.actorId : null,
+        requestId: (req as Request & { id?: string }).id ?? null,
+        resolutionMethod: req.actor.type === "board" ? "ui_click" : "api_explicit",
       });
 
       await logActivity(db, {
@@ -5411,6 +5932,8 @@ export function issueRoutes(
       const interaction = await issueThreadInteractionService(db).cancelQuestions(issue, interactionId, req.body, {
         agentId: actor.agentId,
         userId: actor.actorType === "user" ? actor.actorId : null,
+        requestId: (req as Request & { id?: string }).id ?? null,
+        resolutionMethod: req.actor.type === "board" ? "ui_click" : "api_explicit",
       });
 
       await logActivity(db, {
@@ -5925,6 +6448,52 @@ export function issueRoutes(
     })();
 
     res.status(201).json(comment);
+  });
+
+  // POST /api/issues/:id/markers — company-scoped write path for observation markers.
+  // Bypasses assignee ownership check so watcher agents can record dedup state on
+  // cross-assignee issues without violating least-privilege controls on the main comment
+  // mutation path. Markers do not fire wake events and cannot mutate issue workflow state.
+  router.post("/issues/:id/markers", validate(addIssueMarkerSchema), async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+    if (req.actor.type !== "agent") {
+      res.status(403).json({ error: "Only agent actors can write issue markers" });
+      return;
+    }
+    const actorAgentId = req.actor.agentId;
+    if (!actorAgentId) {
+      res.status(403).json({ error: "Agent authentication required" });
+      return;
+    }
+    const actor = getActorInfo(req);
+    const comment = await svc.addComment(
+      id,
+      req.body.body,
+      { agentId: actorAgentId, runId: actor.runId },
+      { presentation: null, metadata: null },
+    );
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.marker_added",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        commentId: comment.id,
+        markerKind: req.body.kind,
+        identifier: issue.identifier,
+      },
+    });
+    res.status(201).json({ comment, kind: req.body.kind });
   });
 
   router.post("/issues/:id/feedback-votes", validate(upsertIssueFeedbackVoteSchema), async (req, res) => {

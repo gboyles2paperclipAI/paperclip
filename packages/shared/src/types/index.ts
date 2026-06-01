@@ -224,6 +224,8 @@ export type {
   IssueCommentMetadataRunLinkRow,
   IssueCommentPresentation,
   IssueThreadInteractionActorFields,
+  InteractionResolutionMethod,
+  InteractionResolutionAudit,
   SuggestedTaskDraft,
   SuggestTasksPayload,
   SuggestTasksResultCreatedTask,

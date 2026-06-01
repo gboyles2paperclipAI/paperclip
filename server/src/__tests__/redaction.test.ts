@@ -112,8 +112,7 @@ describe("redaction", () => {
       `--api-key=${REDACTED_EVENT_VALUE}`,
     ]);
     expect(result?.env).toEqual({
-      PAPERCLIP_RESOLVED_COMMAND:
-        `env OPENAI_API_KEY=${REDACTED_EVENT_VALUE} custom-acp --token ${REDACTED_EVENT_VALUE}`,
+      PAPERCLIP_RESOLVED_COMMAND: REDACTED_EVENT_VALUE,
       SAFE_VALUE: "visible",
     });
   });
@@ -134,5 +133,27 @@ describe("redaction", () => {
 
     expect(result?.args).toEqual(["--api-key", "not-a-command-secret"]);
     expect(result?.argv).toEqual(["--api-key", REDACTED_EVENT_VALUE]);
+  });
+
+  it("redacts secret-looking plaintext env values even when env key is non-sensitive", () => {
+    const result = redactEventPayload({
+      env: {
+        SAFE_TIMEOUT: "30",
+        CUSTOM_VALUE: "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+        RUNTIME_BINDING: {
+          type: "plain",
+          value: "sk-live-example",
+        },
+      },
+    });
+
+    expect(result?.env).toEqual({
+      SAFE_TIMEOUT: "30",
+      CUSTOM_VALUE: REDACTED_EVENT_VALUE,
+      RUNTIME_BINDING: {
+        type: "plain",
+        value: REDACTED_EVENT_VALUE,
+      },
+    });
   });
 });

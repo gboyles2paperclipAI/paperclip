@@ -236,7 +236,7 @@ export function SidebarAgents() {
     queryKey: queryKeys.liveRuns(selectedCompanyId!),
     queryFn: () => heartbeatsApi.liveRunsForCompany(selectedCompanyId!),
     enabled: !!selectedCompanyId,
-    refetchInterval: 10_000,
+    refetchInterval: () => (document.visibilityState === "visible" ? 30_000 : false),
   });
 
   const liveCountByAgent = useMemo(() => {

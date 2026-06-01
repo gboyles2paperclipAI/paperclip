@@ -112,6 +112,37 @@ Recommended for any deployment beyond local trusted.
 Authenticated deployments default strict mode on unless explicitly overridden by
 configuration or `PAPERCLIP_SECRETS_STRICT_MODE=false`.
 
+## SH-12: Agent Config Env Response Guardrail
+
+Agent API responses must never expose plaintext values from `adapterConfig.env`
+or runtime env overlays.
+
+- Read routes that return agent config (detail, self, list, compare, or any
+  derived export) must return redacted env values only.
+- `secret_ref` bindings may be returned as metadata (`secretId`, `version`)
+  because they do not include secret material.
+- Plaintext env bindings must be treated as sensitive by default and redacted
+  even when keys are non-obvious.
+
+Default-deny behavior applies to guardrail failures: if env redaction cannot be
+applied, the response must fail closed instead of returning unredacted config.
+
+## SH-12 Denylist: Env Value Inspection
+
+The following are prohibited in agent config read/compare operations:
+
+- Inspecting raw env binding values as part of comparison logic.
+- Returning value-level diffs for `adapterConfig.env` or runtime env overlays.
+- Logging env values from agent config objects to run logs, transcripts, or
+  audit payloads.
+
+Allowed behavior for comparison and review workflows:
+
+- Compare key presence only (`added`, `removed`, `renamed`).
+- Compare binding type only (`plain` vs `secret_ref`) without including value.
+- Compare `secret_ref` metadata only (`secretId`, `version`), never resolved
+  secret content.
+
 ## External References
 
 Provider-owned secrets can be linked without copying values into Paperclip by

@@ -38,6 +38,8 @@ const SECRET_TEXT_HINTS = [
   "ghr_",
 ] as const;
 export const REDACTED_EVENT_VALUE = "***REDACTED***";
+const ENV_PAYLOAD_KEY_RE = /^env$/i;
+const ENV_SAFE_VALUE_RE = /^(?:[A-Za-z0-9._:/=+-]{1,64}|true|false)$/;
 
 function maybeContainsSecretText(input: string) {
   const lower = input.toLowerCase();
@@ -85,9 +87,47 @@ function sanitizeCommandArgs(args: unknown[]): unknown[] {
   });
 }
 
+function shouldRedactEnvBindingValue(key: string, value: unknown): boolean {
+  if (SECRET_PAYLOAD_KEY_RE.test(key)) return true;
+  if (typeof value === "string") {
+    if (JWT_VALUE_RE.test(value)) return true;
+    const redactedValue = redactSensitiveText(value);
+    if (redactedValue !== value) return true;
+    if (!ENV_SAFE_VALUE_RE.test(value)) return true;
+  }
+  return false;
+}
+
+function sanitizeEnvRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const redacted: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (isSecretRefBinding(value)) {
+      redacted[key] = sanitizeValue(value);
+      continue;
+    }
+    if (isPlainBinding(value)) {
+      redacted[key] = {
+        type: "plain",
+        value: shouldRedactEnvBindingValue(key, value.value)
+          ? REDACTED_EVENT_VALUE
+          : sanitizeValue(value.value),
+      };
+      continue;
+    }
+    redacted[key] = shouldRedactEnvBindingValue(key, value)
+      ? REDACTED_EVENT_VALUE
+      : sanitizeValue(value);
+  }
+  return redacted;
+}
+
 export function sanitizeRecord(record: Record<string, unknown>): Record<string, unknown> {
   const redacted: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
+    if (ENV_PAYLOAD_KEY_RE.test(key) && isPlainObject(value)) {
+      redacted[key] = sanitizeEnvRecord(value);
+      continue;
+    }
     if (COMMAND_ARGS_PAYLOAD_KEY_RE.test(key) && Array.isArray(value)) {
       redacted[key] = sanitizeCommandArgs(value);
       continue;

@@ -31,8 +31,11 @@ if ("serviceWorker" in navigator) {
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      staleTime: 30_000,
-      refetchOnWindowFocus: true,
+      staleTime: 60_000,
+      // Disabled globally: WebSocket invalidation already marks background-tab
+      // queries stale and handles real-time updates. Re-fetching on every focus
+      // event across 5+ open tabs produces a multiplied request storm.
+      refetchOnWindowFocus: false,
     },
   },
 });
