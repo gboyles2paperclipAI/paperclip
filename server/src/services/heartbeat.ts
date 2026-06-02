@@ -71,6 +71,11 @@ import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import {
+  cleanupT1EnvFile,
+  extractT1Secrets,
+  writeT1EnvFile,
+} from "./t1-secret-store.js";
+import {
   buildHeartbeatRunIssueComment,
   HEARTBEAT_RUN_RESULT_OUTPUT_MAX_CHARS,
   HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS,
@@ -7398,6 +7403,35 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } else {
       delete context.paperclipSecrets;
     }
+
+    // T1 isolation (RC-2 Stage 1, FUL-6378): when features.t1_isolation is enabled
+    // on the agent adapter config, strip T1 durable secrets from the agent env and
+    // write them to a harness-controlled chmod 600 file for wrapper-script access.
+    // Flag default: OFF — existing agents are unaffected when the flag is absent.
+    const agentWorkspaceDir = resolveDefaultAgentWorkspaceDir(agent.id);
+    if (asBoolean(parseObject(executionRunConfig.features).t1_isolation, false)) {
+      const rawEnv = parseObject(resolvedConfig.env);
+      const stringEnv = Object.fromEntries(
+        Object.entries(rawEnv).filter((e): e is [string, string] => typeof e[1] === "string"),
+      );
+      if (Object.keys(stringEnv).length > 0) {
+        const { sanitizedEnv, t1Keys } = extractT1Secrets(run.id, stringEnv);
+        if (t1Keys.length > 0) {
+          const t1FilePath = await writeT1EnvFile(run.id, agentWorkspaceDir);
+          resolvedConfig.env = t1FilePath
+            ? { ...sanitizedEnv, PAPERCLIP_T1_ENV_PATH: t1FilePath }
+            : sanitizedEnv;
+          for (const key of t1Keys) {
+            secretKeys.delete(key);
+          }
+          logger.info(
+            { runId: run.id, agentId: agent.id, t1KeyCount: t1Keys.length },
+            "t1_isolation: stripped T1 secrets from agent env; wrote harness env file",
+          );
+        }
+      }
+    }
+
     const runScopedMentionedSkillKeys = await resolveRunScopedMentionedSkillKeys({
       db,
       companyId: agent.companyId,
@@ -8532,6 +8566,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             failureReason: latestRun?.error ?? undefined,
           });
           await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
+          await cleanupT1EnvFile(run.id, resolveDefaultAgentWorkspaceDir(run.agentId)).catch(() => undefined);
           activeRunExecutions.delete(run.id);
           await startNextQueuedRunForAgent(run.agentId);
         }
