@@ -46,7 +46,12 @@ function registerModuleMocks() {
     }),
     accessService: () => mockAccessService,
     agentService: () => ({
-      getById: vi.fn(async () => null),
+      getById: vi.fn(async (agentId: string) => ({
+        id: agentId,
+        companyId: "company-1",
+        reportsTo: null,
+        permissions: {},
+      })),
     }),
     documentAnnotationService: () => ({ remapOpenThreadsForDocument: async () => [] }),
     documentService: () => ({}),
