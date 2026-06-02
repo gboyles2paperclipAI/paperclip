@@ -100,6 +100,14 @@ const ISSUE_COMMENT_RUN_LOG_DERIVATION_MAX_LOG_BYTES = 2_000_000;
 const ISSUE_COMMENT_RUN_LOG_DERIVATION_CHUNK_BYTES = 256_000;
 const ISSUE_COMMENT_RUN_LOG_DERIVATION_END_SLACK_MS = 60_000;
 const ISSUE_COMMENT_RUN_LOG_DERIVATION_MAX_PARALLEL_READS = 8;
+
+function isDeadlockError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if ("code" in error && (error as unknown as { code?: string }).code === "40P01") return true;
+  const cause = error.cause;
+  return !!cause && typeof cause === "object" && "code" in cause && (cause as { code?: string }).code === "40P01";
+}
+
 function assertTransition(from: string, to: string) {
   if (from === to) return;
   if (!ALL_ISSUE_STATUSES.includes(to)) {
@@ -5369,7 +5377,6 @@ export function issueService(db: Db) {
       assertTransition(currentStatus, "in_progress");
       await assertAssignableAgent(issueCompany.companyId, agentId);
 
-      const now = new Date();
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(issueCompany.companyId, id);
       if (
         activePauseHold &&
@@ -5384,6 +5391,11 @@ export function issueService(db: Db) {
         });
       }
 
+      // Retry on PostgreSQL deadlock (40P01): concurrent transactions on issues+agents+heartbeat_runs
+      // can form a cycle through index/page locks. Two retries with jitter break the cycle.
+      for (let attempt = 0; ; attempt++) {
+        try {
+      const now = new Date();
       await clearExecutionRunIfTerminal(id);
       await clearTerminalBlockersForIssue(db, issueCompany.companyId, id);
 
@@ -5512,6 +5524,14 @@ export function issueService(db: Db) {
         checkoutRunId: current.checkoutRunId,
         executionRunId: current.executionRunId,
       });
+        } catch (error) {
+          if (attempt < 2 && isDeadlockError(error)) {
+            await new Promise(resolve => setTimeout(resolve, Math.round(Math.random() * 50)));
+            continue;
+          }
+          throw error;
+        }
+      }
     },
 
     assertCheckoutOwner: async (id: string, actorAgentId: string, actorRunId: string | null) => {

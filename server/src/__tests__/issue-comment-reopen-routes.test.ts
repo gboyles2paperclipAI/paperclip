@@ -320,7 +320,17 @@ describe.sequential("issue comment reopen routes", () => {
       };
     });
     mockAccessService.hasPermission.mockResolvedValue(false);
-    mockAgentService.getById.mockResolvedValue(null);
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      const known = [
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444",
+      ];
+      if (known.includes(id)) {
+        return { id, companyId: "company-1", permissions: {} };
+      }
+      return null;
+    });
     mockAgentService.list.mockResolvedValue([
       {
         id: "22222222-2222-4222-8222-222222222222",
@@ -395,6 +405,7 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      expect.anything(),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -427,6 +438,7 @@ describe.sequential("issue comment reopen routes", () => {
       expect.objectContaining({
         assigneeAgentId: "33333333-3333-4333-8333-333333333333",
       }),
+      expect.anything(),
     );
   });
 
@@ -473,6 +485,7 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      expect.anything(),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -850,6 +863,7 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      expect.anything(),
     );
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
@@ -906,6 +920,7 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      expect.anything(),
     );
     expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("retry-run-1");
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
@@ -1014,6 +1029,7 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      expect.anything(),
     );
     expect(mockIssueService.update).not.toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
@@ -1110,6 +1126,7 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: "22222222-2222-4222-8222-222222222222",
         actorUserId: null,
       }),
+      expect.anything(),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
