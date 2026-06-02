@@ -161,6 +161,60 @@ Shell scripts (`.sh`) are checked for direct `$VAR` interpolation patterns. JS/T
 
 ---
 
+## SH-15 — Service-inspection argv-observation denylist
+
+**Source:** [FUL-6737](/FUL/issues/FUL-6737)  
+**Related:** SH-10 (creation prohibition — don't embed credentials in argv); this rule covers the **observation vector** — commands that *display* process argv that may already contain credentials.  
+**Denylist entry name:** `service-status-argv-observation`
+
+### Why this matters
+
+`systemctl status <service>` prints the service's `ExecStart=` command line with all shell variables already expanded, along with the live process tree and its command-line arguments. Any credential that was shell-interpolated into a process argument (an SH-10 violation, past or present) is immediately visible to anyone who can run the command. This is true even if SH-10 guardrails now prevent *new* such scripts — legacy or third-party processes may still have credentials in their argv.
+
+**Root incident:** [FUL-6736](/FUL/issues/FUL-6736) — `systemctl status paperclip.service --no-pager` printed live process argv containing secret-bearing command lines during a rotation investigation.
+
+**Prevention issue:** [FUL-6737](/FUL/issues/FUL-6737)
+
+### Banned Commands
+
+| Command | Why it is prohibited |
+|---|---|
+| `systemctl status <service>` | Prints `ExecStart=` with expanded args and live process argv in the cgroup tree |
+| `systemctl show <service>` *(without `--property` filter)* | Dumps all unit properties including `ExecStart=` command line |
+| `systemctl cat <service>` | Prints raw unit file including `ExecStart=` template lines |
+| `ps aux`, `ps -ef`, `ps -ewo` | Already in SH-10 — process list with full argv; explicitly denylist-named here |
+| `cat /proc/<pid>/cmdline`, `strings /proc/<pid>/cmdline` | Already in SH-10; named here for completeness |
+| `journalctl -u <service> -n 1 --no-pager` *(when output includes startup ExecStart log lines)* | May echo the full command line from the service startup journal entry |
+
+### Safe alternatives
+
+```bash
+# SAFE — boolean active/inactive/failed; no argv output
+systemctl is-active paperclip.service
+
+# SAFE — boolean enabled/disabled
+systemctl is-enabled paperclip.service
+
+# SAFE — scoped property read without ExecStart
+systemctl show paperclip.service --property=ActiveState,SubState,LoadState
+
+# SAFE — application-level health check (preferred in agent contexts)
+curl -fsS http://127.0.0.1:3100/api/health
+```
+
+> **Agent context rule:** In agent scripts and heartbeats, prefer application-level API health checks (`/api/health`, `/api/agents/me`) over `systemctl` invocations entirely. The systemd service manager is for human operators, not automated agents.
+
+### Opt-in escape hatch
+
+To suppress the check for a legitimate diagnostic line (e.g., in runbooks written for human operators):
+
+```bash
+# sh15:allow-service-inspect: human-operator runbook step, not automated
+systemctl status paperclip.service
+```
+
+---
+
 ## SH-11 — Safe PostgreSQL connection patterns
 
 **Source:** [FUL-4346](/FUL/issues/FUL-4346)
