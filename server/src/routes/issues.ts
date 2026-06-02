@@ -3905,13 +3905,15 @@ export function issueRoutes(
     assertCompanyAccess(req, companyId);
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, { companyId }, req.body))) return;
+    // Inherit projectId from parent when omitted — prevents child issues losing project attribution.
+    const resolvedProjectId = await resolveAssignmentProjectId({
+      companyId,
+      projectId: req.body.projectId,
+      parentIssueId: req.body.parentId,
+    });
     if (req.body.assigneeAgentId || req.body.assigneeUserId) {
       await assertCanAssignTasks(req, companyId, {
-        projectId: await resolveAssignmentProjectId({
-          companyId,
-          projectId: req.body.projectId,
-          parentIssueId: req.body.parentId,
-        }),
+        projectId: resolvedProjectId,
         parentIssueId: req.body.parentId ?? null,
         assigneeAgentId: req.body.assigneeAgentId ?? null,
         assigneeUserId: req.body.assigneeUserId ?? null,
@@ -3927,6 +3929,7 @@ export function issueRoutes(
     assertCanManageIssueMonitor(req, req.body.assigneeAgentId ?? null, Boolean(executionPolicy?.monitor));
     const issue = await svc.create(companyId, {
       ...req.body,
+      projectId: resolvedProjectId,
       executionPolicy,
       createdByAgentId: actor.agentId,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
