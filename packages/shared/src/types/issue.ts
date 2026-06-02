@@ -864,4 +864,6 @@ export interface IssueAttachment {
   createdAt: Date;
   updatedAt: Date;
   contentPath: string;
+  openPath?: string;
+  downloadPath?: string;
 }

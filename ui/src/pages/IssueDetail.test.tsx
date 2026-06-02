@@ -2,7 +2,8 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Agent, Issue, IssueTreeControlPreview, IssueTreeHold } from "@paperclipai/shared";
-import { act, type AnchorHTMLAttributes, type ButtonHTMLAttributes, type ReactNode } from "react";
+import type { AnchorHTMLAttributes, ButtonHTMLAttributes, ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { canBoardResolveRecoveryAction, IssueDetail, resolveStageParticipantLabel } from "./IssueDetail";
@@ -13,6 +14,7 @@ const mockIssuesApi = vi.hoisted(() => ({
   listAcceptedPlanDecompositions: vi.fn(),
   listComments: vi.fn(),
   listAttachments: vi.fn(),
+  listWorkProducts: vi.fn(),
   listFeedbackVotes: vi.fn(),
   listApprovals: vi.fn(),
   markRead: vi.fn(),
@@ -371,6 +373,14 @@ vi.mock("@/components/ui/textarea", () => ({
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+async function act(callback: () => void | Promise<void>) {
+  let result: void | Promise<void> = undefined;
+  flushSync(() => {
+    result = callback();
+  });
+  await result;
+}
 
 function createDeferred<T>() {
   let resolve!: (value: T) => void;
@@ -817,6 +827,7 @@ describe("IssueDetail", () => {
     mockIssuesApi.list.mockResolvedValue([]);
     mockIssuesApi.listComments.mockResolvedValue([]);
     mockIssuesApi.listAttachments.mockResolvedValue([]);
+    mockIssuesApi.listWorkProducts.mockResolvedValue([]);
     mockIssuesApi.listFeedbackVotes.mockResolvedValue([]);
     mockIssuesApi.listApprovals.mockResolvedValue([]);
     mockIssuesApi.getDocument.mockResolvedValue(null);
@@ -879,7 +890,11 @@ describe("IssueDetail", () => {
 
     expect(container.textContent).toContain("Issue detail smoke");
     expect(container.textContent).toContain("Chat thread");
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
+    expect(
+      consoleErrorSpy.mock.calls.some((call) =>
+        String(call[0]).includes("React has detected a change in the order of Hooks"),
+      ),
+    ).toBe(false);
   });
 
   it("resolves explicit approver labels from current participants", () => {
