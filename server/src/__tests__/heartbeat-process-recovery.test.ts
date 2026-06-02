@@ -1775,6 +1775,12 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(run?.error).toBeNull();
   });
 
+  it("ignores non-UUID run ids when clearing detached warnings", async () => {
+    const heartbeat = heartbeatService(db);
+
+    await expect(heartbeat.reportRunActivity("test-run")).resolves.toBeNull();
+  });
+
   it("tracks the first heartbeat with the agent role instead of adapter type", async () => {
     const { agentId, runId } = await seedRunFixture({
       agentStatus: "running",
@@ -1849,7 +1855,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect((runs[0]?.contextSnapshot as Record<string, unknown>)?.retryReason).toBeUndefined();
 
     const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
-    expect(issue?.status).toBe("todo");
+    expect(issue?.status).toBe("in_progress");
+    expect(issue?.checkoutRunId).toBe(runs[0]?.id);
+    expect(issue?.executionRunId).toBe(runs[0]?.id);
 
     const recoveryIssues = await db
       .select()

@@ -1802,6 +1802,8 @@ function shouldAutoCheckoutIssueForWake(input: {
   contextSnapshot: Record<string, unknown> | null | undefined;
   issueStatus: string | null;
   issueAssigneeAgentId: string | null;
+  issueCheckoutRunId: string | null;
+  issueExecutionRunId: string | null;
   isDependencyReady: boolean;
   agentId: string;
 }) {
@@ -1823,6 +1825,7 @@ function shouldAutoCheckoutIssueForWake(input: {
   if (wakeReason === "issue_comment_mentioned") return false;
   if (wakeReason === "source_scoped_recovery_action") return false;
   if (wakeReason.startsWith("execution_")) return false;
+  if (issueStatus === "in_progress" && (input.issueCheckoutRunId || input.issueExecutionRunId)) return false;
 
   return true;
 }
@@ -2728,6 +2731,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         assigneeAgentId: issues.assigneeAgentId,
         assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
         executionWorkspaceSettings: issues.executionWorkspaceSettings,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
         originKind: issues.originKind,
         originId: issues.originId,
         originRunId: issues.originRunId,
@@ -3250,6 +3255,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     try {
+      const assignee = await getAgent(claimed.assigneeAgentId);
+      if (
+        !assignee ||
+        assignee.status === "paused" ||
+        assignee.status === "terminated" ||
+        assignee.status === "pending_approval"
+      ) {
+        throw conflict("Agent is not invokable in its current state", {
+          status: assignee?.status ?? "not_found",
+        });
+      }
+
       await enqueueWakeup(claimed.assigneeAgentId, {
         source: input.source,
         triggerDetail: input.triggerDetail,
@@ -4870,6 +4887,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }
 
   async function clearDetachedRunWarning(runId: string) {
+    if (!isUuidLike(runId)) return null;
+
     const updated = await db
       .update(heartbeatRuns)
       .set({
@@ -6519,6 +6538,30 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
     }
 
+    const claimedContext = parseObject(run.contextSnapshot);
+    const claimedIssueId = readNonEmptyString(claimedContext.issueId);
+    const claimedWakeReason = readNonEmptyString(claimedContext.wakeReason);
+    if (claimedIssueId) {
+      const issueContext = await getIssueExecutionContext(agent.companyId, claimedIssueId);
+      const issueDependencyReadiness = await issuesSvc
+        .listDependencyReadiness(agent.companyId, [claimedIssueId])
+        .then((rows) => rows.get(claimedIssueId) ?? null);
+      if (
+        issueContext &&
+        shouldAutoCheckoutIssueForWake({
+          contextSnapshot: claimedContext,
+          issueStatus: issueContext.status,
+          issueAssigneeAgentId: issueContext.assigneeAgentId,
+          issueCheckoutRunId: issueContext.checkoutRunId,
+          issueExecutionRunId: issueContext.executionRunId,
+          isDependencyReady: issueDependencyReadiness?.isDependencyReady ?? true,
+          agentId: agent.id,
+        })
+      ) {
+        await issuesSvc.checkout(claimedIssueId, agent.id, ["todo", "backlog", "blocked", "in_progress"], run.id);
+      }
+    }
+
     const claimedAt = new Date();
     const claimed = await db
       .update(heartbeatRuns)
@@ -6553,9 +6596,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     // Fix A (lazy locking): stamp executionRunId now that the run is actually running,
     // not at queue time. Guard is idempotent — safe if called more than once.
-    const claimedContext = parseObject(claimed.contextSnapshot);
-    const claimedIssueId = readNonEmptyString(claimedContext.issueId);
-    const claimedWakeReason = readNonEmptyString(claimedContext.wakeReason);
     if (claimedIssueId && claimedWakeReason !== "source_scoped_recovery_action") {
       const claimedAgent = await getAgent(claimed.agentId);
       await db
@@ -6685,6 +6725,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const isInteractionWake = allowsIssueInteractionWake(context);
     const resumeIntent = context.resumeIntent === true || context.followUpRequested === true;
     const wakeReason = readNonEmptyString(context.wakeReason);
+    const isIssueMentionWake = wakeReason === "issue_comment_mentioned" && Boolean(wakeCommentId);
     const retryReason = readNonEmptyString(context.retryReason) ?? run.scheduledRetryReason ?? null;
 
     if (
@@ -6716,7 +6757,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
     }
 
-    if (issue.assigneeAgentId !== run.agentId && !isInteractionWake) {
+    if (issue.assigneeAgentId !== run.agentId && !isInteractionWake && !isIssueMentionWake) {
       return {
         stale: true,
         errorCode: "issue_assignee_changed",
@@ -6742,6 +6783,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (
         wakeCommentId &&
         wakeReason !== "issue_commented" &&
+        wakeReason !== "issue_comment_mentioned" &&
         wakeReason !== "issue_reopened_via_comment"
       ) {
         return {
@@ -7536,10 +7578,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (
       issueId &&
       issueContext &&
+      issueContext.assigneeAgentId === agent.id &&
+      issueContext.status === "in_progress" &&
+      issueContext.checkoutRunId === run.id &&
+      issueContext.executionRunId === run.id
+    ) {
+      context[PAPERCLIP_HARNESS_CHECKOUT_KEY] = true;
+    } else if (
+      issueId &&
+      issueContext &&
       shouldAutoCheckoutIssueForWake({
         contextSnapshot: context,
         issueStatus: issueContext.status,
         issueAssigneeAgentId: issueContext.assigneeAgentId,
+        issueCheckoutRunId: issueContext.checkoutRunId,
+        issueExecutionRunId: issueContext.executionRunId,
         isDependencyReady: issueDependencyReadiness?.isDependencyReady ?? true,
         agentId: agent.id,
       })
@@ -9501,6 +9554,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const shouldSkipTerminalDeferredCommentWake =
           hasDeferredCommentSignal &&
           (issue.status === "done" || issue.status === "cancelled") &&
+          deferred.requestedByActorType !== "user" &&
+          deferred.requestedByActorType !== "agent" &&
           !shouldReopenDeferredCommentWake;
         let reopenedActivity: LogActivityInput | null = null;
 
