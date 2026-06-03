@@ -753,6 +753,53 @@ function buildExecutionWorkspaceConfigSnapshot(
   return hasSnapshot ? snapshot : null;
 }
 
+export function stripHostWorkspaceProvisionForLowTrustSandbox(input: {
+  config: Record<string, unknown>;
+  trustPreset: TrustPresetResolution;
+  selectedEnvironmentDriver: string | null | undefined;
+}): Record<string, unknown> {
+  if (input.trustPreset.kind !== "low_trust_review") return input.config;
+  if (input.selectedEnvironmentDriver !== "sandbox") return input.config;
+
+  const workspaceStrategy = parseObject(input.config.workspaceStrategy);
+  if (typeof workspaceStrategy.provisionCommand !== "string") return input.config;
+
+  const nextWorkspaceStrategy = { ...workspaceStrategy };
+  delete nextWorkspaceStrategy.provisionCommand;
+
+  return {
+    ...input.config,
+    workspaceStrategy: nextWorkspaceStrategy,
+  };
+}
+
+export async function preflightLowTrustWorkspaceIsolation(input: {
+  trustPreset: TrustPresetResolution;
+  isolatedWorkspacesEnabled: boolean;
+  effectiveExecutionWorkspaceMode: string | null | undefined;
+  issue: { companyId: string; id?: string | null; projectId?: string | null } | null;
+  resolveSelectedEnvironmentDriver: () => Promise<string | null | undefined>;
+}): Promise<string | null> {
+  if (input.trustPreset.kind !== "denied" && input.trustPreset.kind !== "low_trust_review") {
+    return null;
+  }
+
+  const selectedEnvironmentDriver =
+    input.trustPreset.kind === "low_trust_review"
+      ? await input.resolveSelectedEnvironmentDriver()
+      : null;
+
+  assertLowTrustWorkspaceIsolation({
+    resolution: input.trustPreset,
+    isolatedWorkspacesEnabled: input.isolatedWorkspacesEnabled,
+    effectiveExecutionWorkspaceMode: input.effectiveExecutionWorkspaceMode,
+    selectedEnvironmentDriver,
+    issue: input.issue,
+  });
+
+  return selectedEnvironmentDriver ?? null;
+}
+
 function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null {
   const trimmed = repoUrl?.trim() ?? "";
   if (!trimmed) return null;
@@ -7428,6 +7475,26 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ? persistedExecutionWorkspaceMode
         : requestedExecutionWorkspaceMode;
     const selectedEnvironmentId = environmentResolution.environmentId;
+    const lowTrustPreflightEnvironmentDriver = await preflightLowTrustWorkspaceIsolation({
+      trustPreset,
+      isolatedWorkspacesEnabled,
+      effectiveExecutionWorkspaceMode,
+      issue: issueRef
+        ? {
+            companyId: agent.companyId,
+            id: issueRef.id,
+            projectId: issueRef.projectId,
+          }
+        : null,
+      resolveSelectedEnvironmentDriver: async () => {
+        const preflightEnvironment = await envOrchestrator.resolveEnvironment({
+          companyId: agent.companyId,
+          selectedEnvironmentId,
+          defaultEnvironmentId: defaultEnvironment.id,
+        });
+        return preflightEnvironment.driver;
+      },
+    });
     const workspaceManagedConfig = shouldReuseExisting
       ? { ...config }
       : buildExecutionWorkspaceAdapterConfig({
@@ -7514,6 +7581,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       ...effectiveResolvedConfig,
       paperclipRuntimeSkills: runtimeSkillEntries,
     };
+    const hostExecutionWorkspaceConfig = stripHostWorkspaceProvisionForLowTrustSandbox({
+      config: runtimeConfig,
+      trustPreset,
+      selectedEnvironmentDriver: lowTrustPreflightEnvironmentDriver,
+    });
     const workspaceOperationRecorder = workspaceOperationsSvc.createRecorder({
       companyId: agent.companyId,
       heartbeatRunId: run.id,
@@ -7562,7 +7634,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       : null;
     const executionWorkspace = reusedExecutionWorkspace ?? await realizeExecutionWorkspace({
           base: executionWorkspaceBase,
-          config: runtimeConfig,
+          config: hostExecutionWorkspaceConfig,
           issue: issueRef,
           agent: {
             id: agent.id,
