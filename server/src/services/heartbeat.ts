@@ -6047,11 +6047,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(count ?? 0);
   }
 
-  async function countGlobalRunningRuns(companyId: string) {
+  async function countGlobalRunningRuns() {
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)` })
       .from(heartbeatRuns)
-      .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.status, "running")));
+      .where(eq(heartbeatRuns.status, "running"));
     return Number(count ?? 0);
   }
 
@@ -7042,8 +7042,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         return [];
       }
 
-      // Global cap: at most GLOBAL_MAX_CONCURRENT_RUNS running per company
-      const globalRunningCount = await countGlobalRunningRuns(agent.companyId);
+      // Global cap: at most GLOBAL_MAX_CONCURRENT_RUNS running across all companies
+      const globalRunningCount = await countGlobalRunningRuns();
       if (globalRunningCount >= HEARTBEAT_GLOBAL_MAX_CONCURRENT_RUNS) return [];
 
       const companyRunningCount = await countCompanyRunningRuns(agent.companyId);

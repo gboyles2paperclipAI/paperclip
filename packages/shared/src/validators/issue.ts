@@ -722,7 +722,7 @@ export const requestConfirmationSatisfactionExpressionSchema = z.discriminatedUn
     type: z.literal("comment_contains"),
     // Reject nested-quantifier patterns (e.g. (\w+)+ or (.+)+) that cause catastrophic backtracking.
     pattern: z.string().trim().min(1).max(500).refine(
-      (p) => !/\([^)]*[+*][^)]*\)[+*]/.test(p),
+      (p) => !/\([^)]*[+*{][^)]*\)[+*{]/.test(p),
       { message: "pattern must not contain nested quantifiers (ReDoS risk)" },
     ),
     description: z.string().trim().min(1).max(500).nullable().optional(),
