@@ -3220,6 +3220,48 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(retryRun?.contextSnapshot as Record<string, unknown>).not.toHaveProperty("modelProfile");
   });
 
+  it("skips in-progress issues that have a future scheduled monitor check", async () => {
+    const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "succeeded",
+    });
+    const futureCheckAt = new Date(Date.now() + 60 * 60 * 1000);
+    await db
+      .update(issues)
+      .set({ monitorNextCheckAt: futureCheckAt })
+      .where(eq(issues.id, issueId));
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.continuationRequeued).toBe(0);
+    expect(result.escalated).toBe(0);
+    expect(result.successfulRunHandoffEscalated).toBe(0);
+
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("in_progress");
+
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs.filter((r) => r.id !== runId)).toHaveLength(0);
+  });
+
+  it("does not skip in-progress issues whose scheduled monitor check is in the past", async () => {
+    const { agentId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "failed",
+    });
+    const pastCheckAt = new Date(Date.now() - 60 * 60 * 1000);
+    await db
+      .update(issues)
+      .set({ monitorNextCheckAt: pastCheckAt })
+      .where(eq(issues.id, issueId));
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    // A past monitorNextCheckAt is not a valid waiting path — recovery should proceed
+    expect(result.continuationRequeued + result.escalated).toBeGreaterThan(0);
+    expect(result.issueIds).toContain(issueId);
+  });
+
   it("does not reconcile user-assigned work through the agent stranded-work recovery path", async () => {
     const { issueId, runId } = await seedStrandedIssueFixture({
       status: "todo",

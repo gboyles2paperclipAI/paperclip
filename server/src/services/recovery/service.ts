@@ -53,6 +53,7 @@ import {
 } from "./origins.js";
 import {
   classifyIssueGraphLiveness,
+  hasScheduledMonitor,
   type IssueLivenessFinding,
 } from "./issue-graph-liveness.js";
 import {
@@ -2478,6 +2479,11 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       }
 
       if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) {
+        result.skipped += 1;
+        continue;
+      }
+
+      if (hasScheduledMonitor(issue, Date.now())) {
         result.skipped += 1;
         continue;
       }
