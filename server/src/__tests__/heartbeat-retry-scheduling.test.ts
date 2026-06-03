@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agents,
   agentRuntimeState,
@@ -19,9 +19,11 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import {
+  ADAPTER_PER_PROVIDER_RETRY_DELAYS_MS,
   BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS,
   MAX_TURN_CONTINUATION_RETRY_REASON,
   MAX_TURN_CONTINUATION_WAKE_REASON,
+  executeAdapterChain,
   heartbeatService,
 } from "../services/heartbeat.ts";
 
@@ -1336,5 +1338,148 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     expect((wakeupRequest?.payload as Record<string, unknown> | null)?.transientRetryNotBefore).toBe(
       retryNotBefore.toISOString(),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unit tests for executeAdapterChain (no embedded Postgres required)
+// FUL-7204: Tier 2 Decision 1 — Explicit retry limits with fallback
+// ---------------------------------------------------------------------------
+
+import type { AdapterExecutionResult } from "../adapters/index.js";
+
+const SUCCESS_RESULT: AdapterExecutionResult = { exitCode: 0, signal: null, timedOut: false };
+const TRANSIENT_RESULT: AdapterExecutionResult = {
+  exitCode: 1, signal: null, timedOut: false,
+  errorFamily: "transient_upstream", errorCode: "upstream_503", errorMessage: "Service unavailable",
+};
+const PERMANENT_RESULT: AdapterExecutionResult = {
+  exitCode: 1, signal: null, timedOut: false,
+  errorCode: "adapter_failed", errorMessage: "Hard failure",
+};
+const TIMEOUT_RESULT: AdapterExecutionResult = {
+  exitCode: null, signal: null, timedOut: true,
+  errorCode: "timeout", errorMessage: "Timed out",
+};
+
+describe("executeAdapterChain — per-provider retry unit tests (FUL-7204)", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  async function run<T>(fn: () => Promise<T>): Promise<T> {
+    const p = fn();
+    await vi.runAllTimersAsync();
+    return p;
+  }
+
+  it("returns success immediately on first attempt", async () => {
+    const exec = vi.fn().mockResolvedValue(SUCCESS_RESULT);
+    const result = await run(() => executeAdapterChain({
+      chain: ["claude_local"], maxRetriesPerProvider: 3,
+      retryDelaysMs: ADAPTER_PER_PROVIDER_RETRY_DELAYS_MS, executeOnce: exec,
+    }));
+    expect(result.exitCode).toBe(0);
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(exec).toHaveBeenCalledWith("claude_local");
+  });
+
+  it("retries on transient failure and succeeds on retry", async () => {
+    const onRetry = vi.fn();
+    const exec = vi.fn()
+      .mockResolvedValueOnce(TRANSIENT_RESULT)
+      .mockResolvedValueOnce(TRANSIENT_RESULT)
+      .mockResolvedValueOnce(SUCCESS_RESULT);
+    const result = await run(() => executeAdapterChain({
+      chain: ["claude_local"], maxRetriesPerProvider: 3,
+      retryDelaysMs: ADAPTER_PER_PROVIDER_RETRY_DELAYS_MS, executeOnce: exec,
+      onRetry: async (t, attempt, delay) => { onRetry(t, attempt, delay); },
+    }));
+    expect(result.exitCode).toBe(0);
+    expect(exec).toHaveBeenCalledTimes(3);
+    expect(onRetry).toHaveBeenNthCalledWith(1, "claude_local", 1, 1_000);
+    expect(onRetry).toHaveBeenNthCalledWith(2, "claude_local", 2, 2_000);
+  });
+
+  it("exhausts 3 retries on single provider and returns failure (no looping)", async () => {
+    const exec = vi.fn().mockResolvedValue(TRANSIENT_RESULT);
+    const result = await run(() => executeAdapterChain({
+      chain: ["claude_local"], maxRetriesPerProvider: 3,
+      retryDelaysMs: ADAPTER_PER_PROVIDER_RETRY_DELAYS_MS, executeOnce: exec,
+    }));
+    // 1 initial + 3 retries = 4 total
+    expect(exec).toHaveBeenCalledTimes(4);
+    expect(result.exitCode).not.toBe(0);
+    // Single-provider chain: exhaustedChain stays false
+    expect((result.resultJson as Record<string, unknown>)?.exhaustedChain).toBe(false);
+  });
+
+  it("does NOT retry on permanent (non-transient) failure — immediate chain exit", async () => {
+    const onRetry = vi.fn();
+    const exec = vi.fn().mockResolvedValue(PERMANENT_RESULT);
+    await run(() => executeAdapterChain({
+      chain: ["claude_local"], maxRetriesPerProvider: 3,
+      retryDelaysMs: ADAPTER_PER_PROVIDER_RETRY_DELAYS_MS, executeOnce: exec,
+      onRetry: async () => { onRetry(); },
+    }));
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(onRetry).not.toHaveBeenCalled();
+  });
+
+  it("fails over to provider-B after provider-A exhausts 3 retries", async () => {
+    const onFallover = vi.fn();
+    const exec = vi.fn().mockImplementation(async (type: string) =>
+      type === "claude_local" ? TRANSIENT_RESULT : SUCCESS_RESULT,
+    );
+    const result = await run(() => executeAdapterChain({
+      chain: ["claude_local", "gemini_local"], maxRetriesPerProvider: 3,
+      retryDelaysMs: ADAPTER_PER_PROVIDER_RETRY_DELAYS_MS, executeOnce: exec,
+      onFallover: async (from, to) => { onFallover(from, to); },
+    }));
+    expect(result.exitCode).toBe(0);
+    // claude_local: 4 calls (1+3), gemini_local: 1 call = 5 total
+    expect(exec).toHaveBeenCalledTimes(5);
+    expect(onFallover).toHaveBeenCalledWith("claude_local", "gemini_local");
+  });
+
+  it("marks exhaustedChain=true when full chain (2 providers) is exhausted", async () => {
+    const exec = vi.fn().mockResolvedValue(TRANSIENT_RESULT);
+    const result = await run(() => executeAdapterChain({
+      chain: ["claude_local", "gemini_local"], maxRetriesPerProvider: 3,
+      retryDelaysMs: ADAPTER_PER_PROVIDER_RETRY_DELAYS_MS, executeOnce: exec,
+    }));
+    expect(result.exitCode).not.toBe(0);
+    expect(result.errorMessage).toMatch(/Adapter chain exhausted/);
+    expect((result.resultJson as Record<string, unknown>)?.exhaustedChain).toBe(true);
+    expect((result.resultJson as Record<string, unknown>)?.chainLength).toBe(2);
+    // 4 + 4 = 8 calls
+    expect(exec).toHaveBeenCalledTimes(8);
+  });
+
+  it("timedOut counts as transient — retries on timeout", async () => {
+    const exec = vi.fn()
+      .mockResolvedValueOnce(TIMEOUT_RESULT)
+      .mockResolvedValueOnce(SUCCESS_RESULT);
+    const result = await run(() => executeAdapterChain({
+      chain: ["claude_local"], maxRetriesPerProvider: 3,
+      retryDelaysMs: ADAPTER_PER_PROVIDER_RETRY_DELAYS_MS, executeOnce: exec,
+    }));
+    expect(result.exitCode).toBe(0);
+    expect(exec).toHaveBeenCalledTimes(2);
+  });
+
+  it("maxRetriesPerProvider=0 tries each provider once without any retries", async () => {
+    const exec = vi.fn()
+      .mockResolvedValueOnce(TRANSIENT_RESULT)
+      .mockResolvedValueOnce(SUCCESS_RESULT);
+    const result = await run(() => executeAdapterChain({
+      chain: ["claude_local", "gemini_local"], maxRetriesPerProvider: 0,
+      retryDelaysMs: ADAPTER_PER_PROVIDER_RETRY_DELAYS_MS, executeOnce: exec,
+    }));
+    expect(result.exitCode).toBe(0);
+    expect(exec).toHaveBeenCalledTimes(2);
+  });
+
+  it("ADAPTER_PER_PROVIDER_RETRY_DELAYS_MS exports [1s, 2s, 4s]", () => {
+    expect(ADAPTER_PER_PROVIDER_RETRY_DELAYS_MS).toEqual([1_000, 2_000, 4_000]);
   });
 });

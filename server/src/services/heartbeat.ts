@@ -235,6 +235,9 @@ const MAX_TURN_CONTINUATION_MAX_ATTEMPTS_CAP = 10;
 const MAX_TURN_CONTINUATION_DEFAULT_DELAY_MS = 1_000;
 const MAX_TURN_CONTINUATION_MAX_DELAY_MS = 5 * 60 * 1000;
 const MAX_TURN_CONTINUATION_LIVE_RUN_STATUSES = ["scheduled_retry", "queued", "running"] as const;
+// Per-provider retry limits (Decision 1 — FUL-7204)
+export const ADAPTER_PER_PROVIDER_RETRY_DELAYS_MS = [1_000, 2_000, 4_000] as const;
+const ADAPTER_MAX_RETRIES_PER_PROVIDER_DEFAULT = 3;
 type CodexTransientFallbackMode =
   | "same_session"
   | "safer_invocation"
@@ -318,6 +321,96 @@ function mergeAdapterRecoveryMetadata(input: {
       : {}),
   };
 }
+
+function resolveAdapterMaxRetriesPerProvider(): number {
+  const envVal = process.env["ADAPTER_MAX_RETRIES_PER_PROVIDER"];
+  const parsed = envVal != null ? parseInt(envVal, 10) : NaN;
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : ADAPTER_MAX_RETRIES_PER_PROVIDER_DEFAULT;
+}
+
+function resolveAdapterFallbackChain(primaryAdapterType: string, runtimeConfig: unknown): string[] {
+  const config = parseObject(runtimeConfig);
+  const fallbacks = config.adapterFallbackChain;
+  if (!Array.isArray(fallbacks)) return [primaryAdapterType];
+  const validFallbacks = fallbacks.filter(
+    (t): t is string => typeof t === "string" && t.length > 0 && t !== primaryAdapterType,
+  );
+  return [primaryAdapterType, ...validFallbacks];
+}
+
+function isAdapterTransientFailure(result: AdapterExecutionResult): boolean {
+  return result.errorFamily === "transient_upstream" || result.timedOut;
+}
+
+/** Exported for unit testing only — not part of the public service API. */
+export async function executeAdapterChain({
+  chain,
+  maxRetriesPerProvider,
+  retryDelaysMs,
+  executeOnce,
+  onRetry,
+  onFallover,
+}: {
+  chain: string[];
+  maxRetriesPerProvider: number;
+  retryDelaysMs: readonly number[];
+  executeOnce: (adapterType: string) => Promise<AdapterExecutionResult>;
+  onRetry?: (adapterType: string, attempt: number, delayMs: number) => Promise<void>;
+  onFallover?: (fromAdapterType: string, toAdapterType: string) => Promise<void>;
+}): Promise<AdapterExecutionResult> {
+  let lastProviderResult: AdapterExecutionResult | null = null;
+
+  for (let chainIdx = 0; chainIdx < chain.length; chainIdx++) {
+    const currentAdapterType = chain[chainIdx]!;
+    if (chainIdx > 0 && onFallover) {
+      await onFallover(chain[chainIdx - 1]!, currentAdapterType);
+    }
+
+    for (let attempt = 0; attempt <= maxRetriesPerProvider; attempt++) {
+      if (attempt > 0 && onRetry) {
+        const delayIdx = Math.min(attempt - 1, retryDelaysMs.length - 1);
+        const delayMs = retryDelaysMs[delayIdx]!;
+        await onRetry(currentAdapterType, attempt, delayMs);
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      }
+
+      const result = await executeOnce(currentAdapterType);
+      lastProviderResult = result;
+
+      const succeeded = (result.exitCode ?? 0) === 0 && !result.errorMessage && !result.timedOut;
+      if (succeeded) return result;
+
+      // Non-transient failure: skip remaining retries, go to next provider
+      if (!isAdapterTransientFailure(result)) break;
+      // Transient failure: retry within this provider (up to maxRetriesPerProvider)
+    }
+  }
+
+  // Full chain exhausted
+  const exhaustedMsg = chain.length > 1
+    ? `Adapter chain exhausted after trying ${chain.length} provider(s)`
+    : (lastProviderResult?.errorMessage ?? "Adapter failed");
+  return lastProviderResult != null
+    ? {
+        ...lastProviderResult,
+        errorCode: lastProviderResult.errorCode ?? "adapter_failed",
+        errorMessage: exhaustedMsg,
+        resultJson: {
+          ...(lastProviderResult.resultJson ?? {}),
+          exhaustedChain: chain.length > 1,
+          chainLength: chain.length,
+        },
+      }
+    : {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorCode: "adapter_failed",
+        errorMessage: exhaustedMsg,
+        resultJson: { exhaustedChain: chain.length > 1, chainLength: chain.length },
+      };
+}
+
 const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set(["approval_approved"]);
 const SESSIONED_LOCAL_ADAPTERS = new Set([
   "claude_local",
@@ -8029,33 +8122,63 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         adapterFinalizeOutcome = status;
       };
 
-      let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
+      let adapterResult: AdapterExecutionResult;
       try {
-        adapterResult = await adapter.execute({
-          runId: run.id,
-          agent,
-          runtime: runtimeForAdapter,
-          config: runtimeConfig,
-          context,
-          runtimeCommandSpec: adapter.getRuntimeCommandSpec?.(runtimeConfig) ?? null,
-          executionTarget,
-          executionTransport: remoteExecution
-            ? { remoteExecution: remoteExecution as unknown as Record<string, unknown> }
-            : undefined,
-          onLog,
-          onMeta: onAdapterMeta,
-          onSpawn: async (meta) => {
-            await persistRunProcessMetadata(run.id, {
-              pid: meta.pid,
-              processGroupId:
-                "processGroupId" in meta && typeof meta.processGroupId === "number"
-                  ? meta.processGroupId
-                  : null,
-              startedAt: meta.startedAt,
+        // Per-provider retry + chain failover (Decision 1 — FUL-7204)
+        const adapterMaxRetriesPerProvider = resolveAdapterMaxRetriesPerProvider();
+        const adapterChain = resolveAdapterFallbackChain(agent.adapterType, runtimeConfig);
+        adapterResult = await executeAdapterChain({
+          chain: adapterChain,
+          maxRetriesPerProvider: adapterMaxRetriesPerProvider,
+          retryDelaysMs: ADAPTER_PER_PROVIDER_RETRY_DELAYS_MS,
+          executeOnce: async (currentAdapterType) => {
+            const currentAdapter = getServerAdapter(currentAdapterType);
+            const currentAuthToken = currentAdapter.supportsLocalAgentJwt
+              ? (createLocalAgentJwt(agent.id, agent.companyId, currentAdapterType, run.id) ?? undefined)
+              : undefined;
+            return currentAdapter.execute({
+              runId: run.id,
+              agent,
+              runtime: runtimeForAdapter,
+              config: runtimeConfig,
+              context,
+              runtimeCommandSpec: currentAdapter.getRuntimeCommandSpec?.(runtimeConfig) ?? null,
+              executionTarget,
+              executionTransport: remoteExecution
+                ? { remoteExecution: remoteExecution as unknown as Record<string, unknown> }
+                : undefined,
+              onLog,
+              onMeta: onAdapterMeta,
+              onSpawn: async (meta) => {
+                await persistRunProcessMetadata(run.id, {
+                  pid: meta.pid,
+                  processGroupId:
+                    "processGroupId" in meta && typeof meta.processGroupId === "number"
+                      ? meta.processGroupId
+                      : null,
+                  startedAt: meta.startedAt,
+                });
+              },
+              authToken: currentAdapterType === agent.adapterType ? (authToken ?? undefined) : currentAuthToken,
             });
           },
-          authToken: authToken ?? undefined,
+          onRetry: async (currentAdapterType, attempt, delayMs) => {
+            await onLog(
+              "stderr",
+              `[paperclip] Adapter retry: provider=${currentAdapterType} attempt=${attempt}/${adapterMaxRetriesPerProvider} delay=${delayMs}ms\n`,
+            );
+          },
+          onFallover: async (fromAdapterType, toAdapterType) => {
+            await onLog(
+              "stderr",
+              `[paperclip] Provider failover: ${fromAdapterType} exhausted, switching to ${toAdapterType}\n`,
+            );
+          },
         });
+        if (adapterChain.length > 1 && adapterResult.resultJson && (adapterResult.resultJson as Record<string, unknown>).exhaustedChain) {
+          await onLog("stderr", `[paperclip] Adapter chain exhausted: all ${adapterChain.length} provider(s) failed\n`);
+        }
+
         // Adapter returned cleanly, which means its workspace-restore finally
         // block also ran without throwing. Record the workspace_finalize
         // barrier so dependents that share this executionWorkspace can wake.
