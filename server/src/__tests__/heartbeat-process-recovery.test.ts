@@ -1003,6 +1003,61 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(issue?.checkoutRunId).toBe(runId);
   });
 
+  it("blocks an issue instead of retrying after a repeated same-class process loss", async () => {
+    const { companyId, agentId, runId, issueId } = await seedRunFixture({
+      processPid: 999_999_999,
+    });
+    const priorRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: priorRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "failed",
+      error: "Process lost -- child pid 999999998 is no longer running",
+      errorCode: "process_lost",
+      resultJson: {
+        failureType: "process_lost",
+        failureClassifiedFrom: "process_lost",
+      },
+      contextSnapshot: { issueId },
+      finishedAt: new Date("2026-03-18T23:59:00.000Z"),
+      updatedAt: new Date("2026-03-18T23:59:00.000Z"),
+      createdAt: new Date("2026-03-18T23:59:00.000Z"),
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reapOrphanedRuns();
+
+    expect(result).toEqual({ reaped: 1, runIds: [runId] });
+    const runs = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(2);
+    expect(runs.find((row) => row.id === runId)?.resultJson).toMatchObject({
+      failureType: "process_lost",
+    });
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("blocked");
+    expect(issue?.executionRunId).toBeNull();
+
+    const comments = await db
+      .select()
+      .from(issueComments)
+      .where(eq(issueComments.issueId, issueId));
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("agent_churn_no_progress");
+    expect(comments[0]?.body).toContain("process_lost");
+    expect(comments[0]?.body).toContain(priorRunId);
+  });
+
   it("releases active environment leases when an orphaned run is reaped", async () => {
     const { runId, issueId, companyId } = await seedRunFixture({
       processPid: 999_999_999,
