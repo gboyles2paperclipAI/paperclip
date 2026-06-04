@@ -1382,6 +1382,84 @@ export function issueRoutes(
     }
   }
 
+  async function issueHasActiveInReviewWaitPath(input: {
+    issue: Pick<
+      IssueRouteSnapshot,
+      "id" | "assigneeUserId" | "executionState" | "executionPolicy" | "monitorNextCheckAt"
+    >;
+  }) {
+    if (input.issue.assigneeUserId) return true;
+    if (hasExecutionParticipant(input.issue.executionState)) return true;
+    if (hasScheduledMonitor({
+      existingMonitorNextCheckAt: input.issue.monitorNextCheckAt ?? null,
+      executionPolicy: input.issue.executionPolicy ?? null,
+    })) return true;
+
+    const interactions = await issueThreadInteractionsSvc.listForIssue(input.issue.id);
+    if (interactions.some((interaction) => interaction.status === "pending")) return true;
+
+    const approvals = await issueApprovalsSvc.listApprovalsForIssue(input.issue.id);
+    return approvals.some((approval) => ACTIVE_REVIEW_APPROVAL_STATUSES.has(String(approval.status)));
+  }
+
+  async function requeueInReviewIssueAfterExpiredRequestConfirmations(input: {
+    issue: IssueRouteSnapshot;
+    interactions: Array<{ id: string; kind: string; status: string }>;
+    actor: ReturnType<typeof getActorInfo>;
+    source: string;
+  }) {
+    if (input.issue.status !== "in_review") return input.issue;
+    if (!input.interactions.some((interaction) =>
+      interaction.kind === "request_confirmation" && interaction.status === "expired"
+    )) {
+      return input.issue;
+    }
+    if (await issueHasActiveInReviewWaitPath({ issue: input.issue })) return input.issue;
+
+    const updated = await svc.update(input.issue.id, {
+      status: "todo",
+      actorAgentId: input.actor.agentId ?? null,
+      actorUserId: input.actor.actorType === "user" ? input.actor.actorId : null,
+    });
+    if (!updated) return input.issue;
+
+    await logActivity(db, {
+      companyId: input.issue.companyId,
+      actorType: input.actor.actorType,
+      actorId: input.actor.actorId,
+      agentId: input.actor.agentId,
+      runId: input.actor.runId,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: input.issue.id,
+      details: {
+        identifier: input.issue.identifier,
+        status: "todo",
+        source: input.source,
+        reason: "expired_request_confirmation_removed_last_in_review_wait_path",
+        _previous: {
+          status: input.issue.status,
+          assigneeAgentId: input.issue.assigneeAgentId ?? null,
+          assigneeUserId: input.issue.assigneeUserId ?? null,
+        },
+      },
+    });
+
+    if (updated.assigneeAgentId) {
+      void queueIssueAssignmentWakeup({
+        heartbeat,
+        issue: updated,
+        reason: "issue_assigned",
+        mutation: "request_confirmation_expired",
+        contextSource: input.source,
+        requestedByActorType: input.actor.actorType,
+        requestedByActorId: input.actor.actorId,
+      });
+    }
+
+    return updated;
+  }
+
   function parseDateQuery(value: unknown, field: string) {
     if (typeof value !== "string" || value.trim().length === 0) return undefined;
     const parsed = new Date(value);
@@ -5255,6 +5333,12 @@ export function issueRoutes(
     const interactionSvc = issueThreadInteractionService(db);
     const expiredInteractions = await interactionSvc.expireRequestConfirmationsSupersededByHistoricalComments(issue);
     await logExpiredRequestConfirmations({
+      issue,
+      interactions: expiredInteractions,
+      actor,
+      source: "issue.interactions.catchup_superseded_by_comment",
+    });
+    await requeueInReviewIssueAfterExpiredRequestConfirmations({
       issue,
       interactions: expiredInteractions,
       actor,
