@@ -29,7 +29,10 @@ import {
 import { issueService } from "../services/issues.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import * as providerRegistry from "../secrets/provider-registry.ts";
-import { COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_ENV } from "../services/active-run-concurrency-budget.ts";
+import {
+  COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_ENV,
+  COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_THROTTLE_REASON,
+} from "../services/active-run-concurrency-budget.ts";
 import { routineService } from "../services/routines.ts";
 import { secretService } from "../services/secrets.ts";
 
@@ -101,6 +104,12 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
         contextSnapshot?: Record<string, unknown>;
       },
     ) => Promise<unknown>;
+    beforeScheduledDispatch?: (input: {
+      routineId: string;
+      triggerId: string;
+      attempt: number;
+      dueAt: Date;
+    }) => Promise<void> | void;
   }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -175,6 +184,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
           return { id: queuedRunId };
         },
       },
+      ...(opts?.beforeScheduledDispatch ? { beforeScheduledDispatch: opts.beforeScheduledDispatch } : {}),
     });
     const issueSvc = issueService(db);
     const routine = await svc.create(
@@ -1374,6 +1384,70 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     const result = await svc.tickScheduledTriggers(new Date("2026-06-04T10:05:00.000Z"));
 
     expect(result.triggered).toBe(0);
+    const storedTrigger = await db
+      .select({
+        nextRunAt: routineTriggers.nextRunAt,
+        lastResult: routineTriggers.lastResult,
+      })
+      .from(routineTriggers)
+      .where(eq(routineTriggers.id, trigger.id))
+      .then((rows) => rows[0] ?? null);
+    expect(storedTrigger?.nextRunAt?.getTime()).toBe(dueAt.getTime());
+    expect(storedTrigger?.lastResult).toContain("active-run concurrency budget");
+  });
+
+  it("restores a claimed schedule tick when dispatch is budget-throttled after claim", async () => {
+    process.env[COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_ENV] = "1";
+    let insertedCompetingRun = false;
+    let raceCompanyId: string | null = null;
+    let raceAgentId: string | null = null;
+    const fixture = await seedFixture({
+      beforeScheduledDispatch: async () => {
+        if (insertedCompetingRun) return;
+        if (!raceCompanyId || !raceAgentId) throw new Error("race fixture was not initialized");
+        insertedCompetingRun = true;
+        await db.insert(heartbeatRuns).values({
+          id: randomUUID(),
+          companyId: raceCompanyId,
+          agentId: raceAgentId,
+          invocationSource: "automation",
+          status: "running",
+          contextSnapshot: { taskKey: "competing-run" },
+        });
+      },
+    });
+    raceCompanyId = fixture.companyId;
+    raceAgentId = fixture.agentId;
+    const { routine, svc } = fixture;
+    const dueAt = new Date("2026-06-04T10:00:00.000Z");
+    const { trigger } = await svc.createTrigger(routine.id, {
+      kind: "schedule",
+      label: "every hour",
+      cronExpression: "0 * * * *",
+      timezone: "UTC",
+    }, {});
+    await db
+      .update(routineTriggers)
+      .set({ nextRunAt: dueAt })
+      .where(eq(routineTriggers.id, trigger.id));
+
+    const result = await svc.tickScheduledTriggers(new Date("2026-06-04T10:05:00.000Z"));
+
+    expect(result.triggered).toBe(0);
+    const routineIssues = await db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(eq(issues.originId, routine.id));
+    expect(routineIssues).toHaveLength(0);
+    const [run] = await db
+      .select({
+        status: routineRuns.status,
+        failureReason: routineRuns.failureReason,
+      })
+      .from(routineRuns)
+      .where(eq(routineRuns.routineId, routine.id));
+    expect(run?.status).toBe("skipped");
+    expect(run?.failureReason).toContain(COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_THROTTLE_REASON);
     const storedTrigger = await db
       .select({
         nextRunAt: routineTriggers.nextRunAt,

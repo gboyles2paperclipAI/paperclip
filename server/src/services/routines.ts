@@ -484,6 +484,12 @@ export function routineService(
   deps: {
     heartbeat?: IssueAssignmentWakeupDeps;
     pluginWorkerManager?: PluginWorkerManager;
+    beforeScheduledDispatch?: (input: {
+      routineId: string;
+      triggerId: string;
+      attempt: number;
+      dueAt: Date;
+    }) => Promise<void> | void;
   } = {},
 ) {
   const issueSvc = issueService(db);
@@ -1216,7 +1222,9 @@ export function routineService(
       try {
         const budgetState = await getCompanyActiveRunBudgetState(txDb, input.routine.companyId, { lock: true });
         if (budgetState.atCap) {
-          const failureReason = buildCompanyActiveRunBudgetThrottleMessage(budgetState);
+          const failureReason = `${COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_THROTTLE_REASON}: ${
+            buildCompanyActiveRunBudgetThrottleMessage(budgetState)
+          }`;
           const skipped = await finalizeRun(createdRun.id, {
             status: "skipped",
             failureReason,
@@ -2363,7 +2371,7 @@ export function routineService(
         const triggerCronExpression = row.trigger.cronExpression;
         const triggerTimezone = row.trigger.timezone;
 
-        let runCount = 1;
+        let dueRunTimes: Date[] = [triggerNextRunAt];
         let claimedNextRunAt = nextCronTickInTimeZone(triggerCronExpression, triggerTimezone, now);
 
         const claimed = await db.transaction(async (tx) => {
@@ -2383,18 +2391,18 @@ export function routineService(
 
           if (row.routine.catchUpPolicy === "enqueue_missed_with_cap") {
             let cursor: Date | null = triggerNextRunAt;
-            runCount = 0;
+            dueRunTimes = [];
             claimedNextRunAt = cursor;
-            while (cursor && cursor <= now && runCount < MAX_CATCH_UP_RUNS && runCount < availableSlots) {
-              runCount += 1;
+            while (cursor && cursor <= now && dueRunTimes.length < MAX_CATCH_UP_RUNS && dueRunTimes.length < availableSlots) {
+              dueRunTimes.push(cursor);
               claimedNextRunAt = nextCronTickInTimeZone(triggerCronExpression, triggerTimezone, cursor);
               cursor = claimedNextRunAt;
             }
           } else {
-            runCount = Math.min(1, availableSlots);
+            dueRunTimes = availableSlots > 0 ? [triggerNextRunAt] : [];
           }
 
-          if (runCount <= 0) return null;
+          if (dueRunTimes.length <= 0) return null;
 
           return txDb
             .update(routineTriggers)
@@ -2414,12 +2422,39 @@ export function routineService(
         });
         if (!claimed) continue;
 
-        for (let i = 0; i < runCount; i += 1) {
-          await dispatchRoutineRun({
+        for (let i = 0; i < dueRunTimes.length; i += 1) {
+          const dueAt = dueRunTimes[i];
+          if (!dueAt) continue;
+          await deps.beforeScheduledDispatch?.({
+            routineId: row.routine.id,
+            triggerId: row.trigger.id,
+            attempt: i,
+            dueAt,
+          });
+          const run = await dispatchRoutineRun({
             routine: row.routine,
             trigger: row.trigger,
             source: "schedule",
           });
+          if (
+            run.status === "skipped" &&
+            run.failureReason?.startsWith(COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_THROTTLE_REASON)
+          ) {
+            await db
+              .update(routineTriggers)
+              .set({
+                nextRunAt: dueAt,
+                lastResult: nextResultText(COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_THROTTLE_REASON),
+                updatedAt: new Date(),
+              })
+              .where(
+                and(
+                  eq(routineTriggers.id, row.trigger.id),
+                  claimedNextRunAt ? eq(routineTriggers.nextRunAt, claimedNextRunAt) : isNull(routineTriggers.nextRunAt),
+                ),
+              );
+            break;
+          }
           triggered += 1;
         }
       }
