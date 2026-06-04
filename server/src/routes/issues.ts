@@ -119,6 +119,7 @@ import {
 } from "../services/issue-execution-policy.js";
 import { parseIssueExecutionWorkspaceSettings } from "../services/execution-workspace-policy.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+import { getRestartDrainStatus, isRestartDrainActive } from "../services/restart-drain.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -5247,6 +5248,14 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+
+    if (isRestartDrainActive()) {
+      res.status(409).json({
+        error: "restart_drain_active",
+        drain: getRestartDrainStatus(),
+      });
+      return;
+    }
 
     if (issue.projectId) {
       const project = await projectsSvc.getById(issue.projectId);

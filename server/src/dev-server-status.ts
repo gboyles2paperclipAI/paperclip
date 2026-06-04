@@ -16,6 +16,15 @@ export type DevServerHealthStatus = {
   enabled: true;
   restartRequired: boolean;
   reason: "backend_changes" | "pending_migrations" | "backend_changes_and_pending_migrations" | null;
+  drainMode: "idle" | "draining";
+  drainStartedAt: string | null;
+  drainReason: string | null;
+  restartDeferred: boolean;
+  restartDeferredAt: string | null;
+  nextRestartCheckAt: string | null;
+  oldestActiveRunStartedAt: string | null;
+  oldestActiveRunAgeMs: number | null;
+  emergencyOverrideAt: string | null;
   lastChangedAt: string | null;
   changedPathCount: number;
   changedPathsSample: string[];
@@ -104,7 +113,21 @@ export function readPersistedDevServerStatus(
 
 export function toDevServerHealthStatus(
   persisted: PersistedDevServerStatus,
-  opts: { autoRestartEnabled: boolean; activeRunCount: number },
+  opts: {
+    autoRestartEnabled: boolean;
+    activeRunCount: number;
+    drain?: {
+      mode: "idle" | "draining";
+      startedAt: string | null;
+      reason: string | null;
+      lastDeferredAt: string | null;
+      nextCheckAt: string | null;
+      emergencyOverrideAt: string | null;
+    };
+    oldestActiveRunStartedAt?: string | null;
+    oldestActiveRunAgeMs?: number | null;
+    nextRestartCheckAt?: string | null;
+  },
 ): DevServerHealthStatus {
   const hasPathChanges = persisted.changedPathCount > 0;
   const hasPendingMigrations = persisted.pendingMigrations.length > 0;
@@ -122,6 +145,15 @@ export function toDevServerHealthStatus(
     enabled: true,
     restartRequired,
     reason,
+    drainMode: opts.drain?.mode ?? "idle",
+    drainStartedAt: opts.drain?.startedAt ?? null,
+    drainReason: opts.drain?.reason ?? null,
+    restartDeferred: Boolean(opts.drain?.lastDeferredAt),
+    restartDeferredAt: opts.drain?.lastDeferredAt ?? null,
+    nextRestartCheckAt: opts.nextRestartCheckAt ?? opts.drain?.nextCheckAt ?? null,
+    oldestActiveRunStartedAt: opts.oldestActiveRunStartedAt ?? null,
+    oldestActiveRunAgeMs: opts.oldestActiveRunAgeMs ?? null,
+    emergencyOverrideAt: opts.drain?.emergencyOverrideAt ?? null,
     lastChangedAt: persisted.lastChangedAt,
     changedPathCount: persisted.changedPathCount,
     changedPathsSample: persisted.changedPathsSample,
