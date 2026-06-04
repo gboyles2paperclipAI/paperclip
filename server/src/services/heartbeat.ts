@@ -142,6 +142,7 @@ import {
   decideSuccessfulRunHandoff,
   findExistingFinishSuccessfulRunHandoffWake,
   findExistingRunLivenessContinuationWake,
+  hasExplicitContinuationContractText,
   SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY,
   readContinuationAttempt,
 } from "./recovery/index.js";
@@ -4264,6 +4265,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     );
   }
 
+  async function hasExplicitIssueContinuationContract(input: {
+    companyId: string;
+    issueId: string;
+    description: string | null;
+  }) {
+    if (hasExplicitContinuationContractText(input.description)) return true;
+    return db
+      .select({ body: issueComments.body })
+      .from(issueComments)
+      .where(and(eq(issueComments.companyId, input.companyId), eq(issueComments.issueId, input.issueId)))
+      .orderBy(desc(issueComments.createdAt))
+      .limit(25)
+      .then((rows) => rows.some((row) => hasExplicitContinuationContractText(row.body)));
+  }
+
   async function handleSuccessfulRunHandoff(run: typeof heartbeatRuns.$inferSelect, agent: typeof agents.$inferSelect) {
     if (run.status !== "succeeded") return;
     const context = parseObject(run.contextSnapshot);
@@ -4281,6 +4297,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         assigneeUserId: issues.assigneeUserId,
         executionState: issues.executionState,
         projectId: issues.projectId,
+        description: issues.description,
       })
       .from(issues)
       .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
@@ -4304,6 +4321,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       existingWake,
       budgetBlock,
       pauseHold,
+      explicitContinuationPath,
     ] = await Promise.all([
       issue
         ? db
@@ -4429,6 +4447,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issue
         ? treeControlSvc.getActivePauseHoldGate(issue.companyId, issue.id)
         : Promise.resolve(null),
+      issue
+        ? hasExplicitIssueContinuationContract({
+          companyId: issue.companyId,
+          issueId: issue.id,
+          description: issue.description,
+        })
+        : Promise.resolve(false),
     ]);
 
     const decision = decideSuccessfulRunHandoff({
@@ -4442,6 +4467,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       hasQueuedWake: Boolean(queuedWake),
       hasPendingInteractionOrApproval: Boolean(pendingInteraction || pendingApproval),
       hasExplicitBlockerPath: Boolean(explicitBlocker),
+      hasExplicitContinuationPath: Boolean(explicitContinuationPath),
       hasOpenRecoveryIssue: Boolean(openRecoveryIssue),
       hasPauseHold: Boolean(pauseHold),
       budgetBlocked: Boolean(budgetBlock),
