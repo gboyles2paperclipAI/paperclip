@@ -29,12 +29,14 @@ import {
 import { issueService } from "../services/issues.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import * as providerRegistry from "../secrets/provider-registry.ts";
+import { COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_ENV } from "../services/active-run-concurrency-budget.ts";
 import { routineService } from "../services/routines.ts";
 import { secretService } from "../services/secrets.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 const originalSecretsProviderEnv = process.env.PAPERCLIP_SECRETS_PROVIDER;
+const originalActiveRunCap = process.env[COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_ENV];
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -56,6 +58,11 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       delete process.env.PAPERCLIP_SECRETS_PROVIDER;
     } else {
       process.env.PAPERCLIP_SECRETS_PROVIDER = originalSecretsProviderEnv;
+    }
+    if (originalActiveRunCap === undefined) {
+      delete process.env[COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_ENV];
+    } else {
+      process.env[COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_ENV] = originalActiveRunCap;
     }
     await db.delete(activityLog);
     await db.delete(issueInboxArchives);
@@ -1313,6 +1320,70 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       .where(eq(issues.originId, routine.id));
 
     expect(routineIssues).toHaveLength(1);
+  });
+
+  it("skips routine dispatch when the company active-run budget is at cap", async () => {
+    process.env[COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_ENV] = "1";
+    const { companyId, agentId, routine, svc } = await seedFixture();
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(),
+      companyId,
+      agentId,
+      invocationSource: "automation",
+      status: "running",
+      contextSnapshot: { taskKey: "existing" },
+    });
+
+    const run = await svc.runRoutine(routine.id, { source: "manual" });
+
+    expect(run.status).toBe("skipped");
+    expect(run.linkedIssueId).toBeNull();
+    expect(run.failureReason).toContain("activeRunCount=1");
+    expect(run.failureReason).toContain("cap=1");
+
+    const routineIssues = await db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(eq(issues.originId, routine.id));
+    expect(routineIssues).toHaveLength(0);
+  });
+
+  it("leaves due schedule triggers due when the active-run budget is at cap", async () => {
+    process.env[COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_ENV] = "1";
+    const { companyId, agentId, routine, svc } = await seedFixture();
+    const dueAt = new Date("2026-06-04T10:00:00.000Z");
+    const { trigger } = await svc.createTrigger(routine.id, {
+      kind: "schedule",
+      label: "every hour",
+      cronExpression: "0 * * * *",
+      timezone: "UTC",
+    }, {});
+    await db
+      .update(routineTriggers)
+      .set({ nextRunAt: dueAt })
+      .where(eq(routineTriggers.id, trigger.id));
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(),
+      companyId,
+      agentId,
+      invocationSource: "automation",
+      status: "running",
+      contextSnapshot: { taskKey: "existing" },
+    });
+
+    const result = await svc.tickScheduledTriggers(new Date("2026-06-04T10:05:00.000Z"));
+
+    expect(result.triggered).toBe(0);
+    const storedTrigger = await db
+      .select({
+        nextRunAt: routineTriggers.nextRunAt,
+        lastResult: routineTriggers.lastResult,
+      })
+      .from(routineTriggers)
+      .where(eq(routineTriggers.id, trigger.id))
+      .then((rows) => rows[0] ?? null);
+    expect(storedTrigger?.nextRunAt?.getTime()).toBe(dueAt.getTime());
+    expect(storedTrigger?.lastResult).toContain("active-run concurrency budget");
   });
 
   it("fails the run and cleans up the execution issue when wakeup queueing fails", async () => {

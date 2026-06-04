@@ -160,6 +160,12 @@ import { productivityReviewService } from "./productivity-review.js";
 import { withAgentStartLock } from "./agent-start-lock.js";
 import { resumeQueuedAgentsWithTimeout } from "./queued-run-resume.js";
 import {
+  COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_THROTTLE_REASON,
+  buildCompanyActiveRunBudgetThrottleMessage,
+  getCompanyActiveRunBudgetState,
+  type CompanyActiveRunBudgetState,
+} from "./active-run-concurrency-budget.js";
+import {
   redactCurrentUserText,
   redactCurrentUserValue,
   type CurrentUserRedactionOptions,
@@ -9259,6 +9265,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ...patch,
       });
     };
+    const buildThrottledWakeupRequest = (
+      state: CompanyActiveRunBudgetState,
+    ): typeof agentWakeupRequests.$inferInsert => ({
+      companyId: agent.companyId,
+      agentId,
+      source,
+      triggerDetail,
+      reason: COMPANY_ACTIVE_RUN_CONCURRENCY_BUDGET_THROTTLE_REASON,
+      payload,
+      status: "skipped",
+      requestedByActorType: opts.requestedByActorType ?? null,
+      requestedByActorId: opts.requestedByActorId ?? null,
+      idempotencyKey: opts.idempotencyKey ?? null,
+      error: buildCompanyActiveRunBudgetThrottleMessage(state),
+      finishedAt: new Date(),
+    });
 
     const company = await db
       .select({ status: companies.status })
@@ -9769,6 +9791,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           return { kind: "deferred" as const };
         }
 
+        const budgetState = await getCompanyActiveRunBudgetState(tx as unknown as Db, agent.companyId, {
+          lock: true,
+        });
+        if (budgetState.atCap) {
+          await tx.insert(agentWakeupRequests).values(buildThrottledWakeupRequest(budgetState));
+          return { kind: "skipped" as const };
+        }
+
         const wakeupRequest = await tx
           .insert(agentWakeupRequests)
           .values({
@@ -9898,46 +9928,58 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return mergedRun;
     }
 
-    const wakeupRequest = await db
-      .insert(agentWakeupRequests)
-      .values({
-        companyId: agent.companyId,
-        agentId,
-        source,
-        triggerDetail,
-        reason,
-        payload,
-        status: "queued",
-        requestedByActorType: opts.requestedByActorType ?? null,
-        requestedByActorId: opts.requestedByActorId ?? null,
-        idempotencyKey: opts.idempotencyKey ?? null,
-      })
-      .returning()
-      .then((rows) => rows[0]);
+    const newRun = await db.transaction(async (tx) => {
+      const txDb = tx as unknown as Db;
+      const budgetState = await getCompanyActiveRunBudgetState(txDb, agent.companyId, { lock: true });
+      if (budgetState.atCap) {
+        await tx.insert(agentWakeupRequests).values(buildThrottledWakeupRequest(budgetState));
+        return null;
+      }
 
-    const newRun = await db
-      .insert(heartbeatRuns)
-      .values({
-        companyId: agent.companyId,
-        agentId,
-        invocationSource: source,
-        triggerDetail,
-        status: "queued",
-        wakeupRequestId: wakeupRequest.id,
-        contextSnapshot: enrichedContextSnapshot,
-        sessionIdBefore: sessionBefore,
-        continuationAttempt,
-      })
-      .returning()
-      .then((rows) => rows[0]);
+      const wakeupRequest = await tx
+        .insert(agentWakeupRequests)
+        .values({
+          companyId: agent.companyId,
+          agentId,
+          source,
+          triggerDetail,
+          reason,
+          payload,
+          status: "queued",
+          requestedByActorType: opts.requestedByActorType ?? null,
+          requestedByActorId: opts.requestedByActorId ?? null,
+          idempotencyKey: opts.idempotencyKey ?? null,
+        })
+        .returning()
+        .then((rows) => rows[0]);
 
-    await db
-      .update(agentWakeupRequests)
-      .set({
-        runId: newRun.id,
-        updatedAt: new Date(),
-      })
-      .where(eq(agentWakeupRequests.id, wakeupRequest.id));
+      const queuedRun = await tx
+        .insert(heartbeatRuns)
+        .values({
+          companyId: agent.companyId,
+          agentId,
+          invocationSource: source,
+          triggerDetail,
+          status: "queued",
+          wakeupRequestId: wakeupRequest.id,
+          contextSnapshot: enrichedContextSnapshot,
+          sessionIdBefore: sessionBefore,
+          continuationAttempt,
+        })
+        .returning()
+        .then((rows) => rows[0]);
+
+      await tx
+        .update(agentWakeupRequests)
+        .set({
+          runId: queuedRun.id,
+          updatedAt: new Date(),
+        })
+        .where(eq(agentWakeupRequests.id, wakeupRequest.id));
+
+      return queuedRun;
+    });
+    if (!newRun) return null;
 
     publishLiveEvent({
       companyId: newRun.companyId,
