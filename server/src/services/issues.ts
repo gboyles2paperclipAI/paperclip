@@ -343,6 +343,7 @@ export type ScannerFindingIssueInput = IssueChildCreateInput & {
   relatedBlockerIssueId?: string | null;
   relatedId?: string | null;
   sourceStateFingerprint?: string | null;
+  statusWasExplicit?: boolean;
 };
 export type ScannerFindingIssueResult = {
   issue: Awaited<ReturnType<ReturnType<typeof issueService>["create"]>>;
@@ -4644,6 +4645,7 @@ export function issueService(db: Db) {
         relatedBlockerIssueId,
         relatedId,
         sourceStateFingerprint,
+        statusWasExplicit,
         ...issueData
       } = data;
 
@@ -4698,7 +4700,9 @@ export function issueService(db: Db) {
             "description",
             appendAcceptanceCriteriaToDescription(issueData.description, acceptanceCriteria),
           );
-          setDefinedScannerFindingPatchValue(updateData, "status", issueData.status);
+          if (statusWasExplicit !== false) {
+            setDefinedScannerFindingPatchValue(updateData, "status", issueData.status);
+          }
           setDefinedScannerFindingPatchValue(updateData, "workMode", issueData.workMode);
           setDefinedScannerFindingPatchValue(updateData, "priority", issueData.priority);
           setDefinedScannerFindingPatchValue(updateData, "assigneeAgentId", issueData.assigneeAgentId);

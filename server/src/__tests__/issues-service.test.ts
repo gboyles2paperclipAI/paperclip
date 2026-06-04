@@ -902,6 +902,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
 
   it("reuses active scanner findings and creates new findings for done or changed source state", async () => {
     const companyId = randomUUID();
+    const agentId = randomUUID();
     const sourceIssueId = randomUUID();
 
     await db.insert(companies).values({
@@ -909,6 +910,17 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
       name: "Paperclip",
       issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Scanner Runner",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
     });
     await db.insert(issues).values({
       id: sourceIssueId,
@@ -951,6 +963,25 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     expect(reused.issue.title).toBe("Stuck Ticket Scanner: Source issue updated");
     expect(reused.issue.description).toBe("Updated scanner evidence.");
     expect(reused.issue.priority).toBe("critical");
+
+    await svc.update(first.issue.id, { status: "in_progress", assigneeAgentId: agentId });
+
+    const reusedWithoutExplicitStatus = await svc.ensureScannerFindingIssue(sourceIssueId, {
+      findingType: "stuck_ticket",
+      relatedId: "routing",
+      sourceStateFingerprint: "state-a",
+      title: "Stuck Ticket Scanner: Source issue refreshed",
+      description: "Refreshed scanner evidence.",
+      status: "todo",
+      statusWasExplicit: false,
+      priority: "high",
+    });
+
+    expect(reusedWithoutExplicitStatus.reused).toBe(true);
+    expect(reusedWithoutExplicitStatus.issue.id).toBe(first.issue.id);
+    expect(reusedWithoutExplicitStatus.issue.status).toBe("in_progress");
+    expect(reusedWithoutExplicitStatus.issue.title).toBe("Stuck Ticket Scanner: Source issue refreshed");
+    expect(reusedWithoutExplicitStatus.issue.priority).toBe("high");
 
     const changedState = await svc.ensureScannerFindingIssue(sourceIssueId, {
       findingType: "stuck_ticket",

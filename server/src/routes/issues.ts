@@ -3956,6 +3956,7 @@ export function issueRoutes(
     const result = await svc.ensureScannerFindingIssue(sourceIssue.id, {
       ...req.body,
       executionPolicy,
+      statusWasExplicit: res.locals.createIssueStatusDefault?.defaulted !== true,
       createdByAgentId: actor.agentId,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
       actorAgentId: actor.agentId,
