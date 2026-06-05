@@ -19,6 +19,10 @@ const mockIssueService = vi.hoisted(() => ({
   getByIdentifier: vi.fn(),
 }));
 
+const mockAccessService = vi.hoisted(() => ({
+  decide: vi.fn(),
+}));
+
 vi.mock("../services/activity.js", () => ({
   activityService: () => mockActivityService,
   normalizeActivityLimit: (limit: number | undefined) => {
@@ -28,6 +32,7 @@ vi.mock("../services/activity.js", () => ({
 }));
 
 vi.mock("../services/index.js", () => ({
+  accessService: () => mockAccessService,
   issueService: () => mockIssueService,
   heartbeatService: () => mockHeartbeatService,
 }));
@@ -92,6 +97,8 @@ describe.sequential("activity routes", () => {
     for (const mock of Object.values(mockActivityService)) mock.mockReset();
     for (const mock of Object.values(mockHeartbeatService)) mock.mockReset();
     for (const mock of Object.values(mockIssueService)) mock.mockReset();
+    mockAccessService.decide.mockReset();
+    mockAccessService.decide.mockResolvedValue({ allowed: true });
   });
 
   it("limits company activity lists by default", async () => {

@@ -104,9 +104,13 @@ const mockBudgetService = vi.hoisted(() => ({
   upsertPolicy: vi.fn(),
   resolveIncident: vi.fn(),
 }));
+const mockAccessService = vi.hoisted(() => ({
+  decide: vi.fn(),
+}));
 
 function registerModuleMocks() {
   vi.doMock("../services/index.js", () => ({
+    accessService: () => mockAccessService,
     budgetService: () => mockBudgetService,
     costService: () => mockCostService,
     financeService: () => mockFinanceService,
@@ -197,6 +201,7 @@ beforeEach(() => {
     companyId: "company-1",
     identifier: "PC1A2-1",
   });
+  mockAccessService.decide.mockResolvedValue({ allowed: true });
   mockBudgetService.upsertPolicy.mockResolvedValue(undefined);
 });
 
