@@ -906,15 +906,14 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function collectRuntimeSecretValues(env: Record<string, string>): string[] {
-  return [
-    ...new Set(
-      Object.entries(env)
-        .filter(([key]) => SENSITIVE_ENV_KEY.test(key))
-        .map(([, value]) => value.trim())
-        .filter((value) => value.length >= MIN_RUNTIME_SECRET_REDACTION_LENGTH),
-    ),
-  ].sort((a, b) => b.length - a.length);
+function collectRuntimeSecretValues(env: NodeJS.ProcessEnv | Record<string, string>): string[] {
+  const values = new Set<string>();
+  for (const [key, value] of Object.entries(env)) {
+    if (!SENSITIVE_ENV_KEY.test(key) || typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed.length >= MIN_RUNTIME_SECRET_REDACTION_LENGTH) values.add(trimmed);
+  }
+  return [...values].sort((a, b) => b.length - a.length);
 }
 
 export function redactRuntimeSecretValues(
@@ -934,7 +933,7 @@ export function redactRuntimeSecretValues(
 }
 
 export function createRuntimeSecretValueStreamRedactor(
-  env: Record<string, string>,
+  env: NodeJS.ProcessEnv | Record<string, string>,
   redactedValue = REDACTED_LOG_VALUE,
 ) {
   const secretValues = collectRuntimeSecretValues(env);
@@ -1221,8 +1220,11 @@ export function refreshPaperclipWorkspaceEnvForExecution(input: {
   return shapedWorkspaceEnv;
 }
 
-export function sanitizeInheritedPaperclipEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...baseEnv };
+export function sanitizeInheritedPaperclipEnv(baseEnv: NodeJS.ProcessEnv): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (typeof value === "string") env[key] = value;
+  }
   for (const key of Object.keys(env)) {
     if (!key.startsWith("PAPERCLIP_")) continue;
     if (key === "PAPERCLIP_RUNTIME_API_URL") continue;
@@ -1367,10 +1369,14 @@ async function resolveSpawnTarget(
   return { command: executable, args };
 }
 
-export function ensurePathInEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  if (typeof env.PATH === "string" && env.PATH.length > 0) return env;
-  if (typeof env.Path === "string" && env.Path.length > 0) return env;
-  return { ...env, PATH: defaultPathForPlatform() };
+export function ensurePathInEnv(env: NodeJS.ProcessEnv | Record<string, string>): Record<string, string> {
+  const nextEnv: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value === "string") nextEnv[key] = value;
+  }
+  if (typeof nextEnv.PATH === "string" && nextEnv.PATH.length > 0) return nextEnv;
+  if (typeof nextEnv.Path === "string" && nextEnv.Path.length > 0) return nextEnv;
+  return { ...nextEnv, PATH: defaultPathForPlatform() };
 }
 
 export async function ensureAbsoluteDirectory(

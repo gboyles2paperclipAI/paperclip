@@ -5136,20 +5136,49 @@ export function issueRoutes(
       if (becameDone) {
         const dependents = await svc.listWakeableBlockedDependents(issue.id);
         for (const dependent of dependents) {
-          addWakeup(dependent.assigneeAgentId, {
+          const resumedDependent = await svc.update(dependent.id, {
+            status: "todo",
+            blockedByIssueIds: [],
+            actorAgentId: actor.agentId ?? null,
+            actorUserId: actor.actorType === "user" ? actor.actorId : null,
+          });
+          if (!resumedDependent) continue;
+
+          const wakeAssigneeAgentId = resumedDependent.assigneeAgentId ?? dependent.assigneeAgentId;
+          if (!wakeAssigneeAgentId) continue;
+
+          await logActivity(db, {
+            companyId: resumedDependent.companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            action: "issue.blockers_resolved",
+            entityType: "issue",
+            entityId: resumedDependent.id,
+            agentId: wakeAssigneeAgentId,
+            runId: actor.runId,
+            details: {
+              identifier: resumedDependent.identifier,
+              resolvedBlockerIssueId: issue.id,
+              blockerIssueIds: dependent.blockerIssueIds,
+              previousStatus: "blocked",
+              nextStatus: resumedDependent.status,
+            },
+          });
+
+          addWakeup(wakeAssigneeAgentId, {
             source: "automation",
             triggerDetail: "system",
             reason: "issue_blockers_resolved",
             payload: {
-              issueId: dependent.id,
+              issueId: resumedDependent.id,
               resolvedBlockerIssueId: issue.id,
               blockerIssueIds: dependent.blockerIssueIds,
             },
             requestedByActorType: actor.actorType,
             requestedByActorId: actor.actorId,
             contextSnapshot: {
-              issueId: dependent.id,
-              taskId: dependent.id,
+              issueId: resumedDependent.id,
+              taskId: resumedDependent.id,
               wakeReason: "issue_blockers_resolved",
               source: "issue.blockers_resolved",
               resolvedBlockerIssueId: issue.id,

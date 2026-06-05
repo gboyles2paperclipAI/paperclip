@@ -85,6 +85,18 @@ describe("createRuntimeSecretValueStreamRedactor", () => {
     expect(output).toContain("SAFE_VALUE=visible");
     expect(output).not.toContain("paperclipRuntimeSecretValue");
   });
+
+  it("accepts process env objects with undefined values", () => {
+    const env: NodeJS.ProcessEnv = {
+      PAPERCLIP_API_KEY: "paperclipRuntimeSecretValue",
+      OPENAI_API_KEY: undefined,
+    };
+    const redactor = createRuntimeSecretValueStreamRedactor(env);
+
+    const output = redactor.push("Authorization: Bearer paperclipRuntimeSecretValue") + redactor.flush();
+
+    expect(output).toBe("Authorization: Bearer ***REDACTED***");
+  });
 });
 
 describe("sanitizeSshRemoteEnv", () => {
