@@ -326,6 +326,8 @@ type IssueUserContextInput = {
 };
 type ProjectGoalReader = Pick<Db, "select">;
 type DbReader = Pick<Db, "select">;
+type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
+type DbOrTransaction = Db | DbTransaction;
 type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   labelIds?: string[];
   blockedByIssueIds?: string[];
@@ -4745,7 +4747,7 @@ export function issueService(db: Db) {
           originKind: SCANNER_FINDING_ORIGIN_KIND,
           originId,
           originFingerprint,
-        });
+        }, tx);
 
         if (blockParentUntilDone) {
           const existingBlockers = await tx
@@ -5044,6 +5046,7 @@ export function issueService(db: Db) {
     create: async (
       companyId: string,
       data: IssueCreateInput,
+      dbOrTx: DbOrTransaction = db,
     ) => {
       const {
         labelIds: inputLabelIds,
@@ -5070,7 +5073,7 @@ export function issueService(db: Db) {
       if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
         throw unprocessable("in_progress issues require an assignee");
       }
-      return db.transaction(async (tx) => {
+      const createInTx = async (tx: DbTransaction) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         const projectGoalId = await getProjectDefaultGoalId(tx, companyId, issueData.projectId);
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
@@ -5279,7 +5282,11 @@ export function issueService(db: Db) {
         }
         const [enriched] = await withIssueLabels(tx, [issue]);
         return enriched;
-      });
+      };
+      if (dbOrTx === db) {
+        return db.transaction(createInTx);
+      }
+      return createInTx(dbOrTx as DbTransaction);
     },
 
     update: async (
