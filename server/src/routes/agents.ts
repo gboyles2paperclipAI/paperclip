@@ -2517,7 +2517,7 @@ export function agentRoutes(
       "agent",
       existing.id,
       permissionKey,
-      enabled !== false,
+      enabled,
       req.actor.type === "board" ? (req.actor.userId ?? null) : null,
       scope ?? null,
     );
@@ -2534,7 +2534,7 @@ export function agentRoutes(
       entityId: existing.id,
       details: {
         permissionKey,
-        enabled: enabled !== false,
+        enabled,
         scope: scope ?? null,
       },
     });

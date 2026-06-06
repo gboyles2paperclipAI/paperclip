@@ -1777,10 +1777,12 @@ export function issueRoutes(
       status: string;
     },
     action: "issue:read" | "issue:mutate",
+    options?: { permissionKey?: PermissionKey },
   ) {
     return access.decide({
       actor: req.actor,
       action,
+      permissionKey: options?.permissionKey,
       resource: {
         type: "issue",
         companyId: issue.companyId,
@@ -1863,7 +1865,9 @@ export function issueRoutes(
       res.status(403).json({ error: "Agent authentication required" });
       return false;
     }
-    const boundaryDecision = await decideIssueAccess(req, issue, "issue:mutate");
+    const boundaryDecision = await decideIssueAccess(req, issue, "issue:mutate", {
+      permissionKey: options?.crossIssueGrantKey,
+    });
     if (!boundaryDecision.allowed) {
       res.status(403).json({ error: "Issue is outside this actor's authorization boundary" });
       return false;

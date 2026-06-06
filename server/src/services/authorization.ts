@@ -853,10 +853,11 @@ export function authorizationService(db: Db) {
   async function decide(input: {
     actor: AuthorizationActor;
     action: AuthorizationAction;
+    permissionKey?: PermissionKey | null;
     resource: AuthorizationResource;
     scope?: Record<string, unknown> | null;
   }): Promise<AuthorizationDecision> {
-    const permissionKey = permissionForAction(input.action);
+    const permissionKey = input.permissionKey ?? permissionForAction(input.action);
     const companyId = companyIdForResource(input.resource);
 
     async function decideWithTaskAssignmentGrants(
@@ -1169,19 +1170,6 @@ export function authorizationService(db: Db) {
           reason: "allow_company_agent",
           explanation: "Allowed because the issue has no agent assignee.",
         });
-      }
-      // Cross-issue write grants: allow agents with issues:comment:all or
-      // issues:patch:all to pass the boundary check. The route layer enforces
-      // which specific grant is required per endpoint and logs the audit trail.
-      for (const key of ["issues:comment:all", "issues:patch:all"] as const) {
-        const crossDecision = await decidePrincipalGrant({
-          companyId,
-          principalType: "agent",
-          principalId: actorAgentId,
-          action: input.action,
-          permissionKey: key,
-        });
-        if (crossDecision.allowed) return crossDecision;
       }
     }
     if (
