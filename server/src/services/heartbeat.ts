@@ -97,6 +97,7 @@ import {
   type RunLivenessClassificationInput,
 } from "./run-liveness.js";
 import { logActivity, publishPluginDomainEvent, type LogActivityInput } from "./activity-log.js";
+import { fireQuotaExhaustionAlert, parseModelFromQuotaError } from "./quota-exhaustion-alert.js";
 import {
   buildWorkspaceReadyComment,
   cleanupExecutionWorkspaceArtifacts,
@@ -8451,6 +8452,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             readNonEmptyString(adapterResult.model) ?? null,
             classifyErrorClass(runErrorCode, runErrorMessage),
           );
+          if (parseModelFromQuotaError(runErrorMessage) !== null) {
+            fireQuotaExhaustionAlert({
+              companyId: agent.companyId,
+              adapterType: agent.adapterType,
+              model: readNonEmptyString(adapterResult.model),
+              retryNotBefore: adapterResult.retryNotBefore ?? null,
+              errorMessage: runErrorMessage,
+              db,
+            }).catch((err) => {
+              logger.warn({ err }, "heartbeat: quota exhaustion alert failed");
+            });
+          }
           if (g3.action === "suppress-block") {
             await appendRunEvent(livenessRun, await nextRunEventSeq(livenessRun.id), {
               eventType: "lifecycle",
