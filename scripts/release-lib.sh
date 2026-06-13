@@ -370,12 +370,12 @@ require_npm_publish_auth() {
     return
   fi
 
-  if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+  if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ "${GITHUB_REPOSITORY:-}" = "paperclipai/paperclip" ]; then
     release_info "  ✓ npm publish auth will be provided by GitHub Actions trusted publishing"
     return
   fi
 
-  release_fail "npm publish auth is not available. Use 'npm login' locally or run from GitHub Actions with trusted publishing."
+  release_fail "npm publish auth is not available. Use 'npm login' locally or run from GitHub Actions trusted publishing in paperclipai/paperclip."
 }
 
 list_public_package_info() {
