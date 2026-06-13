@@ -343,4 +343,160 @@ describeEmbeddedPostgres("issueWorkflowReconciler", () => {
     );
     expect(result.repaired.some((repair) => repair.action === "resume_invalid_blocked_issue")).toBe(false);
   });
+
+  it("cross-project isolation: held worktree in project A does not suppress repair for blocked issue in project B", async () => {
+    const { companyId, agentId } = await seedCompany();
+    const projectAId = randomUUID();
+    const projectBId = randomUUID();
+    const runningIssueId = randomUUID();
+    const blockedIssueId = randomUUID();
+    const activeRunId = randomUUID();
+
+    await db.insert(projects).values([
+      { id: projectAId, companyId, name: "Project A" },
+      { id: projectBId, companyId, name: "Project B" },
+    ]);
+    await db.insert(heartbeatRuns).values({
+      id: activeRunId,
+      companyId,
+      agentId,
+      status: "running",
+      invocationSource: "automation",
+      contextSnapshot: { issueId: runningIssueId },
+    });
+    await db.insert(issues).values([
+      {
+        id: runningIssueId,
+        companyId,
+        title: "Holding project A worktree",
+        status: "in_progress",
+        priority: "high",
+        assigneeAgentId: agentId,
+        projectId: projectAId,
+        executionRunId: activeRunId,
+        executionLockedAt: new Date(),
+      },
+      {
+        id: blockedIssueId,
+        companyId,
+        title: "Blocked in project B without wait path",
+        status: "blocked",
+        priority: "high",
+        assigneeAgentId: agentId,
+        projectId: projectBId,
+      },
+    ]);
+
+    const result = await issueWorkflowReconciler(db).reconcileCompany(companyId, { apply: true });
+    expect(result.repaired.some((r) => r.issueId === blockedIssueId && r.action === "resume_invalid_blocked_issue")).toBe(true);
+    expect(result.skipped.some((s) => s.issueId === blockedIssueId)).toBe(false);
+
+    const [updatedIssue] = await db.select().from(issues).where(eq(issues.id, blockedIssueId));
+    expect(updatedIssue.status).toBe("todo");
+  });
+
+  it("null projectId bypasses worktree-held check and proceeds to repair", async () => {
+    const { companyId, agentId } = await seedCompany();
+    const projectId = randomUUID();
+    const runningIssueId = randomUUID();
+    const blockedIssueId = randomUUID();
+    const activeRunId = randomUUID();
+
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Some Project",
+    });
+    await db.insert(heartbeatRuns).values({
+      id: activeRunId,
+      companyId,
+      agentId,
+      status: "running",
+      invocationSource: "automation",
+      contextSnapshot: { issueId: runningIssueId },
+    });
+    await db.insert(issues).values([
+      {
+        id: runningIssueId,
+        companyId,
+        title: "Holding a project worktree",
+        status: "in_progress",
+        priority: "high",
+        assigneeAgentId: agentId,
+        projectId,
+        executionRunId: activeRunId,
+        executionLockedAt: new Date(),
+      },
+      {
+        id: blockedIssueId,
+        companyId,
+        title: "Blocked without projectId or wait path",
+        status: "blocked",
+        priority: "high",
+        assigneeAgentId: agentId,
+        projectId: null,
+      },
+    ]);
+
+    const result = await issueWorkflowReconciler(db).reconcileCompany(companyId, { apply: true });
+    expect(result.repaired.some((r) => r.issueId === blockedIssueId && r.action === "resume_invalid_blocked_issue")).toBe(true);
+    expect(result.skipped.some((s) => s.issueId === blockedIssueId)).toBe(false);
+
+    const [updatedIssue] = await db.select().from(issues).where(eq(issues.id, blockedIssueId));
+    expect(updatedIssue.status).toBe("todo");
+  });
+
+  it.each(["queued", "scheduled_retry"] as const)(
+    "worktree-held detection skips repair when holding run has status '%s'",
+    async (runStatus) => {
+      const { companyId, agentId } = await seedCompany();
+      const projectId = randomUUID();
+      const runningIssueId = randomUUID();
+      const blockedIssueId = randomUUID();
+      const activeRunId = randomUUID();
+
+      await db.insert(projects).values({
+        id: projectId,
+        companyId,
+        name: "Shared Project",
+      });
+      await db.insert(heartbeatRuns).values({
+        id: activeRunId,
+        companyId,
+        agentId,
+        status: runStatus,
+        invocationSource: "automation",
+        contextSnapshot: { issueId: runningIssueId },
+      });
+      await db.insert(issues).values([
+        {
+          id: runningIssueId,
+          companyId,
+          title: "Holding the project worktree",
+          status: "in_progress",
+          priority: "high",
+          assigneeAgentId: agentId,
+          projectId,
+          executionRunId: activeRunId,
+          executionLockedAt: new Date(),
+        },
+        {
+          id: blockedIssueId,
+          companyId,
+          title: "Blocked without formal wait path",
+          status: "blocked",
+          priority: "high",
+          assigneeAgentId: agentId,
+          projectId,
+        },
+      ]);
+
+      const result = await issueWorkflowReconciler(db).reconcileCompany(companyId, { apply: true });
+      expect(result.repaired.some((r) => r.issueId === blockedIssueId && r.action === "resume_invalid_blocked_issue")).toBe(false);
+      expect(result.skipped.some((s) => s.issueId === blockedIssueId && s.reason.startsWith("project_worktree_held:"))).toBe(true);
+
+      const [updatedIssue] = await db.select().from(issues).where(eq(issues.id, blockedIssueId));
+      expect(updatedIssue.status).toBe("blocked");
+    },
+  );
 });
