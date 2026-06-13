@@ -119,6 +119,10 @@ function readLiveRunsQueryInt(value: unknown, max: number, fallback = 0) {
   return Math.min(max, Math.trunc(parsed));
 }
 
+function classifyLiveRun(run: { issueId: string | null }): "orphan_no_issue" | null {
+  return run.issueId == null ? "orphan_no_issue" : null;
+}
+
 function readRunIssueId(context: Record<string, unknown> | null) {
   const directIssueId = context?.issueId;
   if (typeof directIssueId === "string" && isUuidLike(directIssueId)) return directIssueId;
@@ -3441,6 +3445,7 @@ export function agentRoutes(
       const rows = [...liveRuns, ...recentRuns];
       res.json(await Promise.all(rows.map(async (run) => ({
         ...run,
+        classification: classifyLiveRun(run),
         outputSilence: await heartbeat.buildRunOutputSilence(run),
       }))));
       return;
@@ -3448,6 +3453,7 @@ export function agentRoutes(
 
     res.json(await Promise.all(liveRuns.map(async (run) => ({
       ...run,
+      classification: classifyLiveRun(run),
       outputSilence: await heartbeat.buildRunOutputSilence(run),
     }))));
   });

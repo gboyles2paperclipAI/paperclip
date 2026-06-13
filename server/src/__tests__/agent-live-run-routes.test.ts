@@ -545,6 +545,74 @@ describe("agent live run routes", () => {
     expect(db.select).toHaveBeenCalledTimes(2);
   });
 
+  it("classifies live runs with null issueId as orphan_no_issue", async () => {
+    const rows = [
+      {
+        id: "run-with-issue",
+        companyId: "company-1",
+        status: "running",
+        invocationSource: "on_demand",
+        triggerDetail: "manual",
+        startedAt: new Date("2026-04-10T09:30:00.000Z"),
+        finishedAt: null,
+        createdAt: new Date("2026-04-10T09:00:00.000Z"),
+        agentId: "agent-1",
+        agentName: "Builder",
+        adapterType: "codex_local",
+        logBytes: 0,
+        livenessState: "healthy",
+        livenessReason: null,
+        continuationAttempt: 0,
+        lastUsefulActionAt: null,
+        nextAction: null,
+        lastOutputAt: null,
+        lastOutputSeq: null,
+        lastOutputStream: null,
+        lastOutputBytes: 0,
+        processStartedAt: null,
+        issueId: "issue-1",
+      },
+      {
+        id: "run-without-issue",
+        companyId: "company-1",
+        status: "running",
+        invocationSource: "on_demand",
+        triggerDetail: "manual",
+        startedAt: new Date("2026-04-10T09:31:00.000Z"),
+        finishedAt: null,
+        createdAt: new Date("2026-04-10T09:01:00.000Z"),
+        agentId: "agent-1",
+        agentName: "Builder",
+        adapterType: "codex_local",
+        logBytes: 0,
+        livenessState: "healthy",
+        livenessReason: null,
+        continuationAttempt: 0,
+        lastUsefulActionAt: null,
+        nextAction: null,
+        lastOutputAt: null,
+        lastOutputSeq: null,
+        lastOutputStream: null,
+        lastOutputBytes: 0,
+        processStartedAt: null,
+        issueId: null,
+      },
+    ];
+    const { db } = createLiveRunsDbStub(rows);
+
+    const res = await requestApp(
+      await createApp(db),
+      (baseUrl) => request(baseUrl).get("/api/companies/company-1/live-runs"),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toHaveLength(2);
+    const withIssue = res.body.find((r: { id: string }) => r.id === "run-with-issue");
+    const withoutIssue = res.body.find((r: { id: string }) => r.id === "run-without-issue");
+    expect(withIssue.classification).toBeNull();
+    expect(withoutIssue.classification).toBe("orphan_no_issue");
+  });
+
   it("passes scoped wake fields through the legacy heartbeat invoke route", async () => {
     const res = await requestApp(
       await createApp(),
