@@ -1601,4 +1601,194 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       });
     });
   });
+
+  describe("continuationPolicy auto-upgrade", () => {
+    async function seedInReviewIssueWithAgent(title: string) {
+      const companyId = randomUUID();
+      const goalId = randomUUID();
+      const issueId = randomUUID();
+      const agentId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+      await db.insert(goals).values({
+        id: goalId,
+        companyId,
+        title,
+        level: "task",
+        status: "active",
+      });
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Platform Lead",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        goalId,
+        title: "Awaiting continuation",
+        status: "in_review",
+        priority: "medium",
+        assigneeAgentId: agentId,
+      });
+
+      return { companyId, goalId, issueId, agentId };
+    }
+
+    it("upgrades continuationPolicy none → wake_assignee_on_accept for request_confirmation on an in_review issue with an agent assignee", async () => {
+      const { companyId, issueId, agentId } = await seedInReviewIssueWithAgent("Auto-upgrade confirmation");
+
+      const created = await interactionsSvc.create({
+        id: issueId,
+        companyId,
+        status: "in_review",
+        assigneeAgentId: agentId,
+      }, {
+        kind: "request_confirmation",
+        continuationPolicy: "none",
+        payload: {
+          version: 1,
+          prompt: "Grant Vercel staging access?",
+        },
+      }, {
+        userId: "local-board",
+      });
+
+      expect(created.continuationPolicy).toBe("wake_assignee_on_accept");
+    });
+
+    it("upgrades continuationPolicy none → wake_assignee_on_accept for request_checkbox_confirmation on an in_review issue with an agent assignee", async () => {
+      const { companyId, issueId, agentId } = await seedInReviewIssueWithAgent("Auto-upgrade checkbox confirmation");
+
+      const created = await interactionsSvc.create({
+        id: issueId,
+        companyId,
+        status: "in_review",
+        assigneeAgentId: agentId,
+      }, {
+        kind: "request_checkbox_confirmation",
+        continuationPolicy: "none",
+        payload: {
+          version: 1,
+          prompt: "Select deployment targets",
+          options: [
+            { id: "staging", label: "Staging" },
+            { id: "prod", label: "Production" },
+          ],
+        },
+      }, {
+        userId: "local-board",
+      });
+
+      expect(created.continuationPolicy).toBe("wake_assignee_on_accept");
+    });
+
+    it("does not upgrade continuationPolicy none for request_confirmation on a non-in_review issue", async () => {
+      const companyId = randomUUID();
+      const goalId = randomUUID();
+      const issueId = randomUUID();
+      const agentId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+      await db.insert(goals).values({ id: goalId, companyId, title: "No upgrade", level: "task", status: "active" });
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Platform Lead",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        goalId,
+        title: "In progress issue",
+        status: "in_progress",
+        priority: "medium",
+        assigneeAgentId: agentId,
+      });
+
+      const created = await interactionsSvc.create({
+        id: issueId,
+        companyId,
+        status: "in_progress",
+        assigneeAgentId: agentId,
+      }, {
+        kind: "request_confirmation",
+        continuationPolicy: "none",
+        payload: {
+          version: 1,
+          prompt: "Are you sure?",
+        },
+      }, {
+        userId: "local-board",
+      });
+
+      expect(created.continuationPolicy).toBe("none");
+    });
+
+    it("does not upgrade continuationPolicy none for request_confirmation on an in_review issue without an agent assignee", async () => {
+      const companyId = randomUUID();
+      const goalId = randomUUID();
+      const issueId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+      await db.insert(goals).values({ id: goalId, companyId, title: "No upgrade user", level: "task", status: "active" });
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        goalId,
+        title: "User-assigned review",
+        status: "in_review",
+        priority: "medium",
+        assigneeUserId: "local-board",
+      });
+
+      const created = await interactionsSvc.create({
+        id: issueId,
+        companyId,
+        status: "in_review",
+        assigneeAgentId: null,
+      }, {
+        kind: "request_confirmation",
+        continuationPolicy: "none",
+        payload: {
+          version: 1,
+          prompt: "Approve?",
+        },
+      }, {
+        userId: "local-board",
+      });
+
+      expect(created.continuationPolicy).toBe("none");
+    });
+  });
 });

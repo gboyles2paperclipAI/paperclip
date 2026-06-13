@@ -756,11 +756,24 @@ export function issueThreadInteractionService(db: Db) {
     },
 
     create: async (
-      issue: { id: string; companyId: string },
+      issue: { id: string; companyId: string; status?: string | null; assigneeAgentId?: string | null },
       input: CreateIssueThreadInteraction,
       actor: InteractionActor,
     ) => {
-      const data = normalizeCreateInteractionInput(createIssueThreadInteractionSchema.parse(input));
+      let data = normalizeCreateInteractionInput(createIssueThreadInteractionSchema.parse(input));
+
+      // Auto-upgrade continuationPolicy: "none" → "wake_assignee_on_accept" for confirmation
+      // cards created on in_review issues with an agent assignee. A confirmation card on an
+      // in_review issue signals agent continuation is gated on the decision; "none" would
+      // silently drop the wake and leave the assignee stalled.
+      if (
+        isRequestConfirmationLikeKind(data.kind)
+        && data.continuationPolicy === "none"
+        && issue.status === "in_review"
+        && issue.assigneeAgentId != null
+      ) {
+        data = { ...data, continuationPolicy: "wake_assignee_on_accept" };
+      }
 
       if (data.idempotencyKey) {
         const existing = await getIdempotentInteraction({
