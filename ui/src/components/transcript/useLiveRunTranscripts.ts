@@ -11,6 +11,7 @@ import { buildSameOriginWebSocketUrl } from "../../lib/websocket-url";
 const LOG_POLL_INTERVAL_MS = 2000;
 const LOG_READ_LIMIT_BYTES = 256_000;
 const EMPTY_RUN_LOG_CHUNKS: RunLogChunk[] = [];
+const MAX_CONSECUTIVE_404S = 3;
 
 export interface RunTranscriptSource {
   id: string;
@@ -114,6 +115,7 @@ export function useLiveRunTranscripts({
   const pendingLogRowsByRunRef = useRef(new Map<string, string>());
   const logOffsetByRunRef = useRef(new Map<string, number>());
   const missingLogRunIdsRef = useRef(new Set<string>());
+  const consecutive404ByRunRef = useRef(new Map<string, number>());
   const transcriptCacheRef = useRef(new Map<string, {
     adapterType: string;
     chunks: RunLogChunk[];
@@ -201,6 +203,11 @@ export function useLiveRunTranscripts({
         missingLogRunIdsRef.current.delete(runId);
       }
     }
+    for (const runId of consecutive404ByRunRef.current.keys()) {
+      if (!knownRunIds.has(runId)) {
+        consecutive404ByRunRef.current.delete(runId);
+      }
+    }
     for (const runId of transcriptCacheRef.current.keys()) {
       if (!knownRunIds.has(runId)) {
         transcriptCacheRef.current.delete(runId);
@@ -222,6 +229,7 @@ export function useLiveRunTranscripts({
         const result = await heartbeatsApi.log(run.id, offset, logReadLimitBytes);
         if (cancelled) return;
 
+        consecutive404ByRunRef.current.delete(run.id);
         appendChunks(run.id, parsePersistedLogContent(run.id, result.content, pendingLogRowsByRunRef.current));
 
         if (result.nextOffset !== undefined) {
@@ -233,7 +241,13 @@ export function useLiveRunTranscripts({
         }
       } catch (error) {
         if (error instanceof ApiError && error.status === 404) {
-          missingLogRunIdsRef.current.add(run.id);
+          const count = (consecutive404ByRunRef.current.get(run.id) ?? 0) + 1;
+          consecutive404ByRunRef.current.set(run.id, count);
+          if (count >= MAX_CONSECUTIVE_404S) {
+            missingLogRunIdsRef.current.add(run.id);
+          }
+        } else {
+          consecutive404ByRunRef.current.delete(run.id);
         }
       } finally {
         if (!cancelled) {
