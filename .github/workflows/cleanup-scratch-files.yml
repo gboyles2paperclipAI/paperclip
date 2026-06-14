@@ -1,0 +1,29 @@
+name: Cleanup Scratch Files
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    name: Remove old scratch files
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Run cleanup script
+        run: |
+          cd ${{ github.workspace }}
+          ./scripts/cleanup-scratch-files.sh . 48
+        shell: bash
+
+      - name: Verify cleanup
+        run: |
+          echo "Remaining scratch files:"
+          find . -maxdepth 1 -type f -regex '\./\.[0-9]+.*\.\(cjs\|json\|txt\)$' | wc -l
+        shell: bash
+        continue-on-error: true
