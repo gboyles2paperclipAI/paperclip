@@ -7,6 +7,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { createCapturedOutputBuffer, parseJsonResponseWithLimit } from "./dev-runner-output.ts";
 import { collectWatchedSnapshot as collectDevServerWatchedSnapshot, diffSnapshots } from "./dev-runner-snapshot.mjs";
+import { runRuntimeSourcePreflight } from "./runtime-source-preflight.mjs";
 import { createDevServiceIdentity, repoRoot } from "./dev-service-profile.ts";
 import { bootstrapDevRunnerWorktreeEnv } from "../server/src/dev-runner-worktree.ts";
 import {
@@ -615,6 +616,13 @@ async function maybeAutoRestartChild() {
     return;
   }
 
+  const restartPreflightCode = runRuntimeSourcePreflight({ repoRoot, runtimeManifestsOnly: true });
+  if (restartPreflightCode !== 0) {
+    process.stderr.write("[paperclip] Runtime source preflight failed; skipping this restart cycle.\n");
+    restartInFlight = false;
+    return;
+  }
+
   try {
     await maybePreflightMigrations({
       autoApply: true,
@@ -682,6 +690,9 @@ process.on("SIGINT", () => {
 process.on("SIGTERM", () => {
   void shutdown("SIGTERM");
 });
+
+const startupPreflightCode = runRuntimeSourcePreflight({ repoRoot });
+if (startupPreflightCode !== 0) process.exit(startupPreflightCode);
 
 await maybePreflightMigrations();
 await startServerChild();

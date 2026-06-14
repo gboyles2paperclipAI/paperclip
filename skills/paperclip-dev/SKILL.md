@@ -250,6 +250,35 @@ lsof -nP -iTCP:<port> -sTCP:LISTEN
 4. **Do not use `nohup` or `&` alone** — these are unreliable for agent shells that may have their entire process group killed.
 5. **Clean up when done** — kill the tmux session when the testing is complete.
 
+## Restart / Deploy Preflight (Required)
+
+Before any Paperclip service restart or deploy (systemd, manual, or via `fix-paperclip-systemd-managed-dev-runner.sh --apply`), run the restart preflight:
+
+```bash
+cd /home/paperclipadmin/paperclip-src
+pnpm preflight:restart
+```
+
+Or directly:
+
+```bash
+node /home/paperclipadmin/paperclip-src/scripts/runtime-source-preflight.mjs \
+  --repo-root /home/paperclipadmin/paperclip-src
+```
+
+The preflight fails fast (exit 1) if:
+- The `server/package.json` `start` script uses `node dist/…` but workspace package exports resolve to TS source (the FUL-11154 incident pattern — node cannot load `.ts` files)
+- Any runtime workspace package export points at a missing `dist/` file
+- Unresolved Git merge paths are present
+- Conflict markers exist in source files
+
+**Include the preflight result in every restart ticket completion comment.** Paste the pass/fail line from stdout so the ticket thread has a durable record.
+
+Example passing output:
+```
+  ✓  Runtime source preflight passed: no unresolved Git paths, conflict markers, or start-command/package-export mismatches found. (start: tsx-src)
+```
+
 ## Common Mistakes
 
 | Mistake | Fix |
