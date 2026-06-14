@@ -532,23 +532,15 @@ function withRecoveryActionsOnRelationSummaries(
   relations: { blockedBy: IssueRelationIssueSummary[]; blocks: IssueRelationIssueSummary[] },
   recoveryActionByIssueId: Map<string, NonNullable<IssueRelationIssueSummary["activeRecoveryAction"]>>,
 ) {
-  const augment = (summary: IssueRelationIssueSummary): IssueRelationIssueSummary => {
-    const activeRecoveryAction = recoveryActionByIssueId.get(summary.id) ?? summary.activeRecoveryAction ?? null;
-    return {
-      ...summary,
-      activeRecoveryAction,
-      waitReason: waitReasonForActiveRecoveryAction(activeRecoveryAction),
-      terminalBlockers: summary.terminalBlockers?.map(augment),
-    };
-  };
+  const augment = (summary: IssueRelationIssueSummary): IssueRelationIssueSummary => ({
+    ...summary,
+    activeRecoveryAction: recoveryActionByIssueId.get(summary.id) ?? summary.activeRecoveryAction ?? null,
+    terminalBlockers: summary.terminalBlockers?.map(augment),
+  });
   return {
     blockedBy: relations.blockedBy.map(augment),
     blocks: relations.blocks.map(augment),
   };
-}
-
-function waitReasonForActiveRecoveryAction(activeRecoveryAction: unknown) {
-  return activeRecoveryAction ? "recovery_held" : null;
 }
 
 const ACTIVE_REVIEW_APPROVAL_STATUSES = new Set(["pending", "revision_requested"]);
@@ -722,7 +714,6 @@ function summarizeIssueMonitor(
     kind: policy?.monitor?.kind ?? state?.monitor?.kind ?? null,
     serviceName: policy?.monitor?.serviceName ?? state?.monitor?.serviceName ?? null,
     externalRef: redactIssueMonitorExternalRef(policy?.monitor?.externalRef ?? state?.monitor?.externalRef ?? null),
-    repeatIntervalMs: policy?.monitor?.repeatIntervalMs ?? state?.monitor?.repeatIntervalMs ?? null,
     timeoutAt: policy?.monitor?.timeoutAt ?? state?.monitor?.timeoutAt ?? null,
     maxAttempts: policy?.monitor?.maxAttempts ?? state?.monitor?.maxAttempts ?? null,
     recoveryPolicy: policy?.monitor?.recoveryPolicy ?? state?.monitor?.recoveryPolicy ?? null,
@@ -2575,15 +2566,11 @@ export function issueRoutes(
       if (revalidated) recoveryActionByIssue.set(issue.id, revalidated);
       else recoveryActionByIssue.delete(issue.id);
     }));
-    res.json(result.map((issue) => {
-      const activeRecoveryAction = recoveryActionByIssue.get(issue.id) ?? null;
-      return {
-        ...issue,
-        successfulRunHandoff: handoffStates.get(issue.id) ?? null,
-        activeRecoveryAction,
-        waitReason: waitReasonForActiveRecoveryAction(activeRecoveryAction),
-      };
-    }));
+    res.json(result.map((issue) => ({
+      ...issue,
+      successfulRunHandoff: handoffStates.get(issue.id) ?? null,
+      activeRecoveryAction: recoveryActionByIssue.get(issue.id) ?? null,
+    })));
   });
 
   router.get("/companies/:companyId/issues/count", async (req, res) => {
@@ -2809,7 +2796,6 @@ export function issueRoutes(
         productivityReview,
         scheduledRetry,
         activeRecoveryAction: revalidatedActiveRecoveryAction,
-        waitReason: waitReasonForActiveRecoveryAction(revalidatedActiveRecoveryAction),
         priority: issue.priority,
         projectId: issue.projectId,
         goalId: goal?.id ?? issue.goalId,
@@ -2936,7 +2922,6 @@ export function issueRoutes(
       successfulRunHandoff: successfulRunHandoffStates.get(issue.id) ?? null,
       scheduledRetry,
       activeRecoveryAction: revalidatedActiveRecoveryAction,
-      waitReason: waitReasonForActiveRecoveryAction(revalidatedActiveRecoveryAction),
       blockedBy: relationsWithRecoveryActions.blockedBy,
       blocks: relationsWithRecoveryActions.blocks,
       relatedWork: referenceSummary,
@@ -5472,7 +5457,6 @@ export function issueRoutes(
           notes: nextMonitor.notes,
           scheduledBy: nextMonitor.scheduledBy,
           serviceName: nextMonitor.serviceName,
-          repeatIntervalMs: nextMonitor.repeatIntervalMs,
           timeoutAt: nextMonitor.timeoutAt,
           maxAttempts: nextMonitor.maxAttempts,
           recoveryPolicy: nextMonitor.recoveryPolicy,
@@ -5655,14 +5639,6 @@ export function issueRoutes(
                 }
               : {}),
             source: "issue.update",
-            // Clear any stale approval context from a prior issue
-            approvalId: null,
-            approvalStatus: null,
-            approvalType: null,
-            approvalPayload: null,
-            approvalDecisionNote: null,
-            approvalDecidedAt: null,
-            approvalDecidedByUserId: null,
             ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
             ...(interruptedRunId ? { interruptedRunId } : {}),
           },

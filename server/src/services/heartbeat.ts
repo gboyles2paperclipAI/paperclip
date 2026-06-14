@@ -1448,35 +1448,6 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
-function shouldDeferRecoveryWakeForSharedWorkspaceHold(input: {
-  reason: string | null;
-  source: WakeupOptions["source"];
-  requestedByActorType?: "user" | "agent" | "system";
-  contextSnapshot: Record<string, unknown>;
-}) {
-  if (input.requestedByActorType === "user") return false;
-
-  const wakeReason = readNonEmptyString(input.contextSnapshot.wakeReason) ?? input.reason;
-  const retryReason = readNonEmptyString(input.contextSnapshot.retryReason);
-  const source = readNonEmptyString(input.contextSnapshot.source);
-  const markers = [wakeReason, retryReason, source, input.source]
-    .filter((value): value is string => Boolean(value))
-    .map((value) => value.toLowerCase());
-
-  return markers.some(
-    (value) =>
-      value.includes("continuation") ||
-      value.includes("recovery") ||
-      value === "source_scoped_recovery_action" ||
-      value === "blocked_without_first_class_blocker" ||
-      // FUL-11147: blocker-resolution and non-user comment wakes must also defer
-      // when the shared workspace is held. User-initiated comment wakes are already
-      // excluded by the requestedByActorType === "user" early-exit above.
-      value === "issue_blockers_resolved" ||
-      value === "issue_commented",
-  );
-}
-
 function readModelProfileKey(value: unknown): ModelProfileKey | null {
   return MODEL_PROFILE_KEYS.includes(value as ModelProfileKey)
     ? (value as ModelProfileKey)
@@ -1632,8 +1603,6 @@ export function summarizeHeartbeatRunContextSnapshot(
     "wakeSource",
     "wakeTriggerDetail",
     "modelProfile",
-    "plannedRestartWindowId",
-    "interruptionKind",
   ] as const;
 
   for (const key of allowedKeys) {
@@ -3795,7 +3764,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const recoveryPolicy = monitorRecoveryPolicy(monitor);
     const monitorMetadata = {
       serviceName: monitor?.serviceName ?? null,
-      repeatIntervalMs: monitor?.repeatIntervalMs ?? null,
       timeoutAt: monitor?.timeoutAt ?? null,
       maxAttempts: monitor?.maxAttempts ?? null,
       recoveryPolicy: monitor?.recoveryPolicy ?? null,
@@ -9838,13 +9806,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       if (!issue) return null;
       if (issue.executionRunId && issue.executionRunId !== run.id) return null;
-      const releasedExecutionWorkspaceIds = [
-        ...new Set(
-          candidateIssues
-            .map((candidate) => candidate.executionWorkspaceId)
-            .filter((value): value is string => Boolean(value)),
-        ),
-      ];
 
       // Workspace-validation recovery: if the finalizing run failed workspace
       // validation, surface the primary issue for the blocked-recovery comment path.
@@ -10102,186 +10063,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           run: newRun,
           reopenedActivity,
         };
-      }
-
-      const workspaceDeferred = releasedExecutionWorkspaceIds.length > 0
-        ? await tx
-          .select({
-            id: agentWakeupRequests.id,
-            agentId: agentWakeupRequests.agentId,
-            companyId: agentWakeupRequests.companyId,
-            source: agentWakeupRequests.source,
-            triggerDetail: agentWakeupRequests.triggerDetail,
-            reason: agentWakeupRequests.reason,
-            payload: agentWakeupRequests.payload,
-            requestedByActorType: agentWakeupRequests.requestedByActorType,
-            requestedByActorId: agentWakeupRequests.requestedByActorId,
-            issueId: issues.id,
-            issueStatus: issues.status,
-            issueAssigneeAgentId: issues.assigneeAgentId,
-            issueExecutionWorkspaceId: issues.executionWorkspaceId,
-          })
-          .from(agentWakeupRequests)
-          .innerJoin(
-            issues,
-            and(
-              eq(issues.companyId, agentWakeupRequests.companyId),
-              sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issues.id}::text`,
-            ),
-          )
-          .where(
-            and(
-              eq(agentWakeupRequests.companyId, run.companyId),
-              eq(agentWakeupRequests.status, "deferred_issue_execution"),
-              isNull(agentWakeupRequests.runId),
-              inArray(issues.executionWorkspaceId, releasedExecutionWorkspaceIds),
-              inArray(issues.status, ["todo", "in_progress"]),
-              isNull(issues.executionRunId),
-            ),
-          )
-          .orderBy(asc(agentWakeupRequests.requestedAt))
-          .limit(1)
-          .then((rows) => rows[0] ?? null)
-        : null;
-
-      if (workspaceDeferred?.issueExecutionWorkspaceId) {
-        await tx.execute(
-          sql`
-            select id from issues
-            where id = ${workspaceDeferred.issueId}
-              and company_id = ${run.companyId}
-            for update
-          `,
-        );
-
-        const remainingWorkspaceHolder = await tx
-          .select({ issueId: issues.id, runId: heartbeatRuns.id })
-          .from(issues)
-          .innerJoin(
-            heartbeatRuns,
-            and(
-              eq(heartbeatRuns.id, issues.executionRunId),
-              eq(heartbeatRuns.companyId, issues.companyId),
-            ),
-          )
-          .where(
-            and(
-              eq(issues.companyId, run.companyId),
-              eq(issues.executionWorkspaceId, workspaceDeferred.issueExecutionWorkspaceId),
-              isNull(issues.hiddenAt),
-              not(eq(issues.id, workspaceDeferred.issueId)),
-              inArray(heartbeatRuns.status, [...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES]),
-            ),
-          )
-          .limit(1)
-          .then((rows) => rows[0] ?? null);
-
-        if (!remainingWorkspaceHolder) {
-          const deferredAgent = await tx
-            .select()
-            .from(agents)
-            .where(eq(agents.id, workspaceDeferred.agentId))
-            .then((rows) => rows[0] ?? null);
-          const companyAgents = deferredAgent
-            ? await tx
-              .select({
-                id: agents.id,
-                companyId: agents.companyId,
-                name: agents.name,
-                reportsTo: agents.reportsTo,
-                status: agents.status,
-              })
-              .from(agents)
-              .where(eq(agents.companyId, run.companyId))
-            : [];
-          const deferredInvokability =
-            deferredAgent?.companyId === run.companyId
-              ? evaluateAgentInvokability(deferredAgent, companyAgents)
-              : evaluateAgentInvokability(null, companyAgents);
-
-          if (!deferredAgent || deferredAgent.companyId !== run.companyId || !deferredInvokability.invokable) {
-            await tx
-              .update(agentWakeupRequests)
-              .set({
-                status: "failed",
-                finishedAt: new Date(),
-                error: "Deferred wake could not be promoted: agent is not invokable",
-                updatedAt: new Date(),
-              })
-              .where(eq(agentWakeupRequests.id, workspaceDeferred.id));
-          } else {
-            const deferredPayload = parseObject(workspaceDeferred.payload);
-            const deferredContextSeed = parseObject(deferredPayload[DEFERRED_WAKE_CONTEXT_KEY]);
-            const promotedPayload = { ...deferredPayload };
-            delete promotedPayload[DEFERRED_WAKE_CONTEXT_KEY];
-            const promotedReason = readNonEmptyString(workspaceDeferred.reason) ?? "issue_execution_promoted";
-            const promotedSource =
-              (readNonEmptyString(workspaceDeferred.source) as WakeupOptions["source"]) ?? "automation";
-            const promotedTriggerDetail =
-              (readNonEmptyString(workspaceDeferred.triggerDetail) as WakeupOptions["triggerDetail"]) ?? null;
-            const {
-              contextSnapshot: promotedContextSnapshot,
-              taskKey: promotedTaskKey,
-            } = enrichWakeContextSnapshot({
-              contextSnapshot: deferredContextSeed,
-              reason: promotedReason,
-              source: promotedSource,
-              triggerDetail: promotedTriggerDetail,
-              payload: promotedPayload,
-            });
-            const sessionBefore =
-              readNonEmptyString(promotedContextSnapshot.resumeSessionDisplayId) ??
-              await resolveSessionBeforeForWakeup(deferredAgent, promotedTaskKey);
-            const promotedContinuationAttempt = readContinuationAttempt(
-              promotedContextSnapshot.livenessContinuationAttempt,
-            );
-            const now = new Date();
-            const newRun = await tx
-              .insert(heartbeatRuns)
-              .values({
-                companyId: deferredAgent.companyId,
-                agentId: deferredAgent.id,
-                invocationSource: promotedSource,
-                triggerDetail: promotedTriggerDetail,
-                status: "queued",
-                wakeupRequestId: workspaceDeferred.id,
-                contextSnapshot: promotedContextSnapshot,
-                sessionIdBefore: sessionBefore,
-                continuationAttempt: promotedContinuationAttempt,
-              })
-              .returning()
-              .then((rows) => rows[0]);
-
-            await tx
-              .update(agentWakeupRequests)
-              .set({
-                status: "queued",
-                reason: "issue_execution_promoted",
-                runId: newRun.id,
-                claimedAt: null,
-                finishedAt: null,
-                error: null,
-                updatedAt: now,
-              })
-              .where(eq(agentWakeupRequests.id, workspaceDeferred.id));
-
-            await tx
-              .update(issues)
-              .set({
-                executionRunId: newRun.id,
-                executionAgentNameKey: normalizeAgentNameKey(deferredAgent.name),
-                executionLockedAt: now,
-                updatedAt: now,
-              })
-              .where(and(eq(issues.id, workspaceDeferred.issueId), eq(issues.assigneeAgentId, deferredAgent.id)));
-
-            return {
-              kind: "promoted" as const,
-              run: newRun,
-              reopenedActivity: null,
-            };
-          }
-        }
       }
 
       const issueNeedsImmediateRecovery =
@@ -10684,7 +10465,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             assigneeAgentId: issues.assigneeAgentId,
             executionRunId: issues.executionRunId,
             executionAgentNameKey: issues.executionAgentNameKey,
-            executionWorkspaceId: issues.executionWorkspaceId,
           })
           .from(issues)
           .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)))
@@ -10922,77 +10702,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           tx,
         ).then((rows) => rows.get(issue.id) ?? null);
 
-        const deferIssueExecutionWake = async (
-          deferredReason = "issue_execution_deferred",
-          extraDeferredContext: Record<string, unknown> = {},
-        ) => {
-          const deferredContext = {
-            ...enrichedContextSnapshot,
-            ...extraDeferredContext,
-          };
-          const deferredPayload = {
-            ...(payload ?? {}),
-            issueId,
-            [DEFERRED_WAKE_CONTEXT_KEY]: deferredContext,
-          };
-
-          const existingDeferred = await tx
-            .select()
-            .from(agentWakeupRequests)
-            .where(
-              and(
-                eq(agentWakeupRequests.companyId, agent.companyId),
-                eq(agentWakeupRequests.agentId, agentId),
-                eq(agentWakeupRequests.status, "deferred_issue_execution"),
-                sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
-              ),
-            )
-            .orderBy(asc(agentWakeupRequests.requestedAt))
-            .limit(1)
-            .then((rows) => rows[0] ?? null);
-
-          if (existingDeferred) {
-            const existingDeferredPayload = parseObject(existingDeferred.payload);
-            const existingDeferredContext = parseObject(existingDeferredPayload[DEFERRED_WAKE_CONTEXT_KEY]);
-            const mergedDeferredContext = mergeCoalescedContextSnapshot(
-              existingDeferredContext,
-              deferredContext,
-            );
-            const mergedDeferredPayload = {
-              ...existingDeferredPayload,
-              ...(payload ?? {}),
-              issueId,
-              [DEFERRED_WAKE_CONTEXT_KEY]: mergedDeferredContext,
-            };
-
-            await tx
-              .update(agentWakeupRequests)
-              .set({
-                payload: mergedDeferredPayload,
-                coalescedCount: (existingDeferred.coalescedCount ?? 0) + 1,
-                updatedAt: new Date(),
-              })
-              .where(eq(agentWakeupRequests.id, existingDeferred.id));
-
-            return { kind: "deferred" as const };
-          }
-
-          await tx.insert(agentWakeupRequests).values({
-            companyId: agent.companyId,
-            agentId,
-            source,
-            triggerDetail,
-            reason: deferredReason,
-            payload: deferredPayload,
-            status: "deferred_issue_execution",
-            requestedByActorType: opts.requestedByActorType ?? null,
-            requestedByActorId: opts.requestedByActorId ?? null,
-            idempotencyKey: opts.idempotencyKey ?? null,
-          });
-
-          return { kind: "deferred" as const };
-        };
-
         // Blocked descendants should stay idle until the final blocker resolves.
         // Human comment/mention wakes are the exception: they may run in a
         // bounded interaction mode so the assignee can answer or triage.
@@ -11032,48 +10741,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             finishedAt: new Date(),
           });
           return { kind: "skipped" as const };
-        }
-
-        if (
-          !activeExecutionRun &&
-          issue.executionWorkspaceId &&
-          shouldDeferRecoveryWakeForSharedWorkspaceHold({
-            reason,
-            source,
-            requestedByActorType: opts.requestedByActorType,
-            contextSnapshot: enrichedContextSnapshot,
-          })
-        ) {
-          const workspaceHolder = await tx
-            .select({ issueId: issues.id, runId: heartbeatRuns.id })
-            .from(issues)
-            .innerJoin(
-              heartbeatRuns,
-              and(
-                eq(heartbeatRuns.id, issues.executionRunId),
-                eq(heartbeatRuns.companyId, issues.companyId),
-              ),
-            )
-            .where(
-              and(
-                eq(issues.companyId, issue.companyId),
-                eq(issues.executionWorkspaceId, issue.executionWorkspaceId),
-                isNull(issues.hiddenAt),
-                not(eq(issues.id, issue.id)),
-                inArray(heartbeatRuns.status, [...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES]),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null);
-
-          if (workspaceHolder) {
-            return deferIssueExecutionWake("issue_execution_workspace_held_deferred", {
-              workspaceHeldDeferred: true,
-              heldByIssueId: workspaceHolder.issueId,
-              heldByRunId: workspaceHolder.runId,
-              heldExecutionWorkspaceId: issue.executionWorkspaceId,
-            });
-          }
         }
 
         if (activeExecutionRun) {
@@ -11141,7 +10808,67 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           }
 
           if (availableActiveExecutionRun) {
-            return deferIssueExecutionWake();
+            const deferredPayload = {
+              ...(payload ?? {}),
+              issueId,
+              [DEFERRED_WAKE_CONTEXT_KEY]: enrichedContextSnapshot,
+            };
+
+            const existingDeferred = await tx
+              .select()
+              .from(agentWakeupRequests)
+              .where(
+                and(
+                  eq(agentWakeupRequests.companyId, agent.companyId),
+                  eq(agentWakeupRequests.agentId, agentId),
+                  eq(agentWakeupRequests.status, "deferred_issue_execution"),
+                  sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+                ),
+              )
+              .orderBy(asc(agentWakeupRequests.requestedAt))
+              .limit(1)
+              .then((rows) => rows[0] ?? null);
+
+            if (existingDeferred) {
+              const existingDeferredPayload = parseObject(existingDeferred.payload);
+              const existingDeferredContext = parseObject(existingDeferredPayload[DEFERRED_WAKE_CONTEXT_KEY]);
+              const mergedDeferredContext = mergeCoalescedContextSnapshot(
+                existingDeferredContext,
+                enrichedContextSnapshot,
+              );
+              const mergedDeferredPayload = {
+                ...existingDeferredPayload,
+                ...(payload ?? {}),
+                issueId,
+                [DEFERRED_WAKE_CONTEXT_KEY]: mergedDeferredContext,
+              };
+
+              await tx
+                .update(agentWakeupRequests)
+                .set({
+                  payload: mergedDeferredPayload,
+                  coalescedCount: (existingDeferred.coalescedCount ?? 0) + 1,
+                  updatedAt: new Date(),
+                })
+                .where(eq(agentWakeupRequests.id, existingDeferred.id));
+
+              return { kind: "deferred" as const };
+            }
+
+            await tx.insert(agentWakeupRequests).values({
+              companyId: agent.companyId,
+              agentId,
+              source,
+              triggerDetail,
+              reason: "issue_execution_deferred",
+              payload: deferredPayload,
+              status: "deferred_issue_execution",
+              requestedByActorType: opts.requestedByActorType ?? null,
+              requestedByActorId: opts.requestedByActorId ?? null,
+              idempotencyKey: opts.idempotencyKey ?? null,
+            });
+
+            return { kind: "deferred" as const };
           }
         }
 

@@ -81,9 +81,6 @@ type RequestConfirmationLikeKind = (typeof REQUEST_CONFIRMATION_INTERACTION_KIND
 type RequestConfirmationLikeInteraction =
   | RequestConfirmationInteraction
   | RequestCheckboxConfirmationInteraction;
-type RequestConfirmationLikePayload =
-  | RequestConfirmationInteraction["payload"]
-  | RequestCheckboxConfirmationInteraction["payload"];
 
 function isRequestConfirmationLikeKind(kind: string): kind is RequestConfirmationLikeKind {
   return (REQUEST_CONFIRMATION_INTERACTION_KINDS as readonly string[]).includes(kind);
@@ -188,13 +185,27 @@ function shouldSupersedeRequestConfirmationOnUserComment(interaction: RequestCon
   return interaction.payload.supersedeOnUserComment === true;
 }
 
-function normalizeRequestConfirmationPayload<T extends RequestConfirmationLikePayload>(payload: T): T {
-  return {
-    ...payload,
-    supersedeOnUserComment: payload.durableProviderWait === true
-      ? false
-      : payload.supersedeOnUserComment ?? true,
-  };
+function normalizeCreateInteractionInput(input: CreateIssueThreadInteraction): CreateIssueThreadInteraction {
+  switch (input.kind) {
+    case "request_confirmation":
+      return {
+        ...input,
+        payload: {
+          ...input.payload,
+          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? true,
+        },
+      };
+    case "request_checkbox_confirmation":
+      return {
+        ...input,
+        payload: {
+          ...input.payload,
+          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? true,
+        },
+      };
+    default:
+      return input;
+  }
 }
 
 // Known reviewer agent role names that must not be gatekeepers of Board confirmations.
@@ -220,23 +231,6 @@ export function detectAgentReviewGateInConfirmationPrompt(prompt: string): strin
   if (!roleMatch) return null;
   if (!AGENT_REVIEW_GATE_LANGUAGE_RE.test(prompt)) return null;
   return roleMatch[1] ?? roleMatch[0];
-}
-
-function normalizeCreateInteractionInput(input: CreateIssueThreadInteraction): CreateIssueThreadInteraction {
-  switch (input.kind) {
-    case "request_confirmation":
-      return {
-        ...input,
-        payload: normalizeRequestConfirmationPayload(input.payload),
-      };
-    case "request_checkbox_confirmation":
-      return {
-        ...input,
-        payload: normalizeRequestConfirmationPayload(input.payload),
-      };
-    default:
-      return input;
-  }
 }
 
 function isCommentAtOrAfterInteraction(args: {
@@ -810,9 +804,8 @@ export function issueThreadInteractionService(db: Db) {
       // If the prompt names a known reviewer agent role in a review-gate context, the
       // agent should assign the issue to that reviewer or open a child review task
       // rather than asking the Board to confirm the review happened.
-      if (isRequestConfirmationLikeKind(data.kind) && actor.agentId != null) {
-        const prompt = "prompt" in data.payload ? (data.payload.prompt ?? "") : "";
-        const detectedRole = detectAgentReviewGateInConfirmationPrompt(prompt);
+      if (data.kind === "request_confirmation" && actor.agentId != null) {
+        const detectedRole = detectAgentReviewGateInConfirmationPrompt(data.payload.prompt ?? "");
         if (detectedRole) {
           throw unprocessable(
             `Board confirmations must not gate reviewer-agent handoffs. ` +
@@ -1529,14 +1522,13 @@ export function issueThreadInteractionService(db: Db) {
         .where(and(
           eq(issueThreadInteractions.companyId, issue.companyId),
           eq(issueThreadInteractions.issueId, issue.id),
-          inArray(issueThreadInteractions.kind, [...REQUEST_CONFIRMATION_INTERACTION_KINDS]),
+          eq(issueThreadInteractions.kind, "request_confirmation"),
           eq(issueThreadInteractions.status, "pending"),
         ));
 
       const stale = rows.filter((row) => {
-        const interaction = hydrateInteraction(row) as RequestConfirmationLikeInteraction;
-        const prompt = "prompt" in interaction.payload ? (interaction.payload.prompt ?? "") : "";
-        return detectAgentReviewGateInConfirmationPrompt(prompt) !== null;
+        const payload = requestConfirmationPayloadSchema.parse(row.payload);
+        return detectAgentReviewGateInConfirmationPrompt(payload.prompt ?? "") !== null;
       });
 
       if (stale.length === 0) return [];

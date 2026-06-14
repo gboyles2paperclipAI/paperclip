@@ -142,7 +142,6 @@ describeEmbeddedPostgres("claimQueuedRun — workspace-held startup skip (FUL-11
   async function seedStartupHoldFixture(opts: {
     holderRunStatus?: "running" | "queued" | "scheduled_retry";
     kellyIssueHasSameWorkspace?: boolean;
-    createKellyQueued?: boolean;
   } = {}) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -233,31 +232,29 @@ describeEmbeddedPostgres("claimQueuedRun — workspace-held startup skip (FUL-11
       startedAt: now,
     });
 
-    if (opts.createKellyQueued !== false) {
-      // Kelly queued wakeup + run (wants to start but workspace is held)
-      await db.insert(agentWakeupRequests).values({
-        id: kellyWakeId,
-        companyId,
-        agentId,
-        source: "assignment",
-        triggerDetail: "system",
-        reason: "issue_assigned",
-        payload: { issueId: kellyIssueId },
-        status: "queued",
-        runId: kellyRunId,
-      });
-      await db.insert(heartbeatRuns).values({
-        id: kellyRunId,
-        companyId,
-        agentId,
-        invocationSource: "assignment",
-        triggerDetail: "system",
-        status: "queued",
-        wakeupRequestId: kellyWakeId,
-        contextSnapshot: { issueId: kellyIssueId, wakeReason: "issue_assigned" },
-        updatedAt: now,
-      });
-    }
+    // Kelly queued wakeup + run (wants to start but workspace is held)
+    await db.insert(agentWakeupRequests).values({
+      id: kellyWakeId,
+      companyId,
+      agentId,
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_assigned",
+      payload: { issueId: kellyIssueId },
+      status: "queued",
+      runId: kellyRunId,
+    });
+    await db.insert(heartbeatRuns).values({
+      id: kellyRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "queued",
+      wakeupRequestId: kellyWakeId,
+      contextSnapshot: { issueId: kellyIssueId, wakeReason: "issue_assigned" },
+      updatedAt: now,
+    });
 
     // Kelly issue — todo, linked to the same shared workspace, no active executionRunId
     await db.insert(issues).values({
@@ -287,117 +284,6 @@ describeEmbeddedPostgres("claimQueuedRun — workspace-held startup skip (FUL-11
       kellyWakeId,
     };
   }
-
-  it("defers and coalesces recovery-continuation wakes at enqueue while the workspace is held", async () => {
-    const {
-      companyId,
-      agentId,
-      holderIssueId,
-      holderRunId,
-      kellyIssueId,
-      workspaceId,
-    } = await seedStartupHoldFixture({
-      holderRunStatus: "running",
-      createKellyQueued: false,
-    });
-
-    const wakeOpts = {
-      source: "automation" as const,
-      triggerDetail: "system" as const,
-      reason: "issue_continuation_needed",
-      payload: { issueId: kellyIssueId },
-      contextSnapshot: {
-        issueId: kellyIssueId,
-        taskId: kellyIssueId,
-        wakeReason: "issue_continuation_needed",
-        retryReason: "issue_continuation_needed",
-        source: "issue.continuation_recovery",
-      },
-      requestedByActorType: "system" as const,
-      requestedByActorId: "heartbeat_recovery",
-    };
-
-    await expect(heartbeat.wakeup(agentId, wakeOpts)).resolves.toBeNull();
-    await expect(heartbeat.wakeup(agentId, wakeOpts)).resolves.toBeNull();
-
-    const deferredWakes = await db
-      .select()
-      .from(agentWakeupRequests)
-      .where(
-        and(
-          eq(agentWakeupRequests.companyId, companyId),
-          eq(agentWakeupRequests.status, "deferred_issue_execution"),
-          sql`${agentWakeupRequests.payload} ->> 'issueId' = ${kellyIssueId}`,
-        ),
-      );
-    expect(deferredWakes).toHaveLength(1);
-    expect(deferredWakes[0]?.reason).toBe("issue_execution_workspace_held_deferred");
-    expect(deferredWakes[0]?.coalescedCount).toBe(1);
-    expect(deferredWakes[0]?.runId).toBeNull();
-    expect(deferredWakes[0]?.payload).toMatchObject({
-      issueId: kellyIssueId,
-      _paperclipWakeContext: {
-        workspaceHeldDeferred: true,
-        heldByIssueId: holderIssueId,
-        heldByRunId: holderRunId,
-        heldExecutionWorkspaceId: workspaceId,
-      },
-    });
-
-    const kellyRunsBeforeRelease = await db
-      .select()
-      .from(heartbeatRuns)
-      .where(
-        and(
-          eq(heartbeatRuns.companyId, companyId),
-          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${kellyIssueId}`,
-        ),
-      );
-    expect(kellyRunsBeforeRelease).toHaveLength(0);
-
-    await heartbeat.cancelRun(holderRunId, "holder released workspace");
-
-    const promoted = await waitForCondition(async () => {
-      const wake = await db
-        .select({ status: agentWakeupRequests.status, runId: agentWakeupRequests.runId })
-        .from(agentWakeupRequests)
-        .where(eq(agentWakeupRequests.id, deferredWakes[0]!.id))
-        .then((rows) => rows[0] ?? null);
-      return Boolean(wake?.runId && wake.status !== "deferred_issue_execution");
-    });
-    expect(promoted).toBe(true);
-
-    const promotedWake = await db
-      .select({ status: agentWakeupRequests.status, reason: agentWakeupRequests.reason, runId: agentWakeupRequests.runId })
-      .from(agentWakeupRequests)
-      .where(eq(agentWakeupRequests.id, deferredWakes[0]!.id))
-      .then((rows) => rows[0] ?? null);
-    expect(promotedWake?.reason).toBe("issue_execution_promoted");
-    expect(promotedWake?.runId).toBeTruthy();
-
-    const promotedRun = promotedWake?.runId
-      ? await db
-        .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
-        .from(heartbeatRuns)
-        .where(eq(heartbeatRuns.id, promotedWake.runId))
-        .then((rows) => rows[0] ?? null)
-      : null;
-    expect(promotedRun?.contextSnapshot).toMatchObject({
-      issueId: kellyIssueId,
-      retryReason: "issue_continuation_needed",
-    });
-
-    const settled = await waitForCondition(async () => {
-      if (!promotedWake?.runId) return false;
-      const run = await db
-        .select({ status: heartbeatRuns.status })
-        .from(heartbeatRuns)
-        .where(eq(heartbeatRuns.id, promotedWake.runId))
-        .then((rows) => rows[0] ?? null);
-      return Boolean(run && ["succeeded", "failed", "cancelled", "timed_out", "skipped"].includes(run.status));
-    });
-    expect(settled).toBe(true);
-  });
 
   it("skips Kelly run when CTO holds the shared workspace (running)", async () => {
     const {
@@ -576,169 +462,5 @@ describeEmbeddedPostgres("claimQueuedRun — workspace-held startup skip (FUL-11
       .then((rows) => rows[0] ?? null);
 
     expect(kellyRun?.status).not.toBe("skipped");
-  });
-
-  // FUL-11147 regression: issue_blockers_resolved and non-user issue_commented wakes
-  // must defer at enqueueWakeup when a shared workspace is held, not queue and fail.
-
-  it("defers issue_blockers_resolved wake at enqueue while the workspace is held (FUL-11147)", async () => {
-    const {
-      companyId,
-      agentId,
-      holderIssueId,
-      holderRunId,
-      kellyIssueId,
-      workspaceId,
-    } = await seedStartupHoldFixture({
-      holderRunStatus: "running",
-      createKellyQueued: false,
-    });
-
-    const wakeOpts = {
-      source: "automation" as const,
-      triggerDetail: "system" as const,
-      reason: "issue_blockers_resolved",
-      payload: { issueId: kellyIssueId, resolvedBlockerIssueId: holderIssueId },
-      contextSnapshot: {
-        issueId: kellyIssueId,
-        taskId: kellyIssueId,
-        wakeReason: "issue_blockers_resolved",
-        source: "workspace.finalize",
-        resolvedBlockerIssueId: holderIssueId,
-      },
-      requestedByActorType: "system" as const,
-      requestedByActorId: "heartbeat_workspace_finalize",
-    };
-
-    await expect(heartbeat.wakeup(agentId, wakeOpts)).resolves.toBeNull();
-    // Second call should coalesce into the same deferred entry
-    await expect(heartbeat.wakeup(agentId, wakeOpts)).resolves.toBeNull();
-
-    const deferredWakes = await db
-      .select()
-      .from(agentWakeupRequests)
-      .where(
-        and(
-          eq(agentWakeupRequests.companyId, companyId),
-          eq(agentWakeupRequests.status, "deferred_issue_execution"),
-          sql`${agentWakeupRequests.payload} ->> 'issueId' = ${kellyIssueId}`,
-        ),
-      );
-    expect(deferredWakes).toHaveLength(1);
-    expect(deferredWakes[0]?.reason).toBe("issue_execution_workspace_held_deferred");
-    expect(deferredWakes[0]?.coalescedCount).toBe(1);
-    expect(deferredWakes[0]?.runId).toBeNull();
-    expect(deferredWakes[0]?.payload).toMatchObject({
-      issueId: kellyIssueId,
-      _paperclipWakeContext: {
-        workspaceHeldDeferred: true,
-        heldByIssueId: holderIssueId,
-        heldByRunId: holderRunId,
-        heldExecutionWorkspaceId: workspaceId,
-      },
-    });
-
-    // Adapter must NOT have been invoked
-    expect(mockAdapterExecute).not.toHaveBeenCalled();
-  });
-
-  it("defers non-user issue_commented wake at enqueue while the workspace is held (FUL-11147)", async () => {
-    const {
-      companyId,
-      agentId,
-      holderIssueId,
-      holderRunId,
-      kellyIssueId,
-      workspaceId,
-    } = await seedStartupHoldFixture({
-      holderRunStatus: "running",
-      createKellyQueued: false,
-    });
-
-    const wakeOpts = {
-      source: "automation" as const,
-      triggerDetail: "system" as const,
-      reason: "issue_commented",
-      payload: { issueId: kellyIssueId },
-      contextSnapshot: {
-        issueId: kellyIssueId,
-        taskId: kellyIssueId,
-        wakeReason: "issue_commented",
-        source: "issue.comment",
-        wakeCommentId: randomUUID(),
-      },
-      // System/agent-authored comment — NOT user-initiated
-      requestedByActorType: "agent" as const,
-      requestedByActorId: holderIssueId,
-    };
-
-    await expect(heartbeat.wakeup(agentId, wakeOpts)).resolves.toBeNull();
-
-    const deferredWakes = await db
-      .select()
-      .from(agentWakeupRequests)
-      .where(
-        and(
-          eq(agentWakeupRequests.companyId, companyId),
-          eq(agentWakeupRequests.status, "deferred_issue_execution"),
-          sql`${agentWakeupRequests.payload} ->> 'issueId' = ${kellyIssueId}`,
-        ),
-      );
-    expect(deferredWakes).toHaveLength(1);
-    expect(deferredWakes[0]?.reason).toBe("issue_execution_workspace_held_deferred");
-    expect(deferredWakes[0]?.payload).toMatchObject({
-      issueId: kellyIssueId,
-      _paperclipWakeContext: {
-        workspaceHeldDeferred: true,
-        heldByIssueId: holderIssueId,
-        heldByRunId: holderRunId,
-        heldExecutionWorkspaceId: workspaceId,
-      },
-    });
-    expect(mockAdapterExecute).not.toHaveBeenCalled();
-  });
-
-  it("does NOT defer user-initiated issue_commented wake when workspace is held (FUL-11147)", async () => {
-    const {
-      companyId,
-      agentId,
-      kellyIssueId,
-    } = await seedStartupHoldFixture({
-      holderRunStatus: "running",
-      createKellyQueued: false,
-    });
-
-    const userId = randomUUID();
-    const wakeOpts = {
-      source: "automation" as const,
-      triggerDetail: "user" as const,
-      reason: "issue_commented",
-      payload: { issueId: kellyIssueId },
-      contextSnapshot: {
-        issueId: kellyIssueId,
-        taskId: kellyIssueId,
-        wakeReason: "issue_commented",
-        source: "issue.comment",
-        wakeCommentId: randomUUID(),
-      },
-      // User-initiated — must NOT be deferred by workspace-held guard
-      requestedByActorType: "user" as const,
-      requestedByActorId: userId,
-    };
-
-    await heartbeat.wakeup(agentId, wakeOpts);
-
-    // No deferred_issue_execution entry should exist — the wake went through normally
-    const deferredWakes = await db
-      .select()
-      .from(agentWakeupRequests)
-      .where(
-        and(
-          eq(agentWakeupRequests.companyId, companyId),
-          eq(agentWakeupRequests.status, "deferred_issue_execution"),
-          sql`${agentWakeupRequests.payload} ->> 'issueId' = ${kellyIssueId}`,
-        ),
-      );
-    expect(deferredWakes).toHaveLength(0);
   });
 });
