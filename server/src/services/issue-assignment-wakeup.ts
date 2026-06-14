@@ -38,7 +38,19 @@ export function queueIssueAssignmentWakeup(input: {
       payload: { issueId: input.issue.id, mutation: input.mutation },
       requestedByActorType: input.requestedByActorType,
       requestedByActorId: input.requestedByActorId ?? null,
-      contextSnapshot: { issueId: input.issue.id, source: input.contextSource },
+      contextSnapshot: {
+        issueId: input.issue.id,
+        source: input.contextSource,
+        // Explicitly null all approval fields so stale context from a prior issue
+        // does not bleed into this assignment via the spread merge in mergeCoalescedContextSnapshot.
+        approvalId: null,
+        approvalStatus: null,
+        approvalType: null,
+        approvalPayload: null,
+        approvalDecisionNote: null,
+        approvalDecidedAt: null,
+        approvalDecidedByUserId: null,
+      },
     })
     .catch((err) => {
       logger.warn({ err, issueId: input.issue.id }, "failed to wake assignee on issue assignment");
