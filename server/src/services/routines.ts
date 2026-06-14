@@ -65,6 +65,9 @@ const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"];
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
 const MAX_CATCH_UP_RUNS = 25;
 const MAX_ROUTINE_REVISIONS = 100;
+const MAX_ROUTINE_DISPATCH_PER_TICK = 50;
+const MAX_CATCH_UP_RUNS_PER_TICK = 5;
+const ROUTINE_CREATION_RATE_WINDOW_MS = 5 * 60 * 1000;
 const WEEKDAY_INDEX: Record<string, number> = {
   Sun: 0,
   Mon: 1,
@@ -2336,6 +2339,23 @@ export function routineService(
       }));
     },
 
+    getRoutineCreationRateInWindow: async (routineId: string, windowMs = ROUTINE_CREATION_RATE_WINDOW_MS) => {
+      const windowStart = new Date(Date.now() - windowMs);
+      const count = await db
+        .select({ count: sql<number>`count(*)` })
+        .from(issues)
+        .where(
+          and(
+            eq(issues.originKind, "routine_execution"),
+            eq(issues.originId, routineId),
+            // Only count issues created within the time window
+            sql`${issues.createdAt} >= ${windowStart}`,
+          ),
+        )
+        .then((rows) => rows[0]?.count ?? 0);
+      return count;
+    },
+
     tickScheduledTriggers: async (now: Date = new Date()) => {
       const due = await db
         .select({
@@ -2356,6 +2376,7 @@ export function routineService(
         .orderBy(asc(routineTriggers.nextRunAt), asc(routineTriggers.createdAt));
 
       let triggered = 0;
+      let quotaExhausted = false;
       for (const row of due) {
         if (!row.trigger.nextRunAt || !row.trigger.cronExpression || !row.trigger.timezone) continue;
 
@@ -2370,6 +2391,9 @@ export function routineService(
             claimedNextRunAt = nextCronTickInTimeZone(row.trigger.cronExpression, row.trigger.timezone, cursor);
             cursor = claimedNextRunAt;
           }
+          // Smooth out catch-up runs: cap to MAX_CATCH_UP_RUNS_PER_TICK to avoid bursts.
+          // If more catch-up is needed, it will be enqueued in the next tick.
+          runCount = Math.min(runCount, MAX_CATCH_UP_RUNS_PER_TICK);
         }
 
         const claimed = await db
@@ -2389,7 +2413,26 @@ export function routineService(
           .then((rows) => rows[0] ?? null);
         if (!claimed) continue;
 
+        // Per-tick dispatch quota: stop dispatching if quota is exhausted.
+        if (triggered >= MAX_ROUTINE_DISPATCH_PER_TICK) {
+          quotaExhausted = true;
+          // Revert the nextRunAt claim since we're not dispatching this trigger in this tick.
+          await db
+            .update(routineTriggers)
+            .set({
+              nextRunAt: row.trigger.nextRunAt,
+              updatedAt: new Date(),
+            })
+            .where(eq(routineTriggers.id, row.trigger.id));
+          continue;
+        }
+
         for (let i = 0; i < runCount; i += 1) {
+          // Check quota again within the loop to stop mid-routine
+          if (triggered >= MAX_ROUTINE_DISPATCH_PER_TICK) {
+            quotaExhausted = true;
+            break;
+          }
           await dispatchRoutineRun({
             routine: row.routine,
             trigger: row.trigger,
@@ -2397,6 +2440,15 @@ export function routineService(
           });
           triggered += 1;
         }
+
+        if (quotaExhausted) break;
+      }
+
+      if (quotaExhausted) {
+        logger.warn(
+          { triggered, maxQuota: MAX_ROUTINE_DISPATCH_PER_TICK },
+          "routine scheduler tick dispatch quota exhausted",
+        );
       }
 
       return { triggered };
