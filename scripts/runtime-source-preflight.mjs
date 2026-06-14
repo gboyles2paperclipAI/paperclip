@@ -4,6 +4,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { scanEvidenceArtifacts } from "./check-evidence-artifact-secrets.mjs";
 
 const DEFAULT_SCAN_ROOTS = [
   "server/src",
@@ -453,6 +454,7 @@ export function runRuntimeSourcePreflight({
 } = {}) {
   const conflictMarkers = runtimeManifestsOnly ? [] : scanConflictMarkers({ repoRoot, scanRoots, scanFiles });
   const unresolvedGit = runtimeManifestsOnly ? { ok: true, paths: [] } : getUnresolvedGitPaths({ repoRoot });
+  const evidenceArtifactSecrets = runtimeManifestsOnly ? [] : scanEvidenceArtifacts({ repoRoot });
   const runtimeWorkspaceExports = scanRuntimeWorkspaceExports({ repoRoot, serverPackagePath });
   const startScript = readServerStartScript({ repoRoot, serverPackagePath });
   const startKind = classifyStartCommand(startScript);
@@ -476,6 +478,15 @@ export function runRuntimeSourcePreflight({
     for (const offense of conflictMarkers) {
       error(`  ${offense.relativePath}:${offense.lineNumber}`);
     }
+  }
+
+  if (evidenceArtifactSecrets.length > 0) {
+    failed = true;
+    error("ERROR: credential-shaped content found in evidence/debug artifact files:");
+    for (const offense of evidenceArtifactSecrets) {
+      error(`  ${offense.relativePath}:${offense.lineNumber}: ${offense.ruleId}`);
+    }
+    error("  Artifact content is intentionally omitted. Remove the artifact or regenerate it with secret-safe evidence.");
   }
 
   if (startKind === "node-dist" && runtimeWorkspaceExports.sourceExportOffenses.length > 0) {

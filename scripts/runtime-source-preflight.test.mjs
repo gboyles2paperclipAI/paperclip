@@ -101,6 +101,35 @@ test("runRuntimeSourcePreflight prints only paths and line numbers for conflict 
   }
 });
 
+test("runRuntimeSourcePreflight blocks credential-bearing restart evidence without printing the value", (t) => {
+  if (!canUseGitChildProcess()) {
+    t.skip("Node child_process cannot spawn git in this sandbox");
+    return;
+  }
+
+  const root = makeTempRepo("runtime-preflight-evidence-secret-");
+  try {
+    mkdirSync(path.join(root, "server/src"), { recursive: true });
+    writeFileSync(path.join(root, "server/package.json"), JSON.stringify({ dependencies: {} }));
+    writeFileSync(path.join(root, "restart-evidence-2026-06-13.md"), "postgres://user:synthetic-password@localhost/app\n");
+
+    const logs = [];
+    const errors = [];
+    const code = runRuntimeSourcePreflight({
+      repoRoot: root,
+      log: (line) => logs.push(line),
+      error: (line) => errors.push(line),
+    });
+
+    assert.equal(code, 1);
+    assert.ok(errors.some((line) => line.includes("restart-evidence-2026-06-13.md:1: postgres-credential-uri")));
+    assert.equal(errors.join("\n").includes("synthetic-password"), false);
+    assert.equal(logs.length, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("getUnresolvedGitPaths reports unmerged paths", (t) => {
   if (!canUseGitChildProcess()) {
     t.skip("Node child_process cannot spawn git in this sandbox");
