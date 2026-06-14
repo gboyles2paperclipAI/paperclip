@@ -230,7 +230,7 @@ describe("useLiveRunTranscripts", () => {
     container.remove();
   });
 
-  it("stops polling active runs after a persisted-log 404", async () => {
+  it("continues polling an active run through N-1 consecutive 404s", async () => {
     vi.useFakeTimers();
     logMock.mockReset();
     logMock.mockRejectedValue(new ApiError("Run log not found", 404, { error: "Run log not found" }));
@@ -240,6 +240,7 @@ describe("useLiveRunTranscripts", () => {
         companyId: "company-1",
         runs: [{ id: "run-stale", status: "running", adapterType: "codex_local" }],
         logPollIntervalMs: 10,
+        enableRealtimeUpdates: false,
       });
       return null;
     }
@@ -248,19 +249,135 @@ describe("useLiveRunTranscripts", () => {
     document.body.appendChild(container);
     const root = createRoot(container);
 
+    // Initial readAll — count = 1 (< MAX_CONSECUTIVE_404S, not suppressed)
     await act(async () => {
       root.render(<Harness />);
       await Promise.resolve();
     });
-
     expect(logMock).toHaveBeenCalledTimes(1);
 
+    // One interval tick — count = 2 = MAX_CONSECUTIVE_404S - 1, still not suppressed
     await act(async () => {
-      vi.advanceTimersByTime(30);
+      vi.advanceTimersByTime(10);
       await Promise.resolve();
     });
+    expect(logMock).toHaveBeenCalledTimes(2);
 
+    // Polling is still alive: another tick produces a 3rd call
+    await act(async () => {
+      vi.advanceTimersByTime(10);
+      await Promise.resolve();
+    });
+    expect(logMock).toHaveBeenCalledTimes(3);
+
+    act(() => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it("permanently stops polling an active run after N consecutive 404s", async () => {
+    vi.useFakeTimers();
+    logMock.mockReset();
+    logMock.mockRejectedValue(new ApiError("Run log not found", 404, { error: "Run log not found" }));
+
+    function Harness() {
+      useLiveRunTranscripts({
+        companyId: "company-1",
+        runs: [{ id: "run-stale", status: "running", adapterType: "codex_local" }],
+        logPollIntervalMs: 10,
+        enableRealtimeUpdates: false,
+      });
+      return null;
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    // Initial readAll — count = 1
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
     expect(logMock).toHaveBeenCalledTimes(1);
+
+    // Advance through MAX_CONSECUTIVE_404S - 1 more ticks to reach the ceiling (total calls = MAX_CONSECUTIVE_404S = 3)
+    await act(async () => {
+      vi.advanceTimersByTime(10);
+      await Promise.resolve();
+    });
+    expect(logMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      vi.advanceTimersByTime(10);
+      await Promise.resolve();
+    });
+    expect(logMock).toHaveBeenCalledTimes(3); // Nth call — suppression triggered after this
+
+    // Further ticks must not produce more calls
+    await act(async () => {
+      vi.advanceTimersByTime(50);
+      await Promise.resolve();
+    });
+    expect(logMock).toHaveBeenCalledTimes(3);
+
+    act(() => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it("resets the consecutive-404 counter on a successful log poll", async () => {
+    vi.useFakeTimers();
+    logMock.mockReset();
+    const ok = { runId: "run-1", store: "memory", logRef: "log-1", content: "", nextOffset: 0 };
+    logMock
+      .mockRejectedValueOnce(new ApiError("Not found", 404, { error: "Not found" }))
+      .mockRejectedValueOnce(new ApiError("Not found", 404, { error: "Not found" }))
+      .mockResolvedValue(ok);
+
+    function Harness() {
+      useLiveRunTranscripts({
+        companyId: "company-1",
+        runs: [{ id: "run-1", status: "running", adapterType: "codex_local" }],
+        logPollIntervalMs: 10,
+        enableRealtimeUpdates: false,
+      });
+      return null;
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    // 1st call → 404 (count = 1)
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+    expect(logMock).toHaveBeenCalledTimes(1);
+
+    // 2nd call → 404 (count = 2 = N-1, not suppressed)
+    await act(async () => {
+      vi.advanceTimersByTime(10);
+      await Promise.resolve();
+    });
+    expect(logMock).toHaveBeenCalledTimes(2);
+
+    // 3rd call → success (counter resets to 0)
+    await act(async () => {
+      vi.advanceTimersByTime(10);
+      await Promise.resolve();
+    });
+    expect(logMock).toHaveBeenCalledTimes(3);
+
+    // 4th call → success again (polling continues — counter was reset, run is not suppressed)
+    await act(async () => {
+      vi.advanceTimersByTime(10);
+      await Promise.resolve();
+    });
+    expect(logMock).toHaveBeenCalledTimes(4);
 
     act(() => {
       root.unmount();
