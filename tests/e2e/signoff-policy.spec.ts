@@ -374,10 +374,15 @@ test.describe("Signoff execution policy", () => {
     const issueId = issue.id;
 
     // Executor marks done → routes to reviewer
-    await agentCheckoutAndPatch(
+    const doneRes = await agentCheckoutAndPatch(
       ctx.boardRequest, ctx.executor, issueId, ["in_progress"],
       { status: "done", comment: "Done." },
     );
+    expect(doneRes.ok()).toBe(true);
+    const reviewIssue = await doneRes.json();
+    expect(reviewIssue.status).toBe("in_review");
+    expect(reviewIssue.assigneeAgentId).toBe(ctx.reviewer.agentId);
+    expect(reviewIssue.executionState.currentStageType).toBe("review");
 
     // Reviewer tries to approve without comment → should fail
     const noCommentRes = await agentPatch(

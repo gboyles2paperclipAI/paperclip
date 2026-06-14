@@ -33,6 +33,7 @@ export type AuthorizationAction =
   | PermissionKey
   | "agent_config:read"
   | "agent_config:update"
+  | "company_scope:read"
   | "issue:mutate";
 
 export type AuthorizationResource =
@@ -88,6 +89,7 @@ function companyIdForResource(resource: AuthorizationResource) {
 function permissionForAction(action: AuthorizationAction): PermissionKey | null {
   if (action === "agent_config:read" || action === "agent_config:update") return "agents:create";
   if (action === "issue:mutate") return null;
+  if (action === "company_scope:read") return null;
   return action;
 }
 
@@ -755,6 +757,13 @@ export function authorizationService(db: Db) {
           explanation: "Allowed because the issue has no agent assignee.",
         });
       }
+    }
+    if (input.action === "company_scope:read") {
+      return allow({
+        action: input.action,
+        reason: "allow_company_agent",
+        explanation: "Allowed because the actor agent belongs to the requested company.",
+      });
     }
     if (
       input.action === "agent_config:update" &&
