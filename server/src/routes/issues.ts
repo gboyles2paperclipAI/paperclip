@@ -8,6 +8,7 @@ import {
   activityLog,
   executionWorkspaces,
   heartbeatRuns,
+  issueComments,
   issueRecoveryActions,
   issueExecutionDecisions,
   issueRelations,
