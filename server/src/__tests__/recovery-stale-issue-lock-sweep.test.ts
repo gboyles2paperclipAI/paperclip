@@ -173,13 +173,15 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
     expect(row).toEqual({ checkoutRunId: runningRunId, executionRunId: runningRunId });
   });
 
-  it("does not clear when checkoutRunId is terminal but executionRunId is still running", async () => {
+  it("clears stale checkoutRunId independently when executionRunId is still running", async () => {
+    // FUL-11176 changed the sweep to clear each column independently.
+    // A stale checkoutRunId should be cleared even when executionRunId is live.
     const { companyId, agentId, failedRunId, runningRunId } = await seed();
     const issueId = randomUUID();
     await db.insert(issues).values({
       id: issueId,
       companyId,
-      title: "Mixed lock — preserve",
+      title: "Mixed lock — clear stale checkout only",
       status: "in_progress",
       priority: "high",
       assigneeAgentId: agentId,
@@ -191,7 +193,7 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
     const heartbeat = heartbeatService(db);
     const result = await heartbeat.sweepStaleIssueLocks();
 
-    expect(result.cleared).toBe(0);
+    expect(result.cleared).toBe(1);
     const row = await db
       .select({
         checkoutRunId: issues.checkoutRunId,
@@ -200,7 +202,8 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
       .from(issues)
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0]);
-    expect(row).toEqual({ checkoutRunId: failedRunId, executionRunId: runningRunId });
+    // Stale checkoutRunId cleared; live executionRunId preserved.
+    expect(row).toEqual({ checkoutRunId: null, executionRunId: runningRunId });
   });
 
   it("is idempotent — second pass finds nothing to clear", async () => {

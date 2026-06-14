@@ -4021,6 +4021,12 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       });
     }
 
+    // Always log at INFO so gaps in sweep execution are observable even when
+    // no locks are stale (cleared=0 runs confirm the sweep is running).
+    logger.info(
+      { candidates: candidates.length, cleared: result.cleared },
+      "stale issue lock sweep complete",
+    );
     if (result.cleared > 0) {
       logger.warn(
         { cleared: result.cleared, issueIds: result.issueIds },

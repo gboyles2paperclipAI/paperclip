@@ -807,9 +807,15 @@ export async function startServer(): Promise<StartedServer> {
         logger.warn({ ...scanned }, "startup active-run output watchdog created review work");
       }
 
-      const swept = await heartbeat.sweepStaleIssueLocks();
-      if (swept.cleared > 0) {
-        logger.warn({ ...swept }, "startup stale-lock sweeper cleared issue locks");
+      // Isolated try/catch so a sweep failure does not abort subsequent startup
+      // recovery operations (e.g. reconcileProductivityReviews).
+      try {
+        const swept = await heartbeat.sweepStaleIssueLocks();
+        if (swept.cleared > 0) {
+          logger.warn({ ...swept }, "startup stale-lock sweeper cleared issue locks");
+        }
+      } catch (err) {
+        logger.error({ err }, "startup stale-lock sweep failed — periodic sweep will recover");
       }
 
       const reviewed = await heartbeat.reconcileProductivityReviews();
@@ -878,9 +884,14 @@ export async function startServer(): Promise<StartedServer> {
           }
         })
         .then(async () => {
-          const swept = await heartbeat.sweepStaleIssueLocks();
-          if (swept.cleared > 0) {
-            logger.warn({ ...swept }, "periodic stale-lock sweeper cleared issue locks");
+          // Isolated try/catch so a sweep failure does not abort reconcileProductivityReviews.
+          try {
+            const swept = await heartbeat.sweepStaleIssueLocks();
+            if (swept.cleared > 0) {
+              logger.warn({ ...swept }, "periodic stale-lock sweeper cleared issue locks");
+            }
+          } catch (err) {
+            logger.error({ err }, "periodic stale-lock sweep failed");
           }
         })
         .then(async () => {
