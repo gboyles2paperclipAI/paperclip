@@ -3,7 +3,7 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, getTableColumns, gt, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, inArray, isNull, lt, lte, not, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
@@ -35,6 +35,7 @@ import {
   documentAnnotationComments,
   documentAnnotationThreads,
   documentRevisions,
+  executionWorkspaces,
   issueDocuments,
   heartbeatRunEvents,
   heartbeatRuns,
@@ -6817,6 +6818,52 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         );
         return null;
       }
+
+      // FUL-11158: defer startup when the issue's shared execution workspace is
+      // already held by another active run. Rather than letting the run proceed and
+      // fail with adapter_failed (which sets the agent to error), skip it cleanly
+      // so the agent stays idle and the issue is not left in an error state. The
+      // reconciler will re-queue the issue once the holder's executionRunId clears.
+      const issueWorkspaceRow = await db
+        .select({ executionWorkspaceId: issues.executionWorkspaceId })
+        .from(issues)
+        .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
+        .then((rows) => rows[0] ?? null);
+      const startupWorkspaceId = issueWorkspaceRow?.executionWorkspaceId ?? null;
+      if (startupWorkspaceId) {
+        const holderRow = await db
+          .select({ issueId: issues.id, runId: heartbeatRuns.id })
+          .from(issues)
+          .innerJoin(
+            heartbeatRuns,
+            and(
+              eq(heartbeatRuns.id, issues.executionRunId),
+              eq(heartbeatRuns.companyId, issues.companyId),
+            ),
+          )
+          .where(
+            and(
+              eq(issues.companyId, run.companyId),
+              eq(issues.executionWorkspaceId, startupWorkspaceId),
+              isNull(issues.hiddenAt),
+              not(eq(issues.id, issueId)),
+              inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+            ),
+          )
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (holderRow) {
+          await skipQueuedRunForWorkspaceHeld(run, issueId, {
+            byIssueId: holderRow.issueId,
+            byRunId: holderRow.runId,
+          });
+          logger.info(
+            { runId: run.id, issueId, heldByRunId: holderRow.runId, heldByIssueId: holderRow.issueId },
+            "claimQueuedRun: skipped startup — shared execution workspace held by active run",
+          );
+          return null;
+        }
+      }
     }
 
     const claimedAt = new Date();
@@ -6937,6 +6984,70 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
 
     return cancelled;
+  }
+
+  // Defers a queued run whose issue's shared execution workspace is held by another
+  // active run. Sets run status to "skipped" (not "failed") so the agent stays idle
+  // and the issue is not left in an error state. The reconciler will re-queue the
+  // issue for retry once the holder's executionRunId is cleared (FUL-11158).
+  async function skipQueuedRunForWorkspaceHeld(
+    run: typeof heartbeatRuns.$inferSelect,
+    issueId: string,
+    hold: { byIssueId: string; byRunId: string },
+  ) {
+    const now = new Date();
+    const reason = `Startup deferred: shared execution workspace is held by active run ${hold.byRunId} on issue ${hold.byIssueId}`;
+    const skipped = await setRunStatus(run.id, "skipped", {
+      finishedAt: now,
+      error: reason,
+      errorCode: "workspace_held_deferred",
+      resultJson: {
+        ...parseObject(run.resultJson),
+        stopReason: "workspace_held_deferred",
+        heldByRunId: hold.byRunId,
+        heldByIssueId: hold.byIssueId,
+        effectiveTimeoutSec: 0,
+        timeoutConfigured: false,
+        timeoutSource: "workspace_hold",
+        timeoutFired: false,
+      },
+    });
+    if (!skipped) return null;
+
+    await setWakeupStatus(run.wakeupRequestId, "skipped", {
+      finishedAt: now,
+      error: reason,
+    });
+
+    await appendRunEvent(skipped, await nextRunEventSeq(skipped.id), {
+      eventType: "lifecycle",
+      stream: "system",
+      level: "info",
+      message: reason,
+      payload: {
+        issueId,
+        heldByRunId: hold.byRunId,
+        heldByIssueId: hold.byIssueId,
+      },
+    });
+
+    await logActivity(db, {
+      companyId: run.companyId,
+      actorType: "system",
+      actorId: "system",
+      agentId: run.agentId,
+      runId: run.id,
+      action: "issue.run.workspace_held_deferred",
+      entityType: "heartbeat_run",
+      entityId: run.id,
+      details: {
+        issueId,
+        heldByIssueId: hold.byIssueId,
+        heldByRunId: hold.byRunId,
+      },
+    });
+
+    return skipped;
   }
 
   type QueuedRunStaleness =
