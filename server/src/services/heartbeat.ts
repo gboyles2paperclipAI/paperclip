@@ -4618,13 +4618,50 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     runId: string,
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
+    options?: { releaseIssueLock?: boolean },
   ) {
-    const updated = await db
-      .update(heartbeatRuns)
-      .set({ status, ...patch, updatedAt: new Date() })
-      .where(eq(heartbeatRuns.id, runId))
-      .returning()
-      .then((rows) => rows[0] ?? null);
+    const isTerminal = HEARTBEAT_RUN_TERMINAL_STATUSES.includes(
+      status as (typeof HEARTBEAT_RUN_TERMINAL_STATUSES)[number],
+    );
+    const shouldReleaseLock = options?.releaseIssueLock === true && isTerminal;
+
+    let updated: typeof heartbeatRuns.$inferSelect | null = null;
+
+    if (shouldReleaseLock) {
+      // Atomically clear issues.executionRunId in the same transaction as the
+      // terminal status write. This prevents a window where heartbeatRuns.status
+      // is terminal but issues.executionRunId still points at this run, which
+      // would leave the workspace-held lock live across a server restart (FUL-11176).
+      updated = await db.transaction(async (tx) => {
+        const row = await tx
+          .update(heartbeatRuns)
+          .set({ status, ...patch, updatedAt: new Date() })
+          .where(eq(heartbeatRuns.id, runId))
+          .returning()
+          .then((rows) => rows[0] ?? null);
+        if (row) {
+          await tx
+            .update(issues)
+            .set({
+              executionRunId: null,
+              executionAgentNameKey: null,
+              executionLockedAt: null,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(eq(issues.companyId, row.companyId), eq(issues.executionRunId, runId)),
+            );
+        }
+        return row;
+      });
+    } else {
+      updated = await db
+        .update(heartbeatRuns)
+        .set({ status, ...patch, updatedAt: new Date() })
+        .where(eq(heartbeatRuns.id, runId))
+        .returning()
+        .then((rows) => rows[0] ?? null);
+    }
 
     if (updated) {
       publishLiveEvent({
@@ -7599,7 +7636,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             errorMessage: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
           },
         ),
-      });
+      }, { releaseIssueLock: true });
       await setWakeupStatus(run.wakeupRequestId, "failed", {
         finishedAt: now,
         error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
@@ -7875,7 +7912,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         error: "Agent not found",
         errorCode: "agent_not_found",
         finishedAt: new Date(),
-      });
+      }, { releaseIssueLock: true });
       await setWakeupStatus(run.wakeupRequestId, "failed", {
         finishedAt: new Date(),
         error: "Agent not found",
@@ -9329,7 +9366,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         logBytes: logSummary?.bytes,
         logSha256: logSummary?.sha256,
         logCompressed: logSummary?.compressed ?? false,
-      });
+      }, { releaseIssueLock: true });
       if (persistedRun) {
         persistedRun = await classifyAndPersistRunLiveness(persistedRun, persistedResultJson) ?? persistedRun;
       }
@@ -9520,7 +9557,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         logBytes: logSummary?.bytes,
         logSha256: logSummary?.sha256,
         logCompressed: logSummary?.compressed ?? false,
-      });
+      }, { releaseIssueLock: true });
       await setWakeupStatus(run.wakeupRequestId, "failed", {
         finishedAt: new Date(),
         error: message,
@@ -9581,7 +9618,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 errorMessage: message,
               }),
             } : {}),
-          }).catch(() => undefined);
+          }, { releaseIssueLock: true }).catch(() => undefined);
           await setWakeupStatus(run.wakeupRequestId, "failed", {
             finishedAt: new Date(),
             error: message,
@@ -11174,7 +11211,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       error: reason,
       errorCode,
       ...(resultJson ? { resultJson } : {}),
-    });
+    }, { releaseIssueLock: true });
 
     await setWakeupStatus(run.wakeupRequestId, "cancelled", {
       finishedAt,
@@ -11216,7 +11253,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             errorMessage: reason,
           }),
         } : {}),
-      });
+      }, { releaseIssueLock: true });
 
       await setWakeupStatus(run.wakeupRequestId, "cancelled", {
         finishedAt: new Date(),

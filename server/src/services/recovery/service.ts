@@ -3928,37 +3928,80 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     };
 
     for (const issue of candidates) {
-      if (!isCleanable(issue.checkoutRunId) || !isCleanable(issue.executionRunId)) {
-        continue;
+      const canClearExecution = isCleanable(issue.executionRunId);
+      const canClearCheckout = isCleanable(issue.checkoutRunId);
+
+      if (!canClearExecution && !canClearCheckout) continue;
+
+      // Clear each stale column independently so a live checkoutRunId never
+      // prevents release of a terminal executionRunId (and vice-versa).
+      // FUL-11176: zombie executionRunId persisted for 22h because the sweep
+      // skipped issues where checkoutRunId pointed at a live run.
+      const clearExecution = canClearExecution && issue.executionRunId !== null;
+      const clearCheckout = canClearCheckout && issue.checkoutRunId !== null;
+
+      let clearedId: string | null = null;
+
+      if (clearExecution && clearCheckout) {
+        // Both stale: single update for efficiency.
+        clearedId = await db
+          .update(issues)
+          .set({
+            checkoutRunId: null,
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(issues.id, issue.id),
+              eq(issues.checkoutRunId, issue.checkoutRunId!),
+              eq(issues.executionRunId, issue.executionRunId!),
+            ),
+          )
+          .returning({ id: issues.id })
+          .then((rows) => rows[0]?.id ?? null);
+      } else if (clearExecution) {
+        // Only executionRunId is stale; preserve live checkoutRunId.
+        clearedId = await db
+          .update(issues)
+          .set({
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(issues.id, issue.id),
+              eq(issues.executionRunId, issue.executionRunId!),
+            ),
+          )
+          .returning({ id: issues.id })
+          .then((rows) => rows[0]?.id ?? null);
+      } else {
+        // Only checkoutRunId is stale; preserve live executionRunId.
+        clearedId = await db
+          .update(issues)
+          .set({
+            checkoutRunId: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(issues.id, issue.id),
+              eq(issues.checkoutRunId, issue.checkoutRunId!),
+            ),
+          )
+          .returning({ id: issues.id })
+          .then((rows) => rows[0]?.id ?? null);
       }
 
-      const updated = await db
-        .update(issues)
-        .set({
-          checkoutRunId: null,
-          executionRunId: null,
-          executionAgentNameKey: null,
-          executionLockedAt: null,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(issues.id, issue.id),
-            issue.checkoutRunId
-              ? eq(issues.checkoutRunId, issue.checkoutRunId)
-              : isNull(issues.checkoutRunId),
-            issue.executionRunId
-              ? eq(issues.executionRunId, issue.executionRunId)
-              : isNull(issues.executionRunId),
-          ),
-        )
-        .returning({ id: issues.id })
-        .then((rows) => rows[0] ?? null);
-
-      if (!updated) continue;
+      if (!clearedId) continue;
 
       result.cleared += 1;
-      result.issueIds.push(updated.id);
+      result.issueIds.push(clearedId);
 
       await logActivity(db, {
         companyId: issue.companyId,
@@ -3968,11 +4011,11 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         runId: null,
         action: "issue.stale_lock_cleared",
         entityType: "issue",
-        entityId: updated.id,
+        entityId: clearedId,
         details: {
           source: "recovery.sweep_stale_issue_locks",
-          clearedCheckoutRunId: issue.checkoutRunId,
-          clearedExecutionRunId: issue.executionRunId,
+          clearedCheckoutRunId: clearCheckout ? issue.checkoutRunId : undefined,
+          clearedExecutionRunId: clearExecution ? issue.executionRunId : undefined,
           referencedRunStatuses: Object.fromEntries(runStatusById),
         },
       });
