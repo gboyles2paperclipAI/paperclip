@@ -260,6 +260,8 @@ export {
   type IssueDocumentFormat,
   type UpsertIssueDocument,
   type RestoreIssueDocumentRevision,
+  pendingConfirmationNoticeSchema,
+  type PendingConfirmationNotice,
 } from "./issue.js";
 
 export {
