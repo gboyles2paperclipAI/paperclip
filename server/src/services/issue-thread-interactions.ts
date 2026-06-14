@@ -81,6 +81,9 @@ type RequestConfirmationLikeKind = (typeof REQUEST_CONFIRMATION_INTERACTION_KIND
 type RequestConfirmationLikeInteraction =
   | RequestConfirmationInteraction
   | RequestCheckboxConfirmationInteraction;
+type RequestConfirmationLikePayload =
+  | RequestConfirmationInteraction["payload"]
+  | RequestCheckboxConfirmationInteraction["payload"];
 
 function isRequestConfirmationLikeKind(kind: string): kind is RequestConfirmationLikeKind {
   return (REQUEST_CONFIRMATION_INTERACTION_KINDS as readonly string[]).includes(kind);
@@ -185,23 +188,51 @@ function shouldSupersedeRequestConfirmationOnUserComment(interaction: RequestCon
   return interaction.payload.supersedeOnUserComment === true;
 }
 
+function normalizeRequestConfirmationPayload<T extends RequestConfirmationLikePayload>(payload: T): T {
+  return {
+    ...payload,
+    supersedeOnUserComment: payload.durableProviderWait === true
+      ? false
+      : payload.supersedeOnUserComment ?? true,
+  };
+}
+
+// Known reviewer agent role names that must not be gatekeepers of Board confirmations.
+// Agents waiting on these roles should route to the reviewer agent directly, not ask
+// the Board to confirm that the review happened.
+const REVIEWER_AGENT_ROLE_RE =
+  /\b(Code Quality Specialist|QA Lead|Security Lead|Security Engineer|Architecture Lead|QA Engineer|Test Engineer)\b/i;
+
+// Language patterns that indicate "confirm this agent's review is done" — distinct
+// from legitimate Board decisions like provider access or risk approval.
+const AGENT_REVIEW_GATE_LANGUAGE_RE =
+  /\b(must\s+(?:re-?)?review\b|re-?review\s+and\s+(?:accept|approve)\b|confirm\s+when\b.{0,80}\breview\b|review(?:ed)?\s+and\s+approved?\b|review(?:ed)?\s+before\s+merge\b)/i;
+
+/**
+ * Returns the detected reviewer-agent role name if the prompt describes an agent
+ * review gate (i.e. "X must review / confirm when X review is done"), otherwise null.
+ *
+ * Used to block agents from creating Board-facing request_confirmation cards for
+ * work that belongs to a reviewer agent rather than Grant/Board.
+ */
+export function detectAgentReviewGateInConfirmationPrompt(prompt: string): string | null {
+  const roleMatch = REVIEWER_AGENT_ROLE_RE.exec(prompt);
+  if (!roleMatch) return null;
+  if (!AGENT_REVIEW_GATE_LANGUAGE_RE.test(prompt)) return null;
+  return roleMatch[1] ?? roleMatch[0];
+}
+
 function normalizeCreateInteractionInput(input: CreateIssueThreadInteraction): CreateIssueThreadInteraction {
   switch (input.kind) {
     case "request_confirmation":
       return {
         ...input,
-        payload: {
-          ...input.payload,
-          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? true,
-        },
+        payload: normalizeRequestConfirmationPayload(input.payload),
       };
     case "request_checkbox_confirmation":
       return {
         ...input,
-        payload: {
-          ...input.payload,
-          supersedeOnUserComment: input.payload.supersedeOnUserComment ?? true,
-        },
+        payload: normalizeRequestConfirmationPayload(input.payload),
       };
     default:
       return input;
@@ -773,6 +804,23 @@ export function issueThreadInteractionService(db: Db) {
         && issue.assigneeAgentId != null
       ) {
         data = { ...data, continuationPolicy: "wake_assignee_on_accept" };
+      }
+
+      // Guard: agents must not create Board confirmations for reviewer-agent handoffs.
+      // If the prompt names a known reviewer agent role in a review-gate context, the
+      // agent should assign the issue to that reviewer or open a child review task
+      // rather than asking the Board to confirm the review happened.
+      if (isRequestConfirmationLikeKind(data.kind) && actor.agentId != null) {
+        const prompt = "prompt" in data.payload ? (data.payload.prompt ?? "") : "";
+        const detectedRole = detectAgentReviewGateInConfirmationPrompt(prompt);
+        if (detectedRole) {
+          throw unprocessable(
+            `Board confirmations must not gate reviewer-agent handoffs. ` +
+            `"${detectedRole}" is a reviewer agent — route to them directly by assigning ` +
+            `the issue to that agent or creating a child review task, not by asking the ` +
+            `Board to confirm their review.`,
+          );
+        }
       }
 
       if (data.idempotencyKey) {
@@ -1461,6 +1509,67 @@ export function issueThreadInteractionService(db: Db) {
 
       await touchIssue(db, issue.id);
       return hydrateInteraction(updated);
+    },
+
+    /**
+     * Recovery utility: find and expire any pending request_confirmation interactions on
+     * an issue whose prompts describe agent reviewer gates instead of true Board decisions.
+     * Returns the list of interactions that were expired.
+     *
+     * Used by the recovery system to clean up bad Board-facing cards left by agents that
+     * pre-date the guardrail in `create()`.
+     */
+    expireAgentReviewGateConfirmations: async (
+      issue: { id: string; companyId: string },
+      actor: InteractionActor,
+    ) => {
+      const rows = await db
+        .select()
+        .from(issueThreadInteractions)
+        .where(and(
+          eq(issueThreadInteractions.companyId, issue.companyId),
+          eq(issueThreadInteractions.issueId, issue.id),
+          inArray(issueThreadInteractions.kind, [...REQUEST_CONFIRMATION_INTERACTION_KINDS]),
+          eq(issueThreadInteractions.status, "pending"),
+        ));
+
+      const stale = rows.filter((row) => {
+        const interaction = hydrateInteraction(row) as RequestConfirmationLikeInteraction;
+        const prompt = "prompt" in interaction.payload ? (interaction.payload.prompt ?? "") : "";
+        return detectAgentReviewGateInConfirmationPrompt(prompt) !== null;
+      });
+
+      if (stale.length === 0) return [];
+
+      const now = new Date();
+      const expired: IssueThreadInteraction[] = [];
+      for (const row of stale) {
+        const [updated] = await db
+          .update(issueThreadInteractions)
+          .set({
+            status: "expired",
+            result: {
+              version: 1,
+              outcome: "superseded_by_comment",
+              commentId: null,
+            },
+            resolvedByAgentId: actor.agentId ?? null,
+            resolvedByUserId: actor.userId ?? null,
+            resolvedAt: now,
+            updatedAt: now,
+          })
+          .where(and(
+            eq(issueThreadInteractions.id, row.id),
+            eq(issueThreadInteractions.status, "pending"),
+          ))
+          .returning();
+        if (updated) expired.push(hydrateInteraction(updated));
+      }
+
+      if (expired.length > 0) {
+        await touchIssue(db, issue.id);
+      }
+      return expired;
     },
   };
 }

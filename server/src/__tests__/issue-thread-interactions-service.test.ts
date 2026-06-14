@@ -26,7 +26,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { issueService } from "../services/issues.js";
-import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
+import { detectAgentReviewGateInConfirmationPrompt, issueThreadInteractionService } from "../services/issue-thread-interactions.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -1033,6 +1033,58 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     });
   });
 
+  it("keeps durable credential/provider request confirmations pending when a user adds a clarification comment", async () => {
+    const { companyId, issueId } = await seedConfirmationIssue("Durable credential provider wait");
+
+    const created = await interactionsSvc.create({
+      id: issueId,
+      companyId,
+    }, {
+      kind: "request_confirmation",
+      payload: {
+        version: 1,
+        prompt: "Confirm the managed database credential rotation is complete.",
+        durableProviderWait: true,
+        durableProviderWaitReason: "Waiting for the provider owner to rotate the managed database credential.",
+        supersedeOnUserComment: true,
+      },
+    }, {
+      userId: "local-board",
+    });
+
+    expect(created).toMatchObject({
+      payload: {
+        durableProviderWait: true,
+        durableProviderWaitReason: "Waiting for the provider owner to rotate the managed database credential.",
+        supersedeOnUserComment: false,
+      },
+    });
+
+    const expired = await interactionsSvc.expireRequestConfirmationsSupersededByComment({
+      id: issueId,
+      companyId,
+    }, {
+      id: randomUUID(),
+      createdAt: new Date(new Date(created.createdAt).getTime() + 1_000),
+      authorUserId: "local-board",
+    }, {
+      userId: "local-board",
+    });
+
+    expect(expired).toHaveLength(0);
+    const rows = await db.select().from(issueThreadInteractions);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: created.id,
+      status: "pending",
+      payload: {
+        durableProviderWait: true,
+        supersedeOnUserComment: false,
+      },
+      result: null,
+    });
+  });
+
   it("keeps request confirmations pending when user-comment supersede is explicitly disabled", async () => {
     const { companyId, issueId } = await seedConfirmationIssue("Comment supersede opt-out");
 
@@ -1789,6 +1841,144 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       });
 
       expect(created.continuationPolicy).toBe("none");
+    });
+  });
+
+  describe("agent review gate guardrail (FUL-11226)", () => {
+    async function seedAgentIssue(title: string, status = "in_progress") {
+      const companyId = randomUUID();
+      const goalId = randomUUID();
+      const issueId = randomUUID();
+      const agentId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+      await db.insert(goals).values({ id: goalId, companyId, title, level: "task", status: "active" });
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Platform Lead",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        goalId,
+        title,
+        status,
+        priority: "medium",
+        assigneeAgentId: agentId,
+      });
+      return { companyId, goalId, issueId, agentId };
+    }
+
+    it("detectAgentReviewGateInConfirmationPrompt identifies FUL-11220 pattern", () => {
+      const prompt =
+        "Implementation complete (commit cd17743be). Per AC-4, Code Quality Specialist must re-review and accept before merge. Confirm when CQS review is done and this is approved for merge.";
+      expect(detectAgentReviewGateInConfirmationPrompt(prompt)).toBe("Code Quality Specialist");
+    });
+
+    it("detectAgentReviewGateInConfirmationPrompt returns null for legitimate Board decisions", () => {
+      expect(detectAgentReviewGateInConfirmationPrompt("Grant Vercel staging access?")).toBeNull();
+      expect(detectAgentReviewGateInConfirmationPrompt("Approve production deployment?")).toBeNull();
+      expect(detectAgentReviewGateInConfirmationPrompt("The code quality looks great — approve?")).toBeNull();
+    });
+
+    it("blocks agent from creating request_confirmation that names a reviewer agent gate (FUL-11220 regression)", async () => {
+      const { companyId, issueId, agentId } = await seedAgentIssue("Fix stale approval context");
+
+      await expect(interactionsSvc.create(
+        { id: issueId, companyId, status: "in_progress", assigneeAgentId: agentId },
+        {
+          kind: "request_confirmation",
+          continuationPolicy: "wake_assignee_on_accept",
+          payload: {
+            version: 1,
+            prompt:
+              "Implementation complete. Per AC-4, Code Quality Specialist must re-review and accept before merge. Confirm when CQS review is done.",
+          },
+        },
+        { agentId },
+      )).rejects.toThrow(/Board confirmations must not gate reviewer-agent handoffs/);
+    });
+
+    it("allows Board user to create request_confirmation even with reviewer role mention", async () => {
+      const { companyId, issueId } = await seedAgentIssue("Board can still confirm");
+
+      const created = await interactionsSvc.create(
+        { id: issueId, companyId },
+        {
+          kind: "request_confirmation",
+          continuationPolicy: "none",
+          payload: {
+            version: 1,
+            prompt:
+              "Code Quality Specialist review is complete — approve for merge?",
+          },
+        },
+        { userId: "local-board" },
+      );
+
+      expect(created.status).toBe("pending");
+    });
+
+    it("allows agent to create request_confirmation without reviewer gate language", async () => {
+      const { companyId, issueId, agentId } = await seedAgentIssue("Agent non-gate confirmation");
+
+      const created = await interactionsSvc.create(
+        { id: issueId, companyId, status: "in_progress", assigneeAgentId: agentId },
+        {
+          kind: "request_confirmation",
+          continuationPolicy: "none",
+          payload: {
+            version: 1,
+            prompt: "Grant Vercel staging credentials?",
+          },
+        },
+        { agentId },
+      );
+
+      expect(created.status).toBe("pending");
+    });
+
+    it("expireAgentReviewGateConfirmations removes pending Board confirmations for reviewer agent gates", async () => {
+      const { companyId, issueId } = await seedAgentIssue("Cleanup stale review gates");
+
+      // Directly insert a bad interaction (bypasses guardrail to simulate pre-guardrail card)
+      await db.insert(issueThreadInteractions).values({
+        companyId,
+        issueId,
+        kind: "request_confirmation",
+        status: "pending",
+        continuationPolicy: "wake_assignee_on_accept",
+        payload: {
+          version: 1,
+          prompt:
+            "Implementation complete. Per AC-4, Code Quality Specialist must re-review and accept before merge. Confirm when CQS review is done.",
+          supersedeOnUserComment: true,
+        },
+        createdByAgentId: null,
+        createdByUserId: null,
+      });
+
+      const expired = await interactionsSvc.expireAgentReviewGateConfirmations(
+        { id: issueId, companyId },
+        { userId: "local-board" },
+      );
+
+      expect(expired).toHaveLength(1);
+      expect(expired[0]?.status).toBe("expired");
+      expect(expired[0]?.kind).toBe("request_confirmation");
     });
   });
 });
