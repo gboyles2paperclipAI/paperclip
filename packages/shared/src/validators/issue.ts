@@ -839,3 +839,11 @@ export const restoreIssueDocumentRevisionSchema = z.object({});
 export type IssueDocumentFormat = z.infer<typeof issueDocumentFormatSchema>;
 export type UpsertIssueDocument = z.infer<typeof upsertIssueDocumentSchema>;
 export type RestoreIssueDocumentRevision = z.infer<typeof restoreIssueDocumentRevisionSchema>;
+
+export const pendingConfirmationNoticeSchema = z.object({
+  interactionId: z.string().uuid(),
+  ageMinutes: z.number().int().min(1).max(100_000),
+  thresholdMinutes: z.number().int().min(1).max(100_000),
+});
+
+export type PendingConfirmationNotice = z.infer<typeof pendingConfirmationNoticeSchema>;

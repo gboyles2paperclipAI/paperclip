@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
-import { and, desc, eq, inArray, notInArray } from "drizzle-orm";
+import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -38,6 +38,7 @@ import {
   feedbackVoteValueSchema,
   upsertIssueFeedbackVoteSchema,
   linkIssueApprovalSchema,
+  pendingConfirmationNoticeSchema,
   issueDocumentKeySchema,
   ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
   rejectIssueThreadInteractionSchema,
@@ -6952,6 +6953,161 @@ export function issueRoutes(
     });
 
     res.json({ ok: true });
+  });
+
+  // Narrow cross-boundary notification path for registry/monitor agents.
+  // Allows a same-company agent (which has company_scope:read but may lack issue:mutate
+  // on the target) to post a structured notice for an aged pending confirmation without
+  // broad write permissions.  Auth gates:
+  //   1. Agent-only (board users post comments through the normal route).
+  //   2. Caller must be in the same company as the target issue.
+  //   3. Caller must have company_scope:read (any same-company non-low-trust agent; low-trust
+  //      agents are explicitly denied company_scope:read by the authorization service).
+  //   4. The named interaction must be pending on the target issue.
+  //   5. Idempotent: one notice per (issue, interactionId) — duplicate calls return the
+  //      existing notice comment without creating a second one.
+  router.post("/issues/:id/pending-confirmation-notices", validate(pendingConfirmationNoticeSchema), async (req, res) => {
+    const id = req.params.id as string;
+
+    // Gate 1: agent-only
+    if (req.actor.type !== "agent" || !req.actor.agentId) {
+      res.status(403).json({ error: "Agent authentication required" });
+      return;
+    }
+    const callerAgentId = req.actor.agentId;
+
+    // Gate 2: issue must exist
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+
+    // Gate 2: same company
+    assertCompanyAccess(req, issue.companyId);
+
+    // Gate 3: company_scope:read confirms monitoring-level privilege; low-trust agents are denied
+    const scopeDecision = await access.decide({
+      actor: req.actor,
+      action: "company_scope:read",
+      resource: { type: "company", companyId: issue.companyId },
+    });
+    if (!scopeDecision.allowed) {
+      res.status(403).json({ error: "company_scope:read is required to post pending-confirmation notices" });
+      return;
+    }
+
+    const { interactionId, ageMinutes, thresholdMinutes } = req.body as {
+      interactionId: string;
+      ageMinutes: number;
+      thresholdMinutes: number;
+    };
+
+    // Gate 4: the named interaction must be pending on this issue
+    const interaction = await issueThreadInteractionsSvc.getById(interactionId);
+    if (
+      !interaction ||
+      interaction.issueId !== issue.id ||
+      interaction.companyId !== issue.companyId ||
+      !["request_confirmation", "request_checkbox_confirmation"].includes(interaction.kind) ||
+      interaction.status !== "pending"
+    ) {
+      res.status(404).json({ error: "Pending confirmation interaction not found on this issue" });
+      return;
+    }
+
+    // Gate 5: idempotency — search for an existing notice comment by embedded marker.
+    // No .limit() here so drizzle's thenable resolves to a plain array, matching the
+    // chainable builder shape expected by callers (including test mocks).
+    const noticeMarker = `pc-notice:${interactionId}`;
+    const noticeRows = await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(
+        and(
+          eq(issueComments.issueId, issue.id),
+          eq(issueComments.companyId, issue.companyId),
+          sql`${issueComments.body} like ${"%" + noticeMarker + "%"}`,
+        ),
+      );
+    const existingNotice = noticeRows[0] ?? null;
+
+    if (existingNotice) {
+      res.json({ noticeId: existingNotice.id, commentId: existingNotice.id, wakeQueued: false, duplicate: true });
+      return;
+    }
+
+    const actor = getActorInfo(req);
+
+    // Compose the notice comment — content is fully server-controlled; caller supplies only
+    // the interaction id and observed age, never free-form text.
+    const noticeBody = [
+      `**Pending Confirmation Notice** (registry self-heal)`,
+      ``,
+      `Interaction \`${interactionId}\` has been pending for **${ageMinutes}m** (threshold: ${thresholdMinutes}m).`,
+      ``,
+      `**Action required:** Accept or reject the pending confirmation on this issue to unblock the waiting agent.`,
+      ``,
+      `_Notified by registry agent \`${callerAgentId}\`._`,
+      ``,
+      `<!-- ${noticeMarker} -->`,
+    ].join("\n");
+
+    const comment = await svc.addComment(issue.id, noticeBody, {
+      agentId: callerAgentId,
+      runId: actor.runId,
+    });
+
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.comment_added",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        commentId: comment.id,
+        bodySnippet: comment.body.slice(0, 120),
+        identifier: issue.identifier,
+        issueTitle: issue.title,
+        source: "pending_confirmation_notice",
+        interactionId,
+        ageMinutes,
+        thresholdMinutes,
+        notifierAgentId: callerAgentId,
+      },
+    });
+
+    // Wake the target assignee with a structured payload so they get the full context.
+    let wakeQueued = false;
+    if (issue.assigneeAgentId) {
+      void heartbeat.wakeup(issue.assigneeAgentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "pending_confirmation_notice",
+        payload: {
+          kind: "pending_confirmation_notice",
+          issueId: issue.id,
+          interactionId,
+          ageMinutes,
+          thresholdMinutes,
+          noticeCommentId: comment.id,
+        },
+        requestedByActorType: "agent",
+        requestedByActorId: callerAgentId,
+        contextSnapshot: {
+          triggeredBy: "agent",
+          actorId: callerAgentId,
+        },
+      }).then(() => { wakeQueued = true; }).catch((err) =>
+        logger.warn({ err, issueId: issue.id, assigneeAgentId: issue.assigneeAgentId }, "failed to wake assignee for pending-confirmation notice"),
+      );
+      wakeQueued = true;
+    }
+
+    res.status(201).json({ noticeId: comment.id, commentId: comment.id, wakeQueued });
   });
 
   return router;
