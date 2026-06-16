@@ -241,6 +241,56 @@ describe("resolveExecutionRunAdapterConfig", () => {
     });
   });
 
+  it("emits warnings for secret_ref bindings with reserved PAPERCLIP_ key names", async () => {
+    const resolveAdapterConfigForRuntime = vi.fn(async (_companyId, config: Record<string, unknown>) => ({
+      config: {
+        ...config,
+        env: { ...(config.env as Record<string, unknown>) },
+      },
+      secretKeys: new Set<string>(),
+      manifest: [],
+    }));
+    const resolveEnvBindings = vi.fn(async (_companyId, env: Record<string, unknown>) => ({
+      env: {},
+      secretKeys: new Set<string>(),
+      manifest: [],
+    }));
+
+    const result = await resolveExecutionRunAdapterConfig({
+      companyId: "company-1",
+      agentId: "agent-1",
+      executionRunConfig: {
+        env: {
+          PAPERCLIP_PROD_DB_URL: { type: "secret_ref", secretId: "secret-db", version: "latest" },
+          AGENT_ONLY: "keep",
+        },
+      },
+      projectEnv: {
+        PAPERCLIP_API_TOKEN: { type: "secret_ref", secretId: "secret-token", version: "latest" },
+        PROJECT_ONLY: "keep",
+      },
+      routineEnv: {
+        PAPERCLIP_PLAIN_STRIPPED: "plain-value",
+        ROUTINE_ONLY: "keep",
+      },
+      routineId: "routine-1",
+      secretsSvc: {
+        resolveAdapterConfigForRuntime,
+        resolveEnvBindings,
+      } as any,
+    });
+
+    expect(result.reservedKeyWarnings).toHaveLength(2);
+    expect(result.reservedKeyWarnings[0]).toContain("PAPERCLIP_PROD_DB_URL");
+    expect(result.reservedKeyWarnings[0]).toContain("agent adapter config");
+    expect(result.reservedKeyWarnings[0]).toContain("PROD_DB_URL");
+    expect(result.reservedKeyWarnings[1]).toContain("PAPERCLIP_API_TOKEN");
+    expect(result.reservedKeyWarnings[1]).toContain("project env");
+    expect(result.reservedKeyWarnings[1]).toContain("API_TOKEN");
+    // plain values are stripped silently — no warning
+    expect(result.reservedKeyWarnings.join(" ")).not.toContain("PAPERCLIP_PLAIN_STRIPPED");
+  });
+
   it("rejects inline sensitive env values for low-trust runs", async () => {
     await expect(resolveExecutionRunAdapterConfig({
       companyId: "company-1",

@@ -408,6 +408,29 @@ function stripPaperclipRuntimeEnvFromAdapterConfig(config: Record<string, unknow
   };
 }
 
+function collectReservedPaperclipSecretRefWarnings(
+  envValue: unknown,
+  source: string,
+): string[] {
+  const record = parseObject(envValue);
+  const warnings: string[] = [];
+  for (const [key, rawBinding] of Object.entries(record)) {
+    if (!isPaperclipRuntimeEnvKey(key)) continue;
+    if (
+      typeof rawBinding !== "object" ||
+      rawBinding === null ||
+      (rawBinding as Record<string, unknown>).type !== "secret_ref"
+    ) {
+      continue;
+    }
+    const suggestion = key.slice("PAPERCLIP_".length) || key;
+    warnings.push(
+      `Env binding '${key}' in ${source} uses the reserved PAPERCLIP_ prefix and will be stripped at runtime. Rename the env binding to a non-reserved name (e.g. ${suggestion}).`,
+    );
+  }
+  return warnings;
+}
+
 function assertLowTrustEnvConfigAllowed(envValue: unknown, source: string) {
   const record = stripPaperclipRuntimeEnvBindings(envValue);
   if (!record) return;
@@ -439,6 +462,11 @@ export async function resolveExecutionRunAdapterConfig(input: {
   secretsSvc: RuntimeConfigSecretResolver;
   trustPreset?: TrustPresetResolution;
 }) {
+  const reservedKeyWarnings: string[] = [
+    ...collectReservedPaperclipSecretRefWarnings(input.executionRunConfig.env, "agent adapter config"),
+    ...collectReservedPaperclipSecretRefWarnings(input.projectEnv, "project env"),
+    ...collectReservedPaperclipSecretRefWarnings(input.routineEnv, "routine env"),
+  ];
   const executionRunConfig = stripPaperclipRuntimeEnvFromAdapterConfig(input.executionRunConfig);
   const projectEnv = stripPaperclipRuntimeEnvBindings(input.projectEnv);
   const routineEnv = stripPaperclipRuntimeEnvBindings(input.routineEnv);
@@ -525,6 +553,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
       ...(projectEnvResolution.manifest ?? []),
       ...(routineEnvResolution.manifest ?? []),
     ],
+    reservedKeyWarnings,
   };
 }
 
@@ -8420,7 +8449,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
     const configSnapshot = buildExecutionWorkspaceConfigSnapshot(mergedConfig, selectedEnvironmentId);
     const executionRunConfig = stripWorkspaceRuntimeFromExecutionRunConfig(mergedConfig);
-    const { resolvedConfig, secretKeys, secretManifest } = await resolveExecutionRunAdapterConfig({
+    const { resolvedConfig, secretKeys, secretManifest, reservedKeyWarnings } = await resolveExecutionRunAdapterConfig({
       companyId: agent.companyId,
       agentId: agent.id,
       issueId,
@@ -8769,6 +8798,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const runtimeWorkspaceWarnings = [
       ...resolvedWorkspace.warnings,
       ...executionWorkspace.warnings,
+      ...reservedKeyWarnings,
       ...(runtimeSessionResolution.warning ? [runtimeSessionResolution.warning] : []),
       ...(resetTaskSession && sessionResetReason
         ? [
