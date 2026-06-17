@@ -1170,6 +1170,17 @@ export function authorizationService(db: Db) {
           explanation: "Allowed because the issue has no agent assignee.",
         });
       }
+      // CEO and agents with canCreateAgents legacy authority may mutate any company issue.
+      // This aligns with the tasks:manage_active_checkouts path already granted to the same actors,
+      // which hasActiveCheckoutManagementOverride in the route relies on — but that check is
+      // unreachable when decideIssueAccess denies first. Fixing at the source here.
+      if (canCreateAgentsLegacy(actorAgent)) {
+        return allow({
+          action: input.action,
+          reason: "allow_legacy_agent_creator",
+          explanation: "Allowed by legacy agent creator authority (CEO role or canCreateAgents).",
+        });
+      }
     }
     if (
       input.action === "agent_config:update" &&
