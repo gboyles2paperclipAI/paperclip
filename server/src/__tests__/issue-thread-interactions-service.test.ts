@@ -167,10 +167,16 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       projectId: null,
     }, created.id, {}, {
       userId: "local-board",
+      requestId: "req-suggest-tasks-audit",
+      resolutionMethod: "ui_click",
     });
 
     expect(accepted.interaction.kind).toBe("suggest_tasks");
     expect(accepted.interaction.status).toBe("accepted");
+    expect(accepted.interaction.resolutionAudit).toMatchObject({
+      method: "ui_click",
+      requestId: "req-suggest-tasks-audit",
+    });
     expect(accepted.interaction.result).toMatchObject({
       version: 1,
       createdTasks: [
@@ -214,6 +220,10 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     const listed = await interactionsSvc.listForIssue(issueId);
     expect(listed).toHaveLength(1);
     expect(listed[0]?.status).toBe("accepted");
+    expect(listed[0]?.resolutionAudit).toMatchObject({
+      method: "ui_click",
+      requestId: "req-suggest-tasks-audit",
+    });
 
     await expect(interactionsSvc.acceptSuggestedTasks({
       id: issueId,
@@ -699,6 +709,8 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       projectId: null,
     }, created.id, {}, {
       userId: "local-board",
+      requestId: "req-resolution-audit",
+      resolutionMethod: "ui_click",
     });
 
     expect(accepted.createdIssues).toEqual([]);
@@ -710,7 +722,39 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
         outcome: "accepted",
       },
       resolvedByUserId: "local-board",
+      resolutionAudit: {
+        method: "ui_click",
+        requestId: "req-resolution-audit",
+      },
     });
+
+    const listed = await interactionsSvc.listForIssue(issueId);
+    expect(listed[0]).toMatchObject({
+      id: created.id,
+      resolutionAudit: {
+        method: "ui_click",
+        requestId: "req-resolution-audit",
+      },
+    });
+
+    const companyAudit = await interactionsSvc.listForCompany({
+      companyId,
+      method: "ui_click",
+    });
+    expect(companyAudit).toHaveLength(1);
+    expect(companyAudit[0]).toMatchObject({
+      id: created.id,
+      method: "ui_click",
+      resolutionAudit: {
+        method: "ui_click",
+        requestId: "req-resolution-audit",
+      },
+    });
+
+    await expect(interactionsSvc.listForCompany({
+      companyId,
+      method: "api_explicit",
+    })).resolves.toEqual([]);
 
     const requiresReason = await interactionsSvc.create({
       id: issueId,

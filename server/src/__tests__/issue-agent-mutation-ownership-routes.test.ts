@@ -520,6 +520,47 @@ describe("agent issue mutation checkout ownership", () => {
     );
   });
 
+  it("allows the checked-out owner to mark routine execution issues done with terminal evidence", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      originKind: "routine_execution",
+      originId: "routine-daily-security-audit",
+      status: "in_progress",
+      assigneeAgentId: ownerAgentId,
+    }));
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...makeIssue({
+        originKind: "routine_execution",
+        originId: "routine-daily-security-audit",
+      }),
+      ...patch,
+    }));
+    const app = await createApp(ownerActor());
+
+    const res = await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({
+        status: "done",
+        comment: "Done: routine audit completed with evidence.",
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      issueId,
+      expect.objectContaining({
+        status: "done",
+        actorAgentId: ownerAgentId,
+      }),
+    );
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      issueId,
+      "Done: routine audit completed with evidence.",
+      expect.objectContaining({
+        agentId: ownerAgentId,
+        runId: ownerRunId,
+      }),
+    );
+  });
+
   it.each([
     [
       "work product create",
