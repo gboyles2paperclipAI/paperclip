@@ -55,6 +55,48 @@ node scripts/approval-evidence-report.mjs --require-clean
 
 If the working tree is intentionally dirty, the approval request must name the dirty files and explain why they are excluded from the approval scope. Approval requests without current evidence should be treated as incomplete, not ready for a human decision.
 
+## Help2day Website MVP Restart Package
+
+Website MVP work may restart only from a documented YELLOW or GREEN readiness state. YELLOW means core website-readiness blockers are clear, but work must stay bounded and avoid production exposure until the remaining follow-ups are either closed, explicitly waived, or routed to their owners.
+
+As of the 2026-06-18 readiness waiver:
+
+- Production Paperclip source of truth is `help2day/main`.
+- `/api/health` is OK on build commit `590e38f73d4bf54741c0ddd8a17e27aa494e2082`.
+- FUL-11585 is blocked but waived for website readiness because Gemini/TODD Router is not required for the website MVP.
+- FUL-3844, FUL-4799, and FUL-7043 remain backlog or standing follow-ups, not first website MVP implementation targets.
+
+First restart work must use exactly one bounded workstream, in this order:
+
+1. Non-production documentation, runbook, or acceptance-criteria cleanup.
+2. Test-only improvement.
+3. Small UI or backend bug fix with no deploy, secret change, production database mutation, service restart, payment change, or public exposure.
+4. MVP planning issue refinement.
+
+Stop before any of these approval gates:
+
+- deploy or public launch,
+- service restart,
+- production environment variable change,
+- secret creation, rotation, or value inspection,
+- production database write or migration,
+- payment or Stripe production change,
+- admin access broadening,
+- Gemini/TODD Router dependency for the website MVP.
+
+Before opening a PR for website MVP restart work, capture:
+
+- exact repository and remotes,
+- base branch and current HEAD,
+- clean worktree evidence,
+- ahead/behind count against the base,
+- changed-file list and diff stat,
+- `git diff --check`,
+- relevant validation command output,
+- evidence that no secrets, runtime artifacts, generated caches, or archived-company files are included.
+
+Leave website readiness YELLOW unless fresh evidence proves all remaining non-core follow-ups are resolved or intentionally deferred and no new readiness blockers exist.
+
 ## Repository And Posting Identity
 
 Before opening, updating, or commenting on GitHub/Vercel work, prove the exact target:
