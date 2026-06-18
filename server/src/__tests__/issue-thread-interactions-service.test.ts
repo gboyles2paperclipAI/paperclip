@@ -699,6 +699,8 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       projectId: null,
     }, created.id, {}, {
       userId: "local-board",
+      requestId: "req-resolution-audit",
+      resolutionMethod: "ui_click",
     });
 
     expect(accepted.createdIssues).toEqual([]);
@@ -710,7 +712,39 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
         outcome: "accepted",
       },
       resolvedByUserId: "local-board",
+      resolutionAudit: {
+        method: "ui_click",
+        requestId: "req-resolution-audit",
+      },
     });
+
+    const listed = await interactionsSvc.listForIssue(issueId);
+    expect(listed[0]).toMatchObject({
+      id: created.id,
+      resolutionAudit: {
+        method: "ui_click",
+        requestId: "req-resolution-audit",
+      },
+    });
+
+    const companyAudit = await interactionsSvc.listForCompany({
+      companyId,
+      method: "ui_click",
+    });
+    expect(companyAudit).toHaveLength(1);
+    expect(companyAudit[0]).toMatchObject({
+      id: created.id,
+      method: "ui_click",
+      resolutionAudit: {
+        method: "ui_click",
+        requestId: "req-resolution-audit",
+      },
+    });
+
+    await expect(interactionsSvc.listForCompany({
+      companyId,
+      method: "api_explicit",
+    })).resolves.toEqual([]);
 
     const requiresReason = await interactionsSvc.create({
       id: issueId,
