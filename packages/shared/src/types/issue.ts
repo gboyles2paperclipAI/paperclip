@@ -673,6 +673,37 @@ export interface IssueThreadInteractionActorFields {
   resolvedByUserId?: string | null;
 }
 
+export type InteractionResolutionMethod =
+  | "ui_click"
+  | "api_explicit"
+  | "api_automated"
+  | "unknown";
+
+export interface InteractionResolutionAuditMetadata {
+  method: InteractionResolutionMethod;
+  requestId?: string | null;
+  resolvedAt?: Date | string | null;
+}
+
+export interface InteractionResolutionAudit {
+  id: string;
+  companyId: string;
+  issueId: string;
+  kind: IssueThreadInteractionKind;
+  status: IssueThreadInteractionStatus;
+  method: InteractionResolutionMethod;
+  sourceRunId?: string | null;
+  sourceCommentId?: string | null;
+  createdByAgentId?: string | null;
+  createdByUserId?: string | null;
+  resolvedByAgentId?: string | null;
+  resolvedByUserId?: string | null;
+  resolvedAt?: Date | string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+  resolutionAudit?: InteractionResolutionAuditMetadata | null;
+}
+
 export interface SuggestedTaskDraft {
   clientKey: string;
   parentClientKey?: string | null;
@@ -837,6 +868,7 @@ export interface IssueThreadInteractionBase extends IssueThreadInteractionActorF
   createdAt: Date | string;
   updatedAt: Date | string;
   resolvedAt?: Date | string | null;
+  resolutionAudit?: InteractionResolutionAuditMetadata | null;
 }
 
 export interface SuggestTasksInteraction extends IssueThreadInteractionBase {

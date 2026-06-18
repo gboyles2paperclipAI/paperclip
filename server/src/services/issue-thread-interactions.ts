@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, lte } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   documents,
@@ -15,6 +15,9 @@ import type {
   AskUserQuestionsInteraction,
   CancelIssueThreadInteraction,
   CreateIssueThreadInteraction,
+  InteractionResolutionAudit,
+  InteractionResolutionAuditMetadata,
+  InteractionResolutionMethod,
   IssueThreadInteraction,
   RequestCheckboxConfirmationInteraction,
   RequestConfirmationInteraction,
@@ -44,6 +47,8 @@ import { issueService, listUnfinalizedExecutionWorkspaceIds } from "./issues.js"
 type InteractionActor = {
   agentId?: string | null;
   userId?: string | null;
+  requestId?: string | null;
+  resolutionMethod?: InteractionResolutionMethod | null;
 };
 
 const ISSUE_THREAD_INTERACTION_IDEMPOTENCY_CONSTRAINT =
@@ -118,6 +123,7 @@ function hydrateInteraction(
   const base = {
     ...row,
     idempotencyKey: row.idempotencyKey ?? null,
+    resolutionAudit: row.resolutionAudit ?? null,
     status: row.status as IssueThreadInteraction["status"],
     continuationPolicy: row.continuationPolicy as IssueThreadInteraction["continuationPolicy"],
   };
@@ -165,6 +171,18 @@ async function touchIssue(db: IssueTouchDb, issueId: string) {
 
 function isTerminalIssueStatus(status: string) {
   return status === "done" || status === "cancelled";
+}
+
+function buildResolutionAudit(args: {
+  method?: InteractionResolutionMethod | null;
+  requestId?: string | null;
+  resolvedAt: Date;
+}): InteractionResolutionAuditMetadata {
+  return {
+    method: args.method ?? "unknown",
+    requestId: args.requestId ?? null,
+    resolvedAt: args.resolvedAt,
+  };
 }
 
 function shouldReturnAcceptedConfirmationToCreatorAgent(args: {
@@ -505,6 +523,11 @@ async function expireStaleRequestConfirmationTarget(db: Db | any, args: {
       },
       resolvedByAgentId: args.actor.agentId ?? null,
       resolvedByUserId: args.actor.userId ?? null,
+      resolutionAudit: buildResolutionAudit({
+        method: args.actor.resolutionMethod ?? "unknown",
+        requestId: args.actor.requestId ?? null,
+        resolvedAt: now,
+      }),
       resolvedAt: now,
       updatedAt: now,
     })
@@ -623,6 +646,11 @@ export function issueThreadInteractionService(db: Db) {
           },
           resolvedByAgentId: args.actor.agentId ?? null,
           resolvedByUserId: args.actor.userId ?? null,
+          resolutionAudit: buildResolutionAudit({
+            method: args.actor.resolutionMethod ?? "unknown",
+            requestId: args.actor.requestId ?? null,
+            resolvedAt: now,
+          }),
           resolvedAt: now,
           updatedAt: now,
         })
@@ -718,6 +746,11 @@ export function issueThreadInteractionService(db: Db) {
         },
         resolvedByAgentId: args.actor.agentId ?? null,
         resolvedByUserId: args.actor.userId ?? null,
+        resolutionAudit: buildResolutionAudit({
+          method: args.actor.resolutionMethod ?? "unknown",
+          requestId: args.actor.requestId ?? null,
+          resolvedAt: now,
+        }),
         resolvedAt: now,
         updatedAt: now,
       })
@@ -753,6 +786,55 @@ export function issueThreadInteractionService(db: Db) {
         .then((rows) => rows[0] ?? null);
 
       return row ? hydrateInteraction(row) : null;
+    },
+
+    listForCompany: async (args: {
+      companyId: string;
+      resolvedAfter?: Date | null;
+      resolvedBefore?: Date | null;
+      method?: InteractionResolutionMethod | null;
+    }): Promise<InteractionResolutionAudit[]> => {
+      const filters = [
+        eq(issueThreadInteractions.companyId, args.companyId),
+        isNotNull(issueThreadInteractions.resolvedAt),
+      ];
+      if (args.resolvedAfter) {
+        filters.push(gte(issueThreadInteractions.resolvedAt, args.resolvedAfter));
+      }
+      if (args.resolvedBefore) {
+        filters.push(lte(issueThreadInteractions.resolvedAt, args.resolvedBefore));
+      }
+
+      const rows = await db
+        .select()
+        .from(issueThreadInteractions)
+        .where(and(...filters))
+        .orderBy(desc(issueThreadInteractions.resolvedAt), desc(issueThreadInteractions.createdAt));
+
+      return rows
+        .map((row) => {
+          const resolutionAudit = row.resolutionAudit ?? null;
+          const method = resolutionAudit?.method ?? "unknown";
+          return {
+            id: row.id,
+            companyId: row.companyId,
+            issueId: row.issueId,
+            kind: row.kind as InteractionResolutionAudit["kind"],
+            status: row.status as InteractionResolutionAudit["status"],
+            method,
+            sourceRunId: row.sourceRunId ?? null,
+            sourceCommentId: row.sourceCommentId ?? null,
+            createdByAgentId: row.createdByAgentId ?? null,
+            createdByUserId: row.createdByUserId ?? null,
+            resolvedByAgentId: row.resolvedByAgentId ?? null,
+            resolvedByUserId: row.resolvedByUserId ?? null,
+            resolvedAt: row.resolvedAt ?? null,
+            createdAt: row.createdAt,
+            updatedAt: row.updatedAt,
+            resolutionAudit,
+          };
+        })
+        .filter((row) => !args.method || row.method === args.method);
     },
 
     create: async (
@@ -965,6 +1047,11 @@ export function issueThreadInteractionService(db: Db) {
             status: "accepted",
             resolvedByAgentId: actor.agentId ?? null,
             resolvedByUserId: actor.userId ?? null,
+            resolutionAudit: buildResolutionAudit({
+              method: actor.resolutionMethod ?? "unknown",
+              requestId: actor.requestId ?? null,
+              resolvedAt,
+            }),
             resolvedAt,
             updatedAt: resolvedAt,
           })
@@ -1090,6 +1177,7 @@ export function issueThreadInteractionService(db: Db) {
         throw conflict("Interaction has already been resolved");
       }
 
+      const resolvedAt = new Date();
       const [updated] = await db
         .update(issueThreadInteractions)
         .set({
@@ -1100,8 +1188,13 @@ export function issueThreadInteractionService(db: Db) {
           },
           resolvedByAgentId: actor.agentId ?? null,
           resolvedByUserId: actor.userId ?? null,
-          resolvedAt: new Date(),
-          updatedAt: new Date(),
+          resolutionAudit: buildResolutionAudit({
+            method: actor.resolutionMethod ?? "unknown",
+            requestId: actor.requestId ?? null,
+            resolvedAt,
+          }),
+          resolvedAt,
+          updatedAt: resolvedAt,
         })
         .where(and(
           eq(issueThreadInteractions.id, interactionId),
@@ -1161,6 +1254,11 @@ export function issueThreadInteractionService(db: Db) {
             },
             resolvedByAgentId: actor.agentId ?? null,
             resolvedByUserId: actor.userId ?? null,
+            resolutionAudit: buildResolutionAudit({
+              method: actor.resolutionMethod ?? "unknown",
+              requestId: actor.requestId ?? null,
+              resolvedAt: now,
+            }),
             resolvedAt: now,
             updatedAt: now,
           })
@@ -1246,6 +1344,11 @@ export function issueThreadInteractionService(db: Db) {
             },
             resolvedByAgentId: null,
             resolvedByUserId: comment.authorUserId,
+            resolutionAudit: buildResolutionAudit({
+              method: "ui_click",
+              requestId: null,
+              resolvedAt: now,
+            }),
             resolvedAt: now,
             updatedAt: now,
           })
@@ -1321,6 +1424,11 @@ export function issueThreadInteractionService(db: Db) {
             },
             resolvedByAgentId: actor.agentId ?? null,
             resolvedByUserId: actor.userId ?? null,
+            resolutionAudit: buildResolutionAudit({
+              method: actor.resolutionMethod ?? "unknown",
+              requestId: actor.requestId ?? null,
+              resolvedAt: now,
+            }),
             resolvedAt: now,
             updatedAt: now,
           })
@@ -1367,6 +1475,7 @@ export function issueThreadInteractionService(db: Db) {
         answers: input.answers,
       });
 
+      const resolvedAt = new Date();
       const [updated] = await db
         .update(issueThreadInteractions)
         .set({
@@ -1378,8 +1487,13 @@ export function issueThreadInteractionService(db: Db) {
           },
           resolvedByAgentId: actor.agentId ?? null,
           resolvedByUserId: actor.userId ?? null,
-          resolvedAt: new Date(),
-          updatedAt: new Date(),
+          resolutionAudit: buildResolutionAudit({
+            method: actor.resolutionMethod ?? "unknown",
+            requestId: actor.requestId ?? null,
+            resolvedAt,
+          }),
+          resolvedAt,
+          updatedAt: resolvedAt,
         })
         .where(and(
           eq(issueThreadInteractions.id, interactionId),
@@ -1420,6 +1534,7 @@ export function issueThreadInteractionService(db: Db) {
       }
 
       const reason = data.reason?.trim() || null;
+      const resolvedAt = new Date();
       const [updated] = await db
         .update(issueThreadInteractions)
         .set({
@@ -1433,8 +1548,13 @@ export function issueThreadInteractionService(db: Db) {
           },
           resolvedByAgentId: actor.agentId ?? null,
           resolvedByUserId: actor.userId ?? null,
-          resolvedAt: new Date(),
-          updatedAt: new Date(),
+          resolutionAudit: buildResolutionAudit({
+            method: actor.resolutionMethod ?? "unknown",
+            requestId: actor.requestId ?? null,
+            resolvedAt,
+          }),
+          resolvedAt,
+          updatedAt: resolvedAt,
         })
         .where(and(
           eq(issueThreadInteractions.id, interactionId),
