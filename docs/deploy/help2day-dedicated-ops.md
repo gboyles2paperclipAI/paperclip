@@ -59,6 +59,37 @@ If the working tree is intentionally dirty, the approval request must name the d
 
 Website MVP work may restart only from a documented YELLOW or GREEN readiness state. YELLOW means core website-readiness blockers are clear, but work must stay bounded and avoid production exposure until the remaining follow-ups are either closed, explicitly waived, or routed to their owners.
 
+Help2day is "Computer help, today." The MVP is a fast, calm, safe computer-support service, not a general-purpose chatbot.
+
+The support scope for initial website and chat work is limited to:
+
+- Windows help.
+- macOS basics.
+- Microsoft 365 and Outlook.
+- email setup and troubleshooting.
+- browsers.
+- printers.
+- Wi-Fi and home networking basics.
+- slow computers.
+- backups.
+- safe password and MFA guidance.
+- malware or compromise concern triage.
+- small-business workstation support.
+- Help2day service, pricing, and policy questions.
+
+Out-of-scope requests must be deflected or escalated when appropriate, including homework, math, politics, creative writing, legal advice, medical advice, financial advice, credential theft, password cracking, security bypass, malware or exploit guidance, software piracy, or anything unrelated to computer support or Help2day services.
+
+First-do-no-harm support behavior is required:
+
+- Start with observation and read-only checks.
+- Prefer reversible, low-risk troubleshooting.
+- Before risky changes, require a backup, restore point, export, or current-state documentation.
+- Make one small change at a time.
+- Test after each change.
+- Record what changed.
+- Never request passwords, MFA codes, recovery keys, seed phrases, private keys, full payment card data, or unnecessary sensitive files.
+- Escalate suspected compromise, fraud, stalking or spyware, business email compromise, malware or ransomware, or data loss.
+
 As of the 2026-06-18 readiness waiver:
 
 - Production Paperclip source of truth is `help2day/main`.

@@ -46,6 +46,9 @@ jobs:
       - name: Typecheck db package
         run: pnpm --filter @paperclipai/db typecheck
 
+      - name: Check Help2day MVP guardrails
+        run: node .github/scripts/check-help2day-mvp-guardrails.mjs
+
       - name: Check diff whitespace
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
