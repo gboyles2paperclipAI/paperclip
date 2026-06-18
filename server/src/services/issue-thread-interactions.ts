@@ -989,6 +989,7 @@ export function issueThreadInteractionService(db: Db) {
         current.result = updated.result;
         current.resolvedByAgentId = updated.resolvedByAgentId;
         current.resolvedByUserId = updated.resolvedByUserId;
+        current.resolutionAudit = updated.resolutionAudit;
         current.resolvedAt = updated.resolvedAt;
         current.updatedAt = updated.updatedAt;
       });
