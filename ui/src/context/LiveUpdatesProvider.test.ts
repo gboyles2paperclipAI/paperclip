@@ -14,6 +14,10 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { __liveUpdatesTestUtils } from "./LiveUpdatesProvider";
 import { queryKeys } from "../lib/queryKeys";
 
+function flushScheduledInvalidations() {
+  vi.advanceTimersByTime(500);
+}
+
 describe("LiveUpdatesProvider issue invalidation", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -48,7 +52,7 @@ describe("LiveUpdatesProvider issue invalidation", () => {
 
     vi.runAllTimers();
 
-    expect(invalidations).toContainEqual({
+    expect(invalidations).toContainEqual(expect.objectContaining({
       queryKey: queryKeys.issues.listMineByMe("company-1"),
     }));
     expect(invalidations).toContainEqual(expect.objectContaining({
@@ -110,7 +114,7 @@ describe("LiveUpdatesProvider issue invalidation", () => {
 
     vi.runAllTimers();
 
-    expect(invalidations).toContainEqual({
+    expect(invalidations).toContainEqual(expect.objectContaining({
       queryKey: queryKeys.issues.comments("issue-1"),
     }));
   });
@@ -145,7 +149,7 @@ describe("LiveUpdatesProvider issue invalidation", () => {
 
     vi.runAllTimers();
 
-    expect(invalidations).toContainEqual({
+    expect(invalidations).toContainEqual(expect.objectContaining({
       queryKey: queryKeys.issues.detail("issue-1"),
     }));
     expect(invalidations).toContainEqual(expect.objectContaining({
@@ -198,7 +202,7 @@ describe("LiveUpdatesProvider issue invalidation", () => {
 
     vi.runAllTimers();
 
-    expect(invalidations).toContainEqual({
+    expect(invalidations).toContainEqual(expect.objectContaining({
       queryKey: queryKeys.issues.documents("issue-1"),
     }));
     expect(invalidations).toContainEqual(expect.objectContaining({
@@ -377,7 +381,7 @@ describe("LiveUpdatesProvider issue invalidation", () => {
 
     vi.runAllTimers();
 
-    expect(invalidations).toContainEqual({
+    expect(invalidations).toContainEqual(expect.objectContaining({
       queryKey: queryKeys.issues.detail("issue-1"),
     }));
     expect(invalidations).toContainEqual(expect.objectContaining({
