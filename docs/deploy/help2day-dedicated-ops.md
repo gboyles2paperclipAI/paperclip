@@ -55,6 +55,94 @@ node scripts/approval-evidence-report.mjs --require-clean
 
 If the working tree is intentionally dirty, the approval request must name the dirty files and explain why they are excluded from the approval scope. Approval requests without current evidence should be treated as incomplete, not ready for a human decision.
 
+## Help2day Website MVP Restart Package
+
+Website MVP work may restart only from a documented YELLOW or GREEN readiness state. YELLOW means core website-readiness blockers are clear, but work must stay bounded and avoid production exposure until the remaining follow-ups are either closed, explicitly waived, or routed to their owners.
+
+Help2day is "Computer help, today." The MVP is a fast, calm, safe computer-support service, not a general-purpose chatbot.
+
+The first public intake entry point is Start Chat / Get Help. It should ask the user to choose the closest computer-support category, then describe the issue in plain language.
+
+The support scope for initial website and chat work is limited to:
+
+- Windows help.
+- macOS basics.
+- Microsoft 365 and Outlook.
+- email setup and troubleshooting.
+- browsers.
+- printers.
+- Wi-Fi and home networking basics.
+- slow computers.
+- backups.
+- safe password and MFA guidance.
+- malware or compromise concern triage.
+- small-business workstation support.
+- Help2day service, pricing, and policy questions.
+- Other computer issue.
+
+Start Chat / Get Help safety copy must be visible before the user submits sensitive context:
+
+> Do not share passwords, MFA codes, recovery keys, private keys, or payment card numbers.
+
+Use this in-scope framing near the intake:
+
+> Help2day is for computer support and Help2day service questions. Start with the category that best matches your computer issue.
+
+Use this out-of-scope handling copy when the request is unrelated or unsafe:
+
+> Help2day cannot help with homework or math, politics, creative writing, legal, medical, or financial advice, credential theft, password cracking, security bypass, malware or exploit guidance, software piracy, or anything unrelated to computer support or Help2day services.
+
+Out-of-scope requests must be deflected or escalated when appropriate, including homework, math, politics, creative writing, legal advice, medical advice, financial advice, credential theft, password cracking, security bypass, malware or exploit guidance, software piracy, or anything unrelated to computer support or Help2day services.
+
+First-do-no-harm support behavior is required:
+
+- Start with observation and read-only checks.
+- Prefer reversible, low-risk troubleshooting.
+- Before risky changes, require a backup, restore point, export, or current-state documentation.
+- Make one small change at a time.
+- Test after each change.
+- Record what changed.
+- Never request passwords, MFA codes, recovery keys, seed phrases, private keys, full payment card data, or unnecessary sensitive files.
+- Escalate suspected compromise, fraud, stalking or spyware, business email compromise, malware or ransomware, or data loss.
+
+As of the 2026-06-18 readiness waiver:
+
+- Production Paperclip source of truth is `help2day/main`.
+- `/api/health` is OK on build commit `590e38f73d4bf54741c0ddd8a17e27aa494e2082`.
+- FUL-11585 is blocked but waived for website readiness because Gemini/TODD Router is not required for the website MVP.
+- FUL-3844, FUL-4799, and FUL-7043 remain backlog or standing follow-ups, not first website MVP implementation targets.
+
+First restart work must use exactly one bounded workstream, in this order:
+
+1. Non-production documentation, runbook, or acceptance-criteria cleanup.
+2. Test-only improvement.
+3. Small UI or backend bug fix with no deploy, secret change, production database mutation, service restart, payment change, or public exposure.
+4. MVP planning issue refinement.
+
+Stop before any of these approval gates:
+
+- deploy or public launch,
+- service restart,
+- production environment variable change,
+- secret creation, rotation, or value inspection,
+- production database write or migration,
+- payment or Stripe production change,
+- admin access broadening,
+- Gemini/TODD Router dependency for the website MVP.
+
+Before opening a PR for website MVP restart work, capture:
+
+- exact repository and remotes,
+- base branch and current HEAD,
+- clean worktree evidence,
+- ahead/behind count against the base,
+- changed-file list and diff stat,
+- `git diff --check`,
+- relevant validation command output,
+- evidence that no secrets, runtime artifacts, generated caches, or archived-company files are included.
+
+Leave website readiness YELLOW unless fresh evidence proves all remaining non-core follow-ups are resolved or intentionally deferred and no new readiness blockers exist.
+
 ## Repository And Posting Identity
 
 Before opening, updating, or commenting on GitHub/Vercel work, prove the exact target:
