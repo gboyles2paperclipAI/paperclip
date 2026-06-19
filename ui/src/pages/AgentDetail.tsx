@@ -3134,6 +3134,10 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
   });
   const run = hydratedRun ?? initialRun;
   const metrics = runMetrics(run);
+  const censorUsernameInLogs = useQuery({
+    queryKey: queryKeys.instance.generalSettings,
+    queryFn: () => instanceSettingsApi.getGeneral(),
+  }).data?.censorUsernameInLogs === true;
   const [sessionOpen, setSessionOpen] = useState(false);
   const [claudeLoginResult, setClaudeLoginResult] = useState<ClaudeLoginResult | null>(null);
 
