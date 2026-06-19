@@ -23,6 +23,15 @@ export {
   type MarkdownDoc,
 } from "./frontmatter.js";
 export {
+  HELP2DAY_FIRST_DO_NO_HARM_COPY,
+  HELP2DAY_IN_SCOPE_COPY,
+  HELP2DAY_OUT_OF_SCOPE_COPY,
+  HELP2DAY_SECRET_SHARING_WARNING,
+  HELP2DAY_START_CHAT_HEADING,
+  HELP2DAY_SUPPORT_CATEGORIES,
+  type Help2daySupportCategory,
+} from "./help2day-intake.js";
+export {
   TRUST_PRESETS,
   DEFAULT_TRUST_PRESET,
   LOW_TRUST_REVIEW_PRESET,
