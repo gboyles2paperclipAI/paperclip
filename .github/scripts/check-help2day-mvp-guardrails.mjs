@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 export const DEFAULT_RUNBOOK_PATH = 'docs/deploy/help2day-dedicated-ops.md';
 
 export const REQUIRED_SUPPORT_SCOPE_TERMS = [
+  'Start Chat / Get Help',
   'Computer help, today',
   'not a general-purpose chatbot',
   'Windows help',
@@ -26,6 +27,7 @@ export const REQUIRED_SUPPORT_SCOPE_TERMS = [
   'malware or compromise',
   'small-business workstation',
   'service, pricing, and policy',
+  'Other computer issue',
 ];
 
 export const REQUIRED_OUT_OF_SCOPE_TERMS = [
@@ -46,6 +48,7 @@ export const REQUIRED_OUT_OF_SCOPE_TERMS = [
 
 export const REQUIRED_FIRST_DO_NO_HARM_TERMS = [
   'First-do-no-harm',
+  'Do not share passwords, MFA codes, recovery keys, private keys, or payment card numbers',
   'observation and read-only checks',
   'reversible, low-risk troubleshooting',
   'backup, restore point, export, or current-state documentation',

@@ -45,3 +45,18 @@ test('fails when first-do-no-harm anchors are missing', () => {
   assert.match(result.failures.join('\n'), /first-do-no-harm rules/);
   assert.match(result.failures.join('\n'), /Never request passwords/);
 });
+
+test('fails when Start Chat intake anchors are missing', () => {
+  const result = checkHelp2dayMvpGuardrails(
+    [
+      ...REQUIRED_SUPPORT_SCOPE_TERMS.filter(term => term !== 'Start Chat / Get Help' && term !== 'Other computer issue'),
+      ...REQUIRED_OUT_OF_SCOPE_TERMS,
+      ...REQUIRED_FIRST_DO_NO_HARM_TERMS,
+    ].join('\n')
+  );
+
+  assert.equal(result.passed, false);
+  assert.match(result.failures.join('\n'), /support scope/);
+  assert.match(result.failures.join('\n'), /Start Chat \/ Get Help/);
+  assert.match(result.failures.join('\n'), /Other computer issue/);
+});

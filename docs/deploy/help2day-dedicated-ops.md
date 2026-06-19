@@ -61,6 +61,8 @@ Website MVP work may restart only from a documented YELLOW or GREEN readiness st
 
 Help2day is "Computer help, today." The MVP is a fast, calm, safe computer-support service, not a general-purpose chatbot.
 
+The first public intake entry point is Start Chat / Get Help. It should ask the user to choose the closest computer-support category, then describe the issue in plain language.
+
 The support scope for initial website and chat work is limited to:
 
 - Windows help.
@@ -76,6 +78,19 @@ The support scope for initial website and chat work is limited to:
 - malware or compromise concern triage.
 - small-business workstation support.
 - Help2day service, pricing, and policy questions.
+- Other computer issue.
+
+Start Chat / Get Help safety copy must be visible before the user submits sensitive context:
+
+> Do not share passwords, MFA codes, recovery keys, private keys, or payment card numbers.
+
+Use this in-scope framing near the intake:
+
+> Help2day is for computer support and Help2day service questions. Start with the category that best matches your computer issue.
+
+Use this out-of-scope handling copy when the request is unrelated or unsafe:
+
+> Help2day cannot help with homework or math, politics, creative writing, legal, medical, or financial advice, credential theft, password cracking, security bypass, malware or exploit guidance, software piracy, or anything unrelated to computer support or Help2day services.
 
 Out-of-scope requests must be deflected or escalated when appropriate, including homework, math, politics, creative writing, legal advice, medical advice, financial advice, credential theft, password cracking, security bypass, malware or exploit guidance, software piracy, or anything unrelated to computer support or Help2day services.
 
