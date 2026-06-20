@@ -17,19 +17,24 @@ function getDetachedClient(): QueryClient {
 
 /**
  * Conference Room Chat experimental flag (PAP-136 / PAP-137).
+ * Also respects VITE_CHAT_DISABLED env var for safety gates.
  *
- * Wraps the shared experimental-settings query so gated call sites don't
- * repeat the boilerplate. `enabled` stays false while the query is in
- * flight (no flash of gated UI, same as the sidebar's `showWorkspacesLink`
- * pattern); `loaded` lets route gates avoid redirecting away before the
- * flag value is actually known.
+ * Returns:
+ * - enabled: true when feature flag is on AND chat is not disabled by env var
+ * - disabled: true when VITE_CHAT_DISABLED=true (emergency killswitch)
+ * - loaded: false while query is in flight (prevents redirect flashing)
  *
  * Renders without a QueryClientProvider resolve to the flag-off default
- * (`{ enabled: false, loaded: true }`) instead of throwing, so widely shared
- * leaf components like StatusIcon stay mountable in isolation.
+ * (`{ enabled: false, disabled: false, loaded: true }`) instead of throwing.
  */
-export function useConferenceRoomChatEnabled(): { enabled: boolean; loaded: boolean } {
+export function useConferenceRoomChatEnabled(): {
+  enabled: boolean;
+  disabled: boolean;
+  loaded: boolean;
+} {
   const contextClient = useContext(QueryClientContext);
+  const chatDisabled = import.meta.env.VITE_CHAT_DISABLED === "true";
+
   const { data, isFetched } = useQuery(
     {
       queryKey: queryKeys.instance.experimentalSettings,
@@ -39,7 +44,11 @@ export function useConferenceRoomChatEnabled(): { enabled: boolean; loaded: bool
     contextClient ?? getDetachedClient(),
   );
   if (!contextClient) {
-    return { enabled: false, loaded: true };
+    return { enabled: false, disabled: chatDisabled, loaded: true };
   }
-  return { enabled: data?.enableConferenceRoomChat === true, loaded: isFetched };
+  return {
+    enabled: data?.enableConferenceRoomChat === true && !chatDisabled,
+    disabled: chatDisabled,
+    loaded: isFetched
+  };
 }

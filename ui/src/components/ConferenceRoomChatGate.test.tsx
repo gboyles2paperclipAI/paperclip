@@ -21,6 +21,12 @@ vi.mock("@/lib/router", () => ({
   Outlet: () => <div data-testid="outlet">gated content</div>,
 }));
 
+const mockEnv = vi.hoisted(() => ({
+  VITE_CHAT_DISABLED: "false",
+}));
+
+vi.stubGlobal("import.meta.env", mockEnv);
+
 async function flushReact() {
   for (let index = 0; index < 5; index += 1) {
     await Promise.resolve();
@@ -86,5 +92,25 @@ describe("ConferenceRoomChatGate (PAP-137)", () => {
 
     expect(container.querySelector('[data-testid="navigate"]')).toBeNull();
     expect(container.querySelector('[data-testid="outlet"]')).toBeNull();
+  });
+
+  it("shows fallback UI when VITE_CHAT_DISABLED is true", async () => {
+    mockEnv.VITE_CHAT_DISABLED = "true";
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
+    await renderGate();
+
+    const fallback = container.querySelector('[data-testid="chat-disabled-fallback"]');
+    expect(fallback).not.toBeNull();
+    expect(fallback?.textContent).toContain("Chat Temporarily Unavailable");
+    expect(container.querySelector('[data-testid="outlet"]')).toBeNull();
+  });
+
+  it("renders gated content when VITE_CHAT_DISABLED is false and flag is on", async () => {
+    mockEnv.VITE_CHAT_DISABLED = "false";
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
+    await renderGate();
+
+    expect(container.querySelector('[data-testid="outlet"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="navigate"]')).toBeNull();
   });
 });
