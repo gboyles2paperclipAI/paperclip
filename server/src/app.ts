@@ -68,6 +68,7 @@ import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 import { createCachedViteHtmlRenderer } from "./vite-html-renderer.js";
 import { DEFAULT_JSON_BODY_LIMIT, PORTABLE_JSON_BODY_LIMIT } from "./http/body-limits.js";
 import { COMPANY_IMPORT_API_PATH } from "./routes/company-import-paths.js";
+import type { RuntimeControls } from "./runtime-roles.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
@@ -126,6 +127,38 @@ export function shouldEnablePrivateHostnameGuard(opts: {
   );
 }
 
+export function shouldLoadPluginsForRuntime(controls: RuntimeControls): boolean {
+  return controls.pluginWorkersEnabled;
+}
+
+export function startPluginSchedulersForRuntime(
+  controls: RuntimeControls,
+  jobCoordinator: { start(): void },
+  scheduler: { start(): void },
+): boolean {
+  if (!controls.pluginSchedulerEnabled) {
+    logger.warn({ runtimeRole: controls.role }, "plugin scheduler systems disabled by runtime role");
+    return false;
+  }
+  jobCoordinator.start();
+  scheduler.start();
+  return true;
+}
+
+export function stagedRuntimeMutationGuard(controls: RuntimeControls): express.RequestHandler {
+  return (req, res, next) => {
+    if (controls.role !== "staged") {
+      next();
+      return;
+    }
+    if (["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+      next();
+      return;
+    }
+    res.status(403).json({ error: "runtime_role_staged_read_only" });
+  };
+}
+
 export async function createApp(
   db: Db,
   opts: {
@@ -147,6 +180,7 @@ export async function createApp(
     bindHost: string;
     authReady: boolean;
     companyDeletionEnabled: boolean;
+    runtimeControls: RuntimeControls;
     instanceId?: string;
     hostVersion?: string;
     localPluginDir?: string;
@@ -207,6 +241,7 @@ export async function createApp(
 
   // Mount API routes
   const api = Router();
+  api.use(stagedRuntimeMutationGuard(opts.runtimeControls));
   api.use(boardMutationGuard());
   api.use(
     "/health",
@@ -215,6 +250,7 @@ export async function createApp(
       deploymentExposure: opts.deploymentExposure,
       authReady: opts.authReady,
       companyDeletionEnabled: opts.companyDeletionEnabled,
+      runtimeControls: opts.runtimeControls,
     }),
   );
   api.use(openApiRoutes());
@@ -277,7 +313,7 @@ export async function createApp(
     db,
     {
       localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
-      migrationDb: opts.pluginMigrationDb,
+      migrationDb: opts.runtimeControls.migrationsApplyAllowed ? opts.pluginMigrationDb : undefined,
     },
     {
       workerManager,
@@ -438,8 +474,7 @@ export async function createApp(
 
   app.use(errorHandler);
 
-  jobCoordinator.start();
-  scheduler.start();
+  startPluginSchedulersForRuntime(opts.runtimeControls, jobCoordinator, scheduler);
   let feedbackExportShuttingDown = false;
   let feedbackExportTimer: ReturnType<typeof setInterval> | null = null;
   const disableFeedbackExportFlushes = () => {
@@ -463,14 +498,16 @@ export async function createApp(
     }
   };
 
-  feedbackExportTimer = opts.feedbackExportService
+  feedbackExportTimer = opts.feedbackExportService && opts.runtimeControls.feedbackExporterEnabled
     ? setInterval(() => {
       void flushPendingFeedbackExports();
     }, FEEDBACK_EXPORT_FLUSH_INTERVAL_MS)
     : null;
   feedbackExportTimer?.unref?.();
-  if (opts.feedbackExportService) {
+  if (opts.feedbackExportService && opts.runtimeControls.feedbackExporterEnabled) {
     void flushPendingFeedbackExports();
+  } else if (opts.feedbackExportService) {
+    logger.warn({ runtimeRole: opts.runtimeControls.role }, "feedback export flusher disabled by runtime role");
   }
   void toolDispatcher.initialize().catch((err) => {
     logger.error({ err }, "Failed to initialize plugin tool dispatcher");
@@ -537,18 +574,28 @@ export async function createApp(
       );
     }
   };
-  void ensureBundledKubernetesPlugin()
-    .then(() => loader.loadAll())
-    .then((result) => {
-    if (!result) return;
-    for (const loaded of result.results) {
-      if (devWatcher && loaded.success && loaded.plugin.packagePath) {
-        devWatcher.watch(loaded.plugin.id, loaded.plugin.packagePath);
-      }
+  if (shouldLoadPluginsForRuntime(opts.runtimeControls)) {
+    const maybeInstallBundledKubernetesPlugin = opts.runtimeControls.pluginAutoInstallEnabled
+      ? ensureBundledKubernetesPlugin()
+      : Promise.resolve();
+    if (!opts.runtimeControls.pluginAutoInstallEnabled) {
+      logger.warn({ runtimeRole: opts.runtimeControls.role }, "plugin auto-install disabled by runtime role");
     }
-  }).catch((err) => {
-    logger.error({ err }, "Failed to load ready plugins on startup");
-  });
+    void maybeInstallBundledKubernetesPlugin
+      .then(() => loader.loadAll())
+      .then((result) => {
+      if (!result) return;
+      for (const loaded of result.results) {
+        if (devWatcher && loaded.success && loaded.plugin.packagePath) {
+          devWatcher.watch(loaded.plugin.id, loaded.plugin.packagePath);
+        }
+      }
+    }).catch((err) => {
+      logger.error({ err }, "Failed to load ready plugins on startup");
+    });
+  } else {
+    logger.warn({ runtimeRole: opts.runtimeControls.role }, "plugin loading and workers disabled by runtime role");
+  }
   let appServicesShutdown = false;
   const shutdownAppServices = () => {
     if (appServicesShutdown) return;

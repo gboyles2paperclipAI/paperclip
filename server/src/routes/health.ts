@@ -8,6 +8,7 @@ import { readPersistedDevServerStatus, toDevServerHealthStatus, writeDevServerRe
 import { logger } from "../middleware/logger.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { serverVersion } from "../version.js";
+import { deriveRuntimeControls, runtimeControlsHealthPayload, type RuntimeControls } from "../runtime-roles.js";
 
 function shouldExposeFullHealthDetails(
   actorType: "none" | "board" | "agent" | null | undefined,
@@ -35,14 +36,23 @@ export function healthRoutes(
     deploymentExposure: DeploymentExposure;
     authReady: boolean;
     companyDeletionEnabled: boolean;
+    runtimeControls?: RuntimeControls;
   } = {
     deploymentMode: "local_trusted",
     deploymentExposure: "private",
     authReady: true,
     companyDeletionEnabled: true,
+    runtimeControls: deriveRuntimeControls({
+      databaseBackupEnabled: true,
+      feedbackExporterConfigured: false,
+    }),
   },
 ) {
   const router = Router();
+  const runtimeControls = opts.runtimeControls ?? deriveRuntimeControls({
+    databaseBackupEnabled: true,
+    feedbackExporterConfigured: false,
+  });
 
   router.post("/dev-server/restart", async (req, res) => {
     const actorType = "actor" in req ? req.actor?.type : null;
@@ -88,10 +98,11 @@ export function healthRoutes(
       exposeFullDetails || hasDevServerStatusToken(req.get("x-paperclip-dev-server-status-token"));
 
     if (!db) {
+      const runtime = runtimeControlsHealthPayload(runtimeControls);
       res.json(
         exposeFullDetails
-          ? { status: "ok", version: serverVersion }
-          : { status: "ok", deploymentMode: opts.deploymentMode },
+          ? { status: "ok", version: serverVersion, runtime }
+          : { status: "ok", deploymentMode: opts.deploymentMode, runtime },
       );
       return;
     }
@@ -103,6 +114,7 @@ export function healthRoutes(
       res.status(503).json({
         status: "unhealthy",
         version: serverVersion,
+        runtime: runtimeControlsHealthPayload(runtimeControls),
         error: "database_unreachable"
       });
       return;
@@ -158,6 +170,7 @@ export function healthRoutes(
         status: "ok",
         deploymentMode: opts.deploymentMode,
         deploymentExposure: opts.deploymentExposure,
+        runtime: runtimeControlsHealthPayload(runtimeControls),
         bootstrapStatus,
         bootstrapInviteActive,
         ...(devServer ? { devServer } : {}),
@@ -170,6 +183,7 @@ export function healthRoutes(
       version: serverVersion,
       deploymentMode: opts.deploymentMode,
       deploymentExposure: opts.deploymentExposure,
+      runtime: runtimeControlsHealthPayload(runtimeControls),
       authReady: opts.authReady,
       bootstrapStatus,
       bootstrapInviteActive,

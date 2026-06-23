@@ -147,6 +147,7 @@ export async function startServer(): Promise<StartedServer> {
   
   type EnsureMigrationsOptions = {
     autoApply?: boolean;
+    applyAllowed?: boolean;
   };
   
   async function ensureMigrations(
@@ -155,8 +156,15 @@ export async function startServer(): Promise<StartedServer> {
     opts?: EnsureMigrationsOptions,
   ): Promise<MigrationSummary> {
     const autoApply = opts?.autoApply === true;
+    const applyAllowed = opts?.applyAllowed ?? true;
     let state = await inspectMigrations(connectionString);
     if (state.status === "needsMigrations" && state.reason === "pending-migrations") {
+      if (!applyAllowed) {
+        throw new Error(
+          `${label} has pending migrations (${formatPendingMigrationSummary(state.pendingMigrations)}). ` +
+            `PAPERCLIP_RUNTIME_ROLE=${config.runtimeRole} refuses migration apply; start a primary role or run migrations separately.`,
+        );
+      }
       const repair = await reconcilePendingMigrationHistory(connectionString);
       if (repair.repairedMigrations.length > 0) {
         logger.warn(
@@ -168,6 +176,12 @@ export async function startServer(): Promise<StartedServer> {
       }
     }
     if (state.status === "upToDate") return "already applied";
+    if (!applyAllowed) {
+      throw new Error(
+        `${label} has pending migrations (${formatPendingMigrationSummary(state.pendingMigrations)}). ` +
+          `PAPERCLIP_RUNTIME_ROLE=${config.runtimeRole} refuses migration apply; start a primary role or run migrations separately.`,
+      );
+    }
     if (state.status === "needsMigrations" && state.reason === "no-migration-journal-non-empty-db") {
       logger.warn(
         { tableCount: state.tableCount },
@@ -210,6 +224,25 @@ export async function startServer(): Promise<StartedServer> {
       return parsed.protocol === "postgres:" || parsed.protocol === "postgresql:";
     } catch {
       return false;
+    }
+  }
+
+  function summarizePostgresTarget(connectionString: string): {
+    host: string;
+    port: string;
+    database: string;
+    user: string;
+  } {
+    try {
+      const parsed = new URL(connectionString);
+      return {
+        host: parsed.hostname || "unknown",
+        port: parsed.port || "5432",
+        database: parsed.pathname.replace(/^\//, "") || "unknown",
+        user: parsed.username || "missing",
+      };
+    } catch {
+      return { host: "invalid", port: "unknown", database: "unknown", user: "unknown" };
     }
   }
 
@@ -315,7 +348,9 @@ export async function startServer(): Promise<StartedServer> {
   assertCloudDatabaseContract();
   if (config.databaseUrl) {
     const migrationUrl = config.databaseMigrationUrl ?? config.databaseUrl;
-    migrationSummary = await ensureMigrations(migrationUrl, "PostgreSQL");
+    migrationSummary = await ensureMigrations(migrationUrl, "PostgreSQL", {
+      applyAllowed: config.runtimeControls.migrationsApplyAllowed,
+    });
   
     db = createDb(config.databaseUrl);
     pluginMigrationDb = config.databaseMigrationUrl ? createDb(config.databaseMigrationUrl) : db;
@@ -478,6 +513,7 @@ export async function startServer(): Promise<StartedServer> {
     }
     migrationSummary = await ensureMigrations(embeddedConnectionString, "Embedded PostgreSQL", {
       autoApply: shouldAutoApplyFirstRunMigrations,
+      applyAllowed: config.runtimeControls.migrationsApplyAllowed,
     });
   
     db = createDb(embeddedConnectionString);
@@ -527,12 +563,19 @@ export async function startServer(): Promise<StartedServer> {
   let resolveSessionFromHeaders:
     | ((headers: Headers) => Promise<BetterAuthSessionResult | null>)
     | undefined;
-  if (config.deploymentMode === "local_trusted") {
+  if (config.deploymentMode === "local_trusted" && config.runtimeControls.startupReconciliationEnabled) {
     await ensureLocalTrustedBoardPrincipal(db as any);
   }
-  const accessBackfill = await backfillPrincipalAccessCompatibility(db as any);
-  if (accessBackfill.agentMembershipsInserted > 0 || accessBackfill.humanGrantsInserted > 0) {
-    logger.info(accessBackfill, "Backfilled principal access compatibility records");
+  if (config.runtimeControls.startupReconciliationEnabled) {
+    const accessBackfill = await backfillPrincipalAccessCompatibility(db as any);
+    if (accessBackfill.agentMembershipsInserted > 0 || accessBackfill.humanGrantsInserted > 0) {
+      logger.info(accessBackfill, "Backfilled principal access compatibility records");
+    }
+  } else {
+    logger.warn(
+      { runtimeRole: config.runtimeRole },
+      "startup principal/access reconciliation disabled by runtime role",
+    );
   }
   if (config.deploymentMode === "authenticated") {
     const {
@@ -571,6 +614,28 @@ export async function startServer(): Promise<StartedServer> {
   if (resolvedEmbeddedPostgresPort !== null && resolvedEmbeddedPostgresPort !== config.embeddedPostgresPort) {
     config.embeddedPostgresPort = resolvedEmbeddedPostgresPort;
   }
+  logger.info(
+    {
+      runtimeRole: config.runtimeRole,
+      disabledSystems: config.runtimeControls.disabledSystems,
+      migrationMode: config.runtimeControls.migrationMode,
+      database:
+        startupDbInfo.mode === "external-postgres"
+          ? summarizePostgresTarget(startupDbInfo.connectionString)
+          : {
+              mode: "embedded-postgres",
+              host: "127.0.0.1",
+              port: String(startupDbInfo.port),
+              database: "paperclip",
+              user: "paperclip",
+            },
+      bind: { host: config.host, port: listenPort },
+      backupSchedulerEnabled: config.runtimeControls.databaseBackupSchedulerEnabled,
+      pluginSchedulerEnabled: config.runtimeControls.pluginSchedulerEnabled,
+      pluginWorkersEnabled: config.runtimeControls.pluginWorkersEnabled,
+    },
+    "Paperclip runtime role startup controls",
+  );
   maybePersistWorktreeRuntimePorts({
     serverPort: listenPort,
     databasePort: resolvedEmbeddedPostgresPort,
@@ -661,6 +726,7 @@ export async function startServer(): Promise<StartedServer> {
     bindHost: config.host,
     authReady,
     companyDeletionEnabled: config.companyDeletionEnabled,
+    runtimeControls: config.runtimeControls,
     pluginMigrationDb: pluginMigrationDb as any,
     betterAuthHandler,
     resolveSession,
@@ -704,76 +770,84 @@ export async function startServer(): Promise<StartedServer> {
     resolveSessionFromHeaders,
   });
 
-  void reconcilePersistedRuntimeServicesOnStartup(db as any)
-    .then((result) => {
-      if (result.reconciled > 0) {
-        logger.warn(
-          { reconciled: result.reconciled },
-          "reconciled persisted runtime services from a previous server process",
-        );
-      }
-    })
-    .catch((err) => {
-      logger.error({ err }, "startup reconciliation of persisted runtime services failed");
-    });
+  if (config.runtimeControls.startupReconciliationEnabled) {
+    void reconcilePersistedRuntimeServicesOnStartup(db as any)
+      .then((result) => {
+        if (result.reconciled > 0) {
+          logger.warn(
+            { reconciled: result.reconciled },
+            "reconciled persisted runtime services from a previous server process",
+          );
+        }
+      })
+      .catch((err) => {
+        logger.error({ err }, "startup reconciliation of persisted runtime services failed");
+      });
 
-  void reconcileCloudUpstreamRunsOnStartup(db as any)
-    .then((result) => {
-      if (result.reconciled > 0) {
-        logger.warn(
-          { reconciled: result.reconciled },
-          "reconciled cloud upstream runs from a previous server process",
-        );
-      }
-    })
-    .catch((err) => {
-      logger.error({ err }, "startup reconciliation of cloud upstream runs failed");
-    });
+    void reconcileCloudUpstreamRunsOnStartup(db as any)
+      .then((result) => {
+        if (result.reconciled > 0) {
+          logger.warn(
+            { reconciled: result.reconciled },
+            "reconciled cloud upstream runs from a previous server process",
+          );
+        }
+      })
+      .catch((err) => {
+        logger.error({ err }, "startup reconciliation of cloud upstream runs failed");
+      });
 
-  // Backfill auth.json into any already-isolated codex_local managed home that
-  // was created by the #8272 isolation guard before the Phase 1 seeding fix.
-  // Idempotent; the Phase 1 execute-time seeding covers new strandings.
-  void reconcileCodexLocalManagedHomesOnStartup(db)
-    .then((result) => {
-      if (result.seeded > 0 || result.failed > 0) {
-        logger.warn(
-          { seeded: result.seeded, failed: result.failed, scanned: result.scanned },
-          "reconciled codex_local managed homes (backfilled missing auth)",
-        );
-      }
-      if (result.sourceAuthMissing > 0) {
-        logger.warn(
-          { sourceAuthMissing: result.sourceAuthMissing, scanned: result.scanned },
-          "could not backfill codex_local managed homes because shared Codex auth is missing",
-        );
-      }
-    })
-    .catch((err) => {
-      logger.error({ err }, "startup reconciliation of codex_local managed homes failed");
-    });
+    // Backfill auth.json into any already-isolated codex_local managed home that
+    // was created by the #8272 isolation guard before the Phase 1 seeding fix.
+    // Idempotent; the Phase 1 execute-time seeding covers new strandings.
+    void reconcileCodexLocalManagedHomesOnStartup(db)
+      .then((result) => {
+        if (result.seeded > 0 || result.failed > 0) {
+          logger.warn(
+            { seeded: result.seeded, failed: result.failed, scanned: result.scanned },
+            "reconciled codex_local managed homes (backfilled missing auth)",
+          );
+        }
+        if (result.sourceAuthMissing > 0) {
+          logger.warn(
+            { sourceAuthMissing: result.sourceAuthMissing, scanned: result.scanned },
+            "could not backfill codex_local managed homes because shared Codex auth is missing",
+          );
+        }
+      })
+      .catch((err) => {
+        logger.error({ err }, "startup reconciliation of codex_local managed homes failed");
+      });
+  } else {
+    logger.warn({ runtimeRole: config.runtimeRole }, "startup runtime/cloud/codex reconciliation disabled by runtime role");
+  }
 
   // Force the instance onto the Kubernetes sandbox provider when configured via
   // env (PAPERCLIP_EXECUTION_MODE=kubernetes). Runs BEFORE the heartbeat resumes
   // queued runs so the policy + managed k8s environments are in place. A bad
   // PAPERCLIP_EXECUTION_MODE / PAPERCLIP_K8S_* value throws and fails startup
   // (fail-loud) rather than silently allowing local execution.
-  try {
-    const policyResult = await bootstrapExecutionPolicyFromEnv(db as any);
-    if (policyResult) {
-      logger.warn(
-        {
-          executionMode: policyResult.executionMode,
-          companiesConfigured: policyResult.companiesConfigured,
-        },
-        "forced execution policy applied at startup",
-      );
+  if (config.runtimeControls.startupReconciliationEnabled) {
+    try {
+      const policyResult = await bootstrapExecutionPolicyFromEnv(db as any);
+      if (policyResult) {
+        logger.warn(
+          {
+            executionMode: policyResult.executionMode,
+            companiesConfigured: policyResult.companiesConfigured,
+          },
+          "forced execution policy applied at startup",
+        );
+      }
+    } catch (err) {
+      logger.error({ err }, "failed to apply forced execution policy from environment");
+      throw err;
     }
-  } catch (err) {
-    logger.error({ err }, "failed to apply forced execution policy from environment");
-    throw err;
+  } else {
+    logger.warn({ runtimeRole: config.runtimeRole }, "execution policy bootstrap disabled by runtime role");
   }
 
-  if (config.heartbeatSchedulerEnabled) {
+  if (config.runtimeControls.startupRecoveryEnabled) {
     const heartbeat = heartbeatService(db as any, { pluginWorkerManager });
     const routines = routineService(db as any, { pluginWorkerManager });
 
@@ -932,7 +1006,7 @@ export async function startServer(): Promise<StartedServer> {
     }, config.heartbeatSchedulerIntervalMs);
   }
   
-  if (config.databaseBackupEnabled) {
+  if (config.runtimeControls.databaseBackupSchedulerEnabled) {
     const backupIntervalMs = config.databaseBackupIntervalMinutes * 60 * 1000;
 
     logger.info(
@@ -1001,9 +1075,10 @@ export async function startServer(): Promise<StartedServer> {
         uiMode,
         db: startupDbInfo,
         migrationSummary,
-        heartbeatSchedulerEnabled: config.heartbeatSchedulerEnabled,
+        runtimeControls: config.runtimeControls,
+        heartbeatSchedulerEnabled: config.runtimeControls.heartbeatSchedulerEnabled,
         heartbeatSchedulerIntervalMs: config.heartbeatSchedulerIntervalMs,
-        databaseBackupEnabled: config.databaseBackupEnabled,
+        databaseBackupEnabled: config.runtimeControls.databaseBackupSchedulerEnabled,
         databaseBackupIntervalMinutes: config.databaseBackupIntervalMinutes,
         databaseBackupRetentionDays: config.databaseBackupRetentionDays,
         databaseBackupDir: config.databaseBackupDir,

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { deriveRuntimeControls } from "../runtime-roles.js";
 
 const ORIGINAL_PAPERCLIP_API_URL = process.env.PAPERCLIP_API_URL;
 const ORIGINAL_PAPERCLIP_RUNTIME_API_URL = process.env.PAPERCLIP_RUNTIME_API_URL;
@@ -15,6 +16,7 @@ const {
   feedbackExportServiceMock,
   feedbackServiceFactoryMock,
   fakeServer,
+  inspectMigrationsMock,
   loadConfigMock,
 } = vi.hoisted(() => {
   const createAppMock = vi.fn(async () => ((_: unknown, __: unknown) => {}) as never);
@@ -35,6 +37,7 @@ const {
     }),
     close: vi.fn(),
   };
+  const inspectMigrationsMock = vi.fn(async () => ({ status: "upToDate" }));
   const loadConfigMock = vi.fn();
 
   return {
@@ -46,11 +49,24 @@ const {
     feedbackExportServiceMock,
     feedbackServiceFactoryMock,
     fakeServer,
+    inspectMigrationsMock,
     loadConfigMock,
   };
 });
 
 function buildTestConfig(overrides: Record<string, unknown> = {}) {
+  const runtimeRole = typeof overrides.runtimeRole === "string" ? overrides.runtimeRole : "primary";
+  const databaseBackupEnabled =
+    typeof overrides.databaseBackupEnabled === "boolean" ? overrides.databaseBackupEnabled : false;
+  const feedbackExportBackendUrl =
+    typeof overrides.feedbackExportBackendUrl === "string" ? overrides.feedbackExportBackendUrl : "https://telemetry.example.com";
+  const feedbackExportBackendToken =
+    typeof overrides.feedbackExportBackendToken === "string" ? overrides.feedbackExportBackendToken : "telemetry-token";
+  const runtimeControls = deriveRuntimeControls({
+    role: runtimeRole,
+    databaseBackupEnabled,
+    feedbackExporterConfigured: Boolean(feedbackExportBackendUrl && feedbackExportBackendToken),
+  });
   return {
     deploymentMode: "authenticated",
     deploymentExposure: "private",
@@ -64,9 +80,10 @@ function buildTestConfig(overrides: Record<string, unknown> = {}) {
     authDisableSignUp: false,
     databaseMode: "postgres",
     databaseUrl: "postgres://paperclip:paperclip@127.0.0.1:5432/paperclip",
+    databaseMigrationUrl: undefined,
     embeddedPostgresDataDir: "/tmp/paperclip-test-db",
     embeddedPostgresPort: 54329,
-    databaseBackupEnabled: false,
+    databaseBackupEnabled,
     databaseBackupIntervalMinutes: 60,
     databaseBackupRetentionDays: 30,
     databaseBackupDir: "/tmp/paperclip-test-backups",
@@ -82,8 +99,10 @@ function buildTestConfig(overrides: Record<string, unknown> = {}) {
     storageS3Endpoint: undefined,
     storageS3Prefix: "",
     storageS3ForcePathStyle: false,
-    feedbackExportBackendUrl: "https://telemetry.example.com",
-    feedbackExportBackendToken: "telemetry-token",
+    feedbackExportBackendUrl,
+    feedbackExportBackendToken,
+    runtimeRole,
+    runtimeControls,
     heartbeatSchedulerEnabled: false,
     heartbeatSchedulerIntervalMs: 30000,
     companyDeletionEnabled: false,
@@ -103,7 +122,7 @@ vi.mock("@paperclipai/db", () => ({
   createDb: createDbMock,
   ensurePostgresDatabase: vi.fn(),
   getPostgresDataDirectory: vi.fn(),
-  inspectMigrations: vi.fn(async () => ({ status: "upToDate" })),
+  inspectMigrations: inspectMigrationsMock,
   applyPendingMigrations: vi.fn(),
   reconcilePendingMigrationHistory: vi.fn(async () => ({ repairedMigrations: [] })),
   formatDatabaseBackupResult: vi.fn(() => "ok"),
@@ -214,6 +233,7 @@ import { startServer } from "../index.ts";
 describe("startServer feedback export wiring", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    inspectMigrationsMock.mockResolvedValue({ status: "upToDate" });
     loadConfigMock.mockReturnValue(buildTestConfig());
     createBetterAuthInstanceMock.mockReturnValue({});
     deriveAuthTrustedOriginsMock.mockReturnValue([]);
@@ -261,11 +281,33 @@ describe("startServer feedback export wiring", () => {
     );
     expect(createDbMock).not.toHaveBeenCalled();
   });
+
+  it("refuses to apply pending migrations outside primary", async () => {
+    inspectMigrationsMock.mockResolvedValue({
+      status: "needsMigrations",
+      reason: "pending-migrations",
+      pendingMigrations: ["0001_pending.sql"],
+    });
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      runtimeRole: "api-only",
+      runtimeControls: deriveRuntimeControls({
+        role: "api-only",
+        databaseBackupEnabled: false,
+        feedbackExporterConfigured: true,
+      }),
+    }));
+
+    await expect(startServer()).rejects.toThrow(
+      "PAPERCLIP_RUNTIME_ROLE=api-only refuses migration apply",
+    );
+    expect(createAppMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("startServer authenticated auth origin setup", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    inspectMigrationsMock.mockResolvedValue({ status: "upToDate" });
     loadConfigMock.mockReturnValue(buildTestConfig());
     createBetterAuthInstanceMock.mockReturnValue({});
     deriveAuthTrustedOriginsMock.mockReturnValue([]);
@@ -312,6 +354,7 @@ describe("startServer authenticated auth origin setup", () => {
 describe("startServer PAPERCLIP_API_URL handling", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    inspectMigrationsMock.mockResolvedValue({ status: "upToDate" });
     loadConfigMock.mockReturnValue(buildTestConfig());
     process.env.BETTER_AUTH_SECRET = "test-secret";
     delete process.env.PAPERCLIP_API_URL;

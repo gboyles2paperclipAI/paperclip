@@ -29,6 +29,7 @@ import {
   resolveDefaultStorageDir,
   resolveHomeAwarePath,
 } from "./home-paths.js";
+import { deriveRuntimeControls, type RuntimeControls, type RuntimeRole } from "./runtime-roles.js";
 
 const PAPERCLIP_ENV_FILE_PATH = resolvePaperclipEnvPath();
 if (existsSync(PAPERCLIP_ENV_FILE_PATH)) {
@@ -83,6 +84,8 @@ export interface Config {
   storageS3ForcePathStyle: boolean;
   feedbackExportBackendUrl: string | undefined;
   feedbackExportBackendToken: string | undefined;
+  runtimeRole: RuntimeRole;
+  runtimeControls: RuntimeControls;
   heartbeatSchedulerEnabled: boolean;
   heartbeatSchedulerIntervalMs: number;
   companyDeletionEnabled: boolean;
@@ -265,6 +268,14 @@ export function loadConfig(): Config {
       fileDatabaseBackup?.dir ??
       resolveDefaultBackupDir(),
   );
+  const runtimeControls = deriveRuntimeControls({
+    role: process.env.PAPERCLIP_RUNTIME_ROLE,
+    heartbeatSchedulerEnv: process.env.HEARTBEAT_SCHEDULER_ENABLED,
+    databaseBackupEnabled,
+    feedbackExporterConfigured: Boolean(feedbackExportBackendUrl && feedbackExportBackendToken),
+    migrationAutoApplyEnv: process.env.PAPERCLIP_MIGRATION_AUTO_APPLY,
+    migrationPromptEnv: process.env.PAPERCLIP_MIGRATION_PROMPT,
+  });
   const bindValidationErrors = validateConfiguredBindMode({
     deploymentMode,
     deploymentExposure,
@@ -329,7 +340,9 @@ export function loadConfig(): Config {
     storageS3ForcePathStyle,
     feedbackExportBackendUrl,
     feedbackExportBackendToken,
-    heartbeatSchedulerEnabled: process.env.HEARTBEAT_SCHEDULER_ENABLED !== "false",
+    runtimeRole: runtimeControls.role,
+    runtimeControls,
+    heartbeatSchedulerEnabled: runtimeControls.heartbeatSchedulerEnabled,
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
     companyDeletionEnabled,
     telemetryEnabled: fileConfig?.telemetry?.enabled ?? true,
