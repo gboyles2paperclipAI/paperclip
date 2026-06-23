@@ -13,10 +13,23 @@
   },
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
+    ".": {
+      "production": "./dist/src/index.js",
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
     "./package.json": "./package.json",
-    "./types": "./src/types.ts",
-    "./catalog.json": "./generated/catalog.json"
+    "./types": {
+      "production": "./dist/src/types.js",
+      "types": "./src/types.ts",
+      "import": "./src/types.ts",
+      "default": "./src/types.ts"
+    },
+    "./catalog.json": {
+      "production": "./dist/generated/catalog.json",
+      "default": "./generated/catalog.json"
+    }
   },
   "publishConfig": {
     "access": "public",
