@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { REDACTED_EVENT_VALUE, redactEventPayload, redactSensitiveText, sanitizeRecord } from "../redaction.js";
+import { TAILSCALE_AUTH_URL_REDACTED, makeTailscaleAuthUrlRe, redactKnownAuthUrls } from "@paperclipai/adapter-utils";
 
 describe("redaction", () => {
   it("redacts sensitive keys and nested secret values", () => {
@@ -134,5 +135,65 @@ describe("redaction", () => {
 
     expect(result?.args).toEqual(["--api-key", "not-a-command-secret"]);
     expect(result?.argv).toEqual(["--api-key", REDACTED_EVENT_VALUE]);
+  });
+
+  it("redacts Tailscale auth-challenge URL from command text (FUL-12630)", () => {
+    const syntheticUrl = "https://login.tailscale.com/a/SYNTHETIC_TEST_TOKEN";
+    const input = `Authenticate at ${syntheticUrl} to continue`;
+
+    const result = redactSensitiveText(input);
+
+    expect(result).toContain(TAILSCALE_AUTH_URL_REDACTED);
+    expect(result).not.toContain("SYNTHETIC_TEST_TOKEN");
+    expect(result).not.toContain(syntheticUrl);
+  });
+
+  it("redacts Tailscale auth URL from event payload command fields (FUL-12630)", () => {
+    const syntheticUrl = "https://login.tailscale.com/a/SYNTHETIC_TEST_TOKEN";
+    const result = redactEventPayload({
+      command: `ssh user@host && Need to authenticate: ${syntheticUrl}`,
+    });
+
+    expect(result?.command).toContain(TAILSCALE_AUTH_URL_REDACTED);
+    expect(String(result?.command)).not.toContain("SYNTHETIC_TEST_TOKEN");
+  });
+});
+
+describe("redactKnownAuthUrls (transcript-level Tailscale guard — FUL-12630)", () => {
+  it("replaces synthetic Tailscale auth URL with labelled placeholder", () => {
+    const syntheticUrl = "https://login.tailscale.com/a/SYNTHETIC_TEST_TOKEN";
+    const input = `# Tailscale needs auth\n${syntheticUrl}\nContinue after login.`;
+
+    const result = redactKnownAuthUrls(input);
+
+    expect(result).toContain(TAILSCALE_AUTH_URL_REDACTED);
+    expect(result).not.toContain("SYNTHETIC_TEST_TOKEN");
+    expect(result).not.toContain(syntheticUrl);
+  });
+
+  it("leaves non-Tailscale URLs untouched", () => {
+    const safe = "https://example.com/path/to/resource";
+    expect(redactKnownAuthUrls(safe)).toBe(safe);
+  });
+
+  it("handles multiple Tailscale URLs in one string", () => {
+    const url1 = "https://login.tailscale.com/a/TOKEN_ONE";
+    const url2 = "https://login.tailscale.com/a/TOKEN_TWO";
+    const input = `First: ${url1} and second: ${url2}`;
+
+    const result = redactKnownAuthUrls(input);
+
+    expect(result).not.toContain("TOKEN_ONE");
+    expect(result).not.toContain("TOKEN_TWO");
+    expect((result.match(/\[TAILSCALE_AUTH_URL_REDACTED\]/g) ?? []).length).toBe(2);
+  });
+
+  it("makeTailscaleAuthUrlRe returns a fresh regex each call (no shared lastIndex)", () => {
+    const url = "https://login.tailscale.com/a/SYNTHETIC_TEST_TOKEN";
+    const re1 = makeTailscaleAuthUrlRe();
+    const re2 = makeTailscaleAuthUrlRe();
+    expect(re1).not.toBe(re2);
+    expect(re1.test(url)).toBe(true);
+    expect(re2.test(url)).toBe(true);
   });
 });

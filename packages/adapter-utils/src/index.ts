@@ -55,10 +55,13 @@ export {
   redactHomePathUserSegments,
   redactHomePathUserSegmentsInValue,
   redactTranscriptEntryPaths,
+  redactKnownAuthUrls,
 } from "./log-redaction.js";
 export {
   REDACTED_COMMAND_TEXT_VALUE,
   redactCommandText,
+  TAILSCALE_AUTH_URL_REDACTED,
+  makeTailscaleAuthUrlRe,
 } from "./command-redaction.js";
 export { buildSandboxNpmInstallCommand } from "./sandbox-install-command.js";
 export { inferOpenAiCompatibleBiller } from "./billing.js";

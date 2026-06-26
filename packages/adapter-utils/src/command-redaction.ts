@@ -16,6 +16,14 @@ const COMMAND_OPENAI_KEY_RE = /\bsk-[A-Za-z0-9_-]{12,}\b/g;
 const COMMAND_GITHUB_TOKEN_RE = /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g;
 const COMMAND_JWT_RE =
   /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,})?\b/g;
+// Tailscale SSH auth-challenge URLs (SH-3 follow-up — FUL-12630).
+// These appear in SSH stderr when Tailscale requires additional authentication.
+// Pattern is exported for use in transcript-level redaction (log-redaction.ts).
+// Factory function prevents shared lastIndex state across callers using /g flag.
+export const TAILSCALE_AUTH_URL_REDACTED = "[TAILSCALE_AUTH_URL_REDACTED]";
+export function makeTailscaleAuthUrlRe(): RegExp {
+  return /https:\/\/login\.tailscale\.com\/a\/[^\s"'`\r\n]+/g;
+}
 const COMMAND_SECRET_HINTS = [
   "api",
   "key",
@@ -54,5 +62,6 @@ export function redactCommandText(command: string, redactedValue = REDACTED_COMM
     )
     .replace(COMMAND_OPENAI_KEY_RE, redactedValue)
     .replace(COMMAND_GITHUB_TOKEN_RE, redactedValue)
-    .replace(COMMAND_JWT_RE, redactedValue);
+    .replace(COMMAND_JWT_RE, redactedValue)
+    .replace(makeTailscaleAuthUrlRe(), TAILSCALE_AUTH_URL_REDACTED);
 }

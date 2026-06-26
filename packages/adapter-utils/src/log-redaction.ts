@@ -1,4 +1,5 @@
 import type { TranscriptEntry } from "./types.js";
+import { makeTailscaleAuthUrlRe, TAILSCALE_AUTH_URL_REDACTED } from "./command-redaction.js";
 
 export const REDACTED_HOME_PATH_USER = "*";
 
@@ -33,6 +34,14 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+/**
+ * Redacts known auth/challenge URLs that must not appear in transcript output.
+ * Currently covers Tailscale SSH auth-challenge URLs (FUL-12630).
+ */
+export function redactKnownAuthUrls(text: string): string {
+  return text.replace(makeTailscaleAuthUrlRe(), TAILSCALE_AUTH_URL_REDACTED);
+}
+
 export function redactHomePathUserSegments(text: string, opts?: HomePathRedactionOptions): string {
   if (opts?.enabled === false) return text;
   let result = text;
@@ -65,11 +74,12 @@ export function redactTranscriptEntryPaths(entry: TranscriptEntry, opts?: HomePa
     case "assistant":
     case "thinking":
     case "user":
-    case "stderr":
     case "system":
-    case "stdout":
     case "diff":
       return { ...entry, text: redactHomePathUserSegments(entry.text, opts) };
+    case "stdout":
+    case "stderr":
+      return { ...entry, text: redactKnownAuthUrls(redactHomePathUserSegments(entry.text, opts)) };
     case "tool_call":
       return {
         ...entry,
