@@ -300,6 +300,28 @@ Do not switch the service to compiled runtime while active work is above the res
 - `paperclip01` guarded backup should continue to provide app-level safety evidence.
 - Before restart-gated database changes, verify the latest backup timestamp and that the target backup volume has enough free space.
 
+## Fleet Evidence Scripts
+
+The source-controlled copies of the active Help2day fleet evidence scripts live under `scripts/ops/help2day/`:
+
+- `fleet-health-check.sh` records daily service, listener, backup, filesystem, and host reachability evidence.
+- `monthly-restore-test.sh` extracts representative files from the latest app-state archive and records restore-test evidence.
+
+The production timers may still point at the original fleet-finalization evidence directory until a scheduled install step updates the systemd units:
+
+- `fleet-health-check.service`
+- `fleet-health-check.timer`
+- `fleet-monthly-restore-test.service`
+- `fleet-monthly-restore-test.timer`
+
+Before switching the units, validate the tracked scripts with `bash -n`, verify the target evidence directory, then update only `ExecStart` and the matching `ReadWritePaths` if the write location changes. Keep the evidence directory default unchanged unless a migration plan explicitly moves the generated monitoring and restore-test artifacts.
+
+Rollback:
+
+- Restore the prior `ExecStart` paths in the two service units.
+- Run `sudo systemctl daemon-reload`.
+- Run each service once or wait for the next timer, then confirm the latest TSV symlinks update under the evidence directory.
+
 ## Routine Stability Checks
 
 During active operation, sample:
