@@ -101,6 +101,20 @@ describe("successful run handoff decision", () => {
     });
   });
 
+  it("does not queue for standing issues intentionally left in progress", () => {
+    expect(decide({
+      issue: {
+        ...issue,
+        executionPolicy: {
+          standing: { reason: "Provider health standing log" },
+        },
+      } as any,
+    })).toEqual({
+      kind: "skip",
+      reason: "issue is a standing issue",
+    });
+  });
+
   it("does not queue when a successful run records an accepted next-action path", () => {
     expect(decide({ issue: { ...issue, status: "in_review" } as any })).toEqual({
       kind: "skip",
