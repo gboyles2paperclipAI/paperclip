@@ -442,11 +442,16 @@ export interface IssueExecutionMonitorPolicy {
   recoveryPolicy?: IssueExecutionMonitorRecoveryPolicy | null;
 }
 
+export interface IssueExecutionStandingPolicy {
+  reason?: string | null;
+}
+
 export interface IssueExecutionPolicy {
   mode: IssueExecutionPolicyMode;
   commentRequired: boolean;
   stages: IssueExecutionStage[];
   monitor?: IssueExecutionMonitorPolicy | null;
+  standing?: IssueExecutionStandingPolicy | null;
   reviewPreset?: LowTrustReviewPresetPolicy;
   authorizationPolicy?: TrustAuthorizationPolicy;
 }

@@ -194,11 +194,16 @@ export const issueExecutionMonitorPolicySchema = z.object({
   recoveryPolicy: z.enum(ISSUE_EXECUTION_MONITOR_RECOVERY_POLICIES).optional().nullable().default(null),
 });
 
+export const issueExecutionStandingPolicySchema = z.object({
+  reason: z.string().trim().max(500).optional().nullable().default(null),
+});
+
 export const issueExecutionPolicySchema = z.object({
   mode: z.enum(ISSUE_EXECUTION_POLICY_MODES).optional().default("normal"),
   commentRequired: z.boolean().optional().default(true),
   stages: z.array(issueExecutionStageSchema).default([]),
   monitor: issueExecutionMonitorPolicySchema.optional().nullable(),
+  standing: issueExecutionStandingPolicySchema.optional().nullable(),
   reviewPreset: lowTrustReviewPresetPolicySchema.optional(),
   authorizationPolicy: trustAuthorizationPolicySchema.optional(),
 });
