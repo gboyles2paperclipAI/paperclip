@@ -20,6 +20,7 @@ const mockInteractionService = vi.hoisted(() => ({
   expireRequestConfirmationsSupersededByHistoricalComments: vi.fn(),
   answerQuestions: vi.fn(),
   cancelQuestions: vi.fn(),
+  dismissInteraction: vi.fn(),
 }));
 
 const mockHeartbeatService = vi.hoisted(() => ({
@@ -302,6 +303,29 @@ describe.sequential("issue thread interaction routes", () => {
         cancelled: true,
         cancellationReason: null,
         summaryMarkdown: null,
+      },
+      createdAt: "2026-04-20T12:00:00.000Z",
+      updatedAt: "2026-04-20T12:05:00.000Z",
+      resolvedAt: "2026-04-20T12:05:00.000Z",
+    });
+    mockInteractionService.dismissInteraction.mockResolvedValue({
+      id: "interaction-1",
+      companyId: "company-1",
+      issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      kind: "request_confirmation",
+      status: "cancelled",
+      continuationPolicy: "wake_assignee",
+      idempotencyKey: null,
+      sourceCommentId: null,
+      sourceRunId: "run-1",
+      payload: {
+        version: 1,
+        prompt: "Approve plan?",
+      },
+      result: {
+        version: 1,
+        outcome: "rejected",
+        reason: null,
       },
       createdAt: "2026-04-20T12:00:00.000Z",
       updatedAt: "2026-04-20T12:05:00.000Z",
@@ -1035,5 +1059,84 @@ describe.sequential("issue thread interaction routes", () => {
         userId: null,
       },
     );
+  });
+
+  it("board user can dismiss any pending interaction and receives a continuation wake", async () => {
+    const app = await createApp();
+
+    const res = await request(app)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions/interaction-1/dismiss")
+      .send({ reason: "Stale, agent no longer needs approval" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("cancelled");
+    expect(mockInteractionService.dismissInteraction).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
+      "interaction-1",
+      { reason: "Stale, agent no longer needs approval" },
+      expect.objectContaining({ userId: "local-board" }),
+    );
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      ASSIGNEE_AGENT_ID,
+      expect.objectContaining({
+        reason: "issue_commented",
+        payload: expect.objectContaining({
+          interactionId: "interaction-1",
+          interactionKind: "request_confirmation",
+          interactionStatus: "cancelled",
+        }),
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.thread_interaction_dismissed",
+        details: expect.objectContaining({
+          interactionId: "interaction-1",
+          interactionKind: "request_confirmation",
+          interactionStatus: "cancelled",
+          dismissalReason: "Stale, agent no longer needs approval",
+        }),
+      }),
+    );
+  });
+
+  it("assignee agent can dismiss a pending interaction", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId: ASSIGNEE_AGENT_ID,
+      companyId: "company-1",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions/interaction-1/dismiss")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("cancelled");
+    expect(mockInteractionService.dismissInteraction).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
+      "interaction-1",
+      {},
+      expect.objectContaining({ agentId: ASSIGNEE_AGENT_ID }),
+    );
+  });
+
+  it("non-assignee agent cannot dismiss an interaction", async () => {
+    const NON_ASSIGNEE_AGENT_ID = "33333333-3333-4333-8333-333333333333";
+    const app = await createApp({
+      type: "agent",
+      agentId: NON_ASSIGNEE_AGENT_ID,
+      companyId: "company-1",
+      runId: "run-2",
+    });
+
+    const res = await request(app)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions/interaction-1/dismiss")
+      .send({});
+
+    expect(res.status).toBe(403);
+    expect(mockInteractionService.dismissInteraction).not.toHaveBeenCalled();
   });
 });
