@@ -15,7 +15,9 @@ import type {
   AskUserQuestionsInteraction,
   CancelIssueThreadInteraction,
   CreateIssueThreadInteraction,
+  DismissIssueThreadInteraction,
   IssueThreadInteraction,
+  IssueThreadInteractionResult,
   RequestCheckboxConfirmationInteraction,
   RequestConfirmationInteraction,
   RequestConfirmationTarget,
@@ -30,6 +32,7 @@ import {
   askUserQuestionsResultSchema,
   cancelIssueThreadInteractionSchema,
   createIssueThreadInteractionSchema,
+  dismissIssueThreadInteractionSchema,
   rejectIssueThreadInteractionSchema,
   requestCheckboxConfirmationPayloadSchema,
   requestCheckboxConfirmationResultSchema,
@@ -1452,6 +1455,141 @@ export function issueThreadInteractionService(db: Db) {
 
       await touchIssue(db, issue.id);
       return hydrateInteraction(updated);
+    },
+
+    dismissInteraction: async (
+      issue: { id: string; companyId: string },
+      interactionId: string,
+      input: DismissIssueThreadInteraction,
+      actor: InteractionActor,
+    ) => {
+      const data = dismissIssueThreadInteractionSchema.parse(input);
+      const current = await db
+        .select()
+        .from(issueThreadInteractions)
+        .where(eq(issueThreadInteractions.id, interactionId))
+        .then((rows) => rows[0] ?? null);
+
+      if (!current) throw notFound("Interaction not found");
+      if (current.companyId !== issue.companyId || current.issueId !== issue.id) {
+        throw notFound("Interaction not found");
+      }
+      if (current.status !== "pending") {
+        throw conflict("Interaction has already been resolved");
+      }
+
+      const reason = data.reason?.trim() || null;
+      let result: IssueThreadInteractionResult;
+      switch (current.kind) {
+        case "ask_user_questions":
+          result = {
+            version: 1,
+            answers: [],
+            cancelled: true,
+            cancellationReason: reason,
+            summaryMarkdown: null,
+          };
+          break;
+        case "suggest_tasks":
+          result = {
+            version: 1,
+            rejectionReason: reason,
+          };
+          break;
+        case "request_confirmation":
+        case "request_checkbox_confirmation":
+        default:
+          result = {
+            version: 1,
+            outcome: "rejected",
+            reason,
+          };
+          break;
+      }
+
+      const now = new Date();
+      const [updated] = await db
+        .update(issueThreadInteractions)
+        .set({
+          status: "cancelled",
+          result,
+          resolvedByAgentId: actor.agentId ?? null,
+          resolvedByUserId: actor.userId ?? null,
+          resolvedAt: now,
+          updatedAt: now,
+        })
+        .where(and(
+          eq(issueThreadInteractions.id, interactionId),
+          eq(issueThreadInteractions.status, "pending"),
+        ))
+        .returning();
+
+      if (!updated) {
+        throw conflict("Interaction has already been resolved");
+      }
+
+      await touchIssue(db, issue.id);
+      return hydrateInteraction(updated);
+    },
+
+    /**
+     * Recovery utility: find and expire any pending request_confirmation interactions on
+     * an issue whose prompts describe agent reviewer gates instead of true Board decisions.
+     * Returns the list of interactions that were expired.
+     *
+     * Used by the recovery system to clean up bad Board-facing cards left by agents that
+     * pre-date the guardrail in `create()`.
+     */
+    expireAgentReviewGateConfirmations: async (
+      issue: { id: string; companyId: string },
+      actor: InteractionActor,
+    ) => {
+      const rows = await db
+        .select()
+        .from(issueThreadInteractions)
+        .where(and(
+          eq(issueThreadInteractions.companyId, issue.companyId),
+          eq(issueThreadInteractions.issueId, issue.id),
+          eq(issueThreadInteractions.kind, "request_confirmation"),
+          eq(issueThreadInteractions.status, "pending"),
+        ));
+
+      const stale = rows.filter((row) => {
+        const payload = requestConfirmationPayloadSchema.parse(row.payload);
+        return detectAgentReviewGateInConfirmationPrompt(payload.prompt ?? "") !== null;
+      });
+
+      if (stale.length === 0) return [];
+
+      const now = new Date();
+      const expired: IssueThreadInteraction[] = [];
+      for (const row of stale) {
+        const [updated] = await db
+          .update(issueThreadInteractions)
+          .set({
+            status: "expired",
+            result: {
+              version: 1,
+              outcome: "superseded_by_comment",
+              commentId: null,
+            },
+            resolvedByAgentId: actor.agentId ?? null,
+            resolvedByUserId: actor.userId ?? null,
+            resolvedAt: now,
+            updatedAt: now,
+          })
+          .where(and(
+            eq(issueThreadInteractions.id, row.id),
+            eq(issueThreadInteractions.status, "pending"),
+          ))
+          .returning();
+        if (updated) expired.push(hydrateInteraction(updated));
+      }
+
+      if (expired.length > 0) {
+        await touchIssue(db, issue.id);
+      }
+      return expired;
     },
   };
 }
