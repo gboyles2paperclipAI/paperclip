@@ -23,6 +23,7 @@ import {
   acceptIssueThreadInteractionSchema,
   attachmentArtifactWorkProductMetadataSchema,
   cancelIssueThreadInteractionSchema,
+  dismissIssueThreadInteractionSchema,
   companySearchQuerySchema,
   createIssueAttachmentMetadataSchema,
   createIssueThreadInteractionSchema,
@@ -92,7 +93,7 @@ import {
 } from "../services/index.js";
 import { logger } from "../middleware/logger.js";
 import { conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
-import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertBoardOrAgent, assertCompanyAccess, getActorInfo } from "./authz.js";
 import {
   assertNoAgentHostWorkspaceCommandMutation,
   collectIssueWorkspaceCommandPaths,
@@ -6374,6 +6375,65 @@ export function issueRoutes(
         interaction,
         actor,
         source: "issue.interaction.cancel",
+      });
+
+      res.json(interaction);
+    },
+  );
+
+  router.post(
+    "/issues/:id/interactions/:interactionId/dismiss",
+    validate(dismissIssueThreadInteractionSchema),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const interactionId = req.params.interactionId as string;
+      const issue = await svc.getById(id);
+      if (!issue) {
+        res.status(404).json({ error: "Issue not found" });
+        return;
+      }
+      assertCompanyAccess(req, issue.companyId);
+      assertBoardOrAgent(req);
+      if (req.actor.type === "agent") {
+        if (!req.actor.agentId) {
+          res.status(403).json({ error: "Agent authentication required" });
+          return;
+        }
+        if (issue.assigneeAgentId !== null && issue.assigneeAgentId !== req.actor.agentId) {
+          res.status(403).json({ error: "Only the assignee agent can dismiss interactions" });
+          return;
+        }
+      }
+
+      const actor = getActorInfo(req);
+      const interaction = await issueThreadInteractionService(db).dismissInteraction(issue, interactionId, req.body, {
+        agentId: actor.agentId,
+        userId: actor.actorType === "user" ? actor.actorId : null,
+      });
+
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.thread_interaction_dismissed",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          interactionId: interaction.id,
+          interactionKind: interaction.kind,
+          interactionStatus: interaction.status,
+          dismissalReason: req.body.reason?.trim() || null,
+        },
+      });
+
+      queueResolvedInteractionContinuationWakeup({
+        heartbeat,
+        issue,
+        interaction,
+        actor,
+        source: "issue.interaction.dismiss",
       });
 
       res.json(interaction);
