@@ -20,7 +20,8 @@ const COMMAND_JWT_RE =
 // Catches postgresql://, postgres://, mysql://, mongodb://, redis:// values in any output.
 // Factory function prevents shared lastIndex state across callers using /g flag.
 export function makeDbConnectionUrlRe(): RegExp {
-  return /\b(?:postgresql?|mysql2?|mongodb?(?:\+srv)?|rediss?|mariadb|mssql):\/\/[^\s"'`\r\n]+/gi;
+  // postgres(?:ql?)? matches "postgres", "postgresq", and "postgresql" (all common aliases).
+  return /\b(?:postgres(?:ql?)?|mysql2?|mongodb?(?:\+srv)?|rediss?|mariadb|mssql):\/\/[^\s"'`\r\n]+/gi;
 }
 // Tailscale SSH auth-challenge URLs (SH-3 follow-up — FUL-12630).
 // These appear in SSH stderr when Tailscale requires additional authentication.
@@ -49,6 +50,8 @@ const COMMAND_SECRET_HINTS = [
   "ghu_",
   "ghs_",
   "ghr_",
+  // Database connection URL schemes — catches bare postgresql://, mysql://, etc.
+  "://",
 ] as const;
 
 function maybeContainsSecretText(command: string) {
