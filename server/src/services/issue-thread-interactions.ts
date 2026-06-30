@@ -15,7 +15,9 @@ import type {
   AskUserQuestionsInteraction,
   CancelIssueThreadInteraction,
   CreateIssueThreadInteraction,
+  DismissIssueThreadInteraction,
   IssueThreadInteraction,
+  IssueThreadInteractionResult,
   RequestCheckboxConfirmationInteraction,
   RequestConfirmationInteraction,
   RequestConfirmationTarget,
@@ -30,6 +32,7 @@ import {
   askUserQuestionsResultSchema,
   cancelIssueThreadInteractionSchema,
   createIssueThreadInteractionSchema,
+  dismissIssueThreadInteractionSchema,
   rejectIssueThreadInteractionSchema,
   requestCheckboxConfirmationPayloadSchema,
   requestCheckboxConfirmationResultSchema,
@@ -1489,6 +1492,81 @@ export function issueThreadInteractionService(db: Db) {
           resolvedByUserId: actor.userId ?? null,
           resolvedAt: new Date(),
           updatedAt: new Date(),
+        })
+        .where(and(
+          eq(issueThreadInteractions.id, interactionId),
+          eq(issueThreadInteractions.status, "pending"),
+        ))
+        .returning();
+
+      if (!updated) {
+        throw conflict("Interaction has already been resolved");
+      }
+
+      await touchIssue(db, issue.id);
+      return hydrateInteraction(updated);
+    },
+
+    dismissInteraction: async (
+      issue: { id: string; companyId: string },
+      interactionId: string,
+      input: DismissIssueThreadInteraction,
+      actor: InteractionActor,
+    ) => {
+      const data = dismissIssueThreadInteractionSchema.parse(input);
+      const current = await db
+        .select()
+        .from(issueThreadInteractions)
+        .where(eq(issueThreadInteractions.id, interactionId))
+        .then((rows) => rows[0] ?? null);
+
+      if (!current) throw notFound("Interaction not found");
+      if (current.companyId !== issue.companyId || current.issueId !== issue.id) {
+        throw notFound("Interaction not found");
+      }
+      if (current.status !== "pending") {
+        throw conflict("Interaction has already been resolved");
+      }
+
+      const reason = data.reason?.trim() || null;
+      let result: IssueThreadInteractionResult;
+      switch (current.kind) {
+        case "ask_user_questions":
+          result = {
+            version: 1,
+            answers: [],
+            cancelled: true,
+            cancellationReason: reason,
+            summaryMarkdown: null,
+          };
+          break;
+        case "suggest_tasks":
+          result = {
+            version: 1,
+            rejectionReason: reason,
+          };
+          break;
+        case "request_confirmation":
+        case "request_checkbox_confirmation":
+        default:
+          result = {
+            version: 1,
+            outcome: "rejected",
+            reason,
+          };
+          break;
+      }
+
+      const now = new Date();
+      const [updated] = await db
+        .update(issueThreadInteractions)
+        .set({
+          status: "cancelled",
+          result,
+          resolvedByAgentId: actor.agentId ?? null,
+          resolvedByUserId: actor.userId ?? null,
+          resolvedAt: now,
+          updatedAt: now,
         })
         .where(and(
           eq(issueThreadInteractions.id, interactionId),
