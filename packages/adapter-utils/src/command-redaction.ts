@@ -1,7 +1,7 @@
 export const REDACTED_COMMAND_TEXT_VALUE = "***REDACTED***";
 
 const SECRET_NAME_PATTERN =
-  String.raw`[A-Za-z0-9_-]*(?:api[-_]?key|(?:access[-_]?|auth[-_]?)?token|token|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring)[A-Za-z0-9_-]*`;
+  String.raw`[A-Za-z0-9_-]*(?:api[-_]?key|(?:access[-_]?|auth[-_]?)?token|token|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring|database)[A-Za-z0-9_-]*`;
 
 const COMMAND_CLI_SECRET_OPTION_RE = new RegExp(
   String.raw`(\B-{1,2}${SECRET_NAME_PATTERN}(?:\s+|=)(["']?))[^\s"'` + "`" + String.raw`]+(\2)`,
@@ -16,6 +16,12 @@ const COMMAND_OPENAI_KEY_RE = /\bsk-[A-Za-z0-9_-]{12,}\b/g;
 const COMMAND_GITHUB_TOKEN_RE = /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g;
 const COMMAND_JWT_RE =
   /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,})?\b/g;
+// Database connection string URLs (SH-3 follow-up — FUL-14159).
+// Catches postgresql://, postgres://, mysql://, mongodb://, redis:// values in any output.
+// Factory function prevents shared lastIndex state across callers using /g flag.
+export function makeDbConnectionUrlRe(): RegExp {
+  return /\b(?:postgresql?|mysql2?|mongodb?(?:\+srv)?|rediss?|mariadb|mssql):\/\/[^\s"'`\r\n]+/gi;
+}
 // Tailscale SSH auth-challenge URLs (SH-3 follow-up — FUL-12630).
 // These appear in SSH stderr when Tailscale requires additional authentication.
 // Pattern is exported for use in transcript-level redaction (log-redaction.ts).
@@ -63,5 +69,6 @@ export function redactCommandText(command: string, redactedValue = REDACTED_COMM
     .replace(COMMAND_OPENAI_KEY_RE, redactedValue)
     .replace(COMMAND_GITHUB_TOKEN_RE, redactedValue)
     .replace(COMMAND_JWT_RE, redactedValue)
-    .replace(makeTailscaleAuthUrlRe(), TAILSCALE_AUTH_URL_REDACTED);
+    .replace(makeTailscaleAuthUrlRe(), TAILSCALE_AUTH_URL_REDACTED)
+    .replace(makeDbConnectionUrlRe(), redactedValue);
 }

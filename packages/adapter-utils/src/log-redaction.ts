@@ -1,5 +1,5 @@
 import type { TranscriptEntry } from "./types.js";
-import { makeTailscaleAuthUrlRe, TAILSCALE_AUTH_URL_REDACTED } from "./command-redaction.js";
+import { makeTailscaleAuthUrlRe, makeDbConnectionUrlRe, TAILSCALE_AUTH_URL_REDACTED, REDACTED_COMMAND_TEXT_VALUE } from "./command-redaction.js";
 
 export const REDACTED_HOME_PATH_USER = "*";
 
@@ -36,10 +36,13 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 /**
  * Redacts known auth/challenge URLs that must not appear in transcript output.
- * Currently covers Tailscale SSH auth-challenge URLs (FUL-12630).
+ * Covers Tailscale SSH auth-challenge URLs (FUL-12630) and database connection
+ * string URLs e.g. postgresql://, mysql://, mongodb:// (FUL-14159).
  */
 export function redactKnownAuthUrls(text: string): string {
-  return text.replace(makeTailscaleAuthUrlRe(), TAILSCALE_AUTH_URL_REDACTED);
+  return text
+    .replace(makeTailscaleAuthUrlRe(), TAILSCALE_AUTH_URL_REDACTED)
+    .replace(makeDbConnectionUrlRe(), REDACTED_COMMAND_TEXT_VALUE);
 }
 
 export function redactHomePathUserSegments(text: string, opts?: HomePathRedactionOptions): string {
