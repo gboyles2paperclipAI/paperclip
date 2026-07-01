@@ -39,6 +39,10 @@ describe("PF-4 shouldResetTaskSessionForWake", () => {
     expect(shouldResetTaskSessionForWake({ forceFreshSession: true })).toBe(true);
   });
 
+  it("resets for on-demand wakes so manual validation does not reuse stale agent context", () => {
+    expect(shouldResetTaskSessionForWake({ wakeSource: "on_demand" })).toBe(true);
+  });
+
   it("does not reset for issue_commented (preserve continuation context)", () => {
     expect(shouldResetTaskSessionForWake({ wakeReason: "issue_commented" })).toBe(false);
   });
@@ -86,6 +90,12 @@ describe("PF-4 describeSessionResetReason", () => {
     );
   });
 
+  it("describes on-demand wakes explicitly so run logs explain the reset", () => {
+    expect(describeSessionResetReason({ wakeSource: "on_demand" })).toBe(
+      "wake source is on_demand (manual wake starts fresh)",
+    );
+  });
+
   it("returns null for non-resetting wake reasons", () => {
     expect(describeSessionResetReason({ wakeReason: "issue_commented" })).toBeNull();
     expect(describeSessionResetReason({ wakeReason: "transient_failure_retry" })).toBeNull();
@@ -102,6 +112,7 @@ describe("PF-4 describeSessionResetReason", () => {
       { wakeReason: "execution_approval_requested" },
       { wakeReason: "execution_changes_requested" },
       { forceFreshSession: true },
+      { wakeSource: "on_demand" },
       { wakeReason: "issue_commented" },
       { wakeReason: "transient_failure_retry" },
       { wakeReason: "unknown_reason" },

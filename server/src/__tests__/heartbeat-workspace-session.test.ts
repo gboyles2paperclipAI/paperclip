@@ -1127,13 +1127,13 @@ describe("shouldResetTaskSessionForWake", () => {
     expect(shouldResetTaskSessionForWake({ wakeSource: "timer" })).toBe(false);
   });
 
-  it("preserves session context on manual on-demand invokes by default", () => {
+  it("resets session context on manual on-demand invokes", () => {
     expect(
       shouldResetTaskSessionForWake({
         wakeSource: "on_demand",
         wakeTriggerDetail: "manual",
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("resets session context when a fresh session is explicitly requested", () => {
@@ -1184,13 +1184,13 @@ describe("shouldResetTaskSessionForWake", () => {
     expect(shouldResetTaskSessionForWake({})).toBe(false);
   });
 
-  it("does not reset session context on callback on-demand invokes", () => {
+  it("resets session context on callback on-demand invokes", () => {
     expect(
       shouldResetTaskSessionForWake({
         wakeSource: "on_demand",
         wakeTriggerDetail: "callback",
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 });
 
