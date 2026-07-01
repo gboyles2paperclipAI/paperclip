@@ -1929,4 +1929,266 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       expect(expired[0]?.kind).toBe("request_confirmation");
     });
   });
+
+  describe("dismissInteraction (FUL-14276)", () => {
+    it("dismisses an ask_user_questions interaction as cancelled with an empty answer set", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Dismiss ask_user_questions");
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "ask_user_questions",
+        continuationPolicy: "wake_assignee",
+        payload: {
+          version: 1,
+          questions: [
+            {
+              id: "scope",
+              prompt: "Choose the scope",
+              selectionMode: "single",
+              required: true,
+              options: [
+                { id: "phase-1", label: "Phase 1" },
+                { id: "phase-2", label: "Phase 2" },
+              ],
+            },
+          ],
+        },
+      }, { userId: "local-board" });
+
+      const dismissed = await interactionsSvc.dismissInteraction(
+        { id: issueId, companyId },
+        created.id,
+        { reason: "No longer needed" },
+        { userId: "local-board" },
+      );
+
+      expect(dismissed.status).toBe("cancelled");
+      expect(dismissed.result).toEqual({
+        version: 1,
+        answers: [],
+        cancelled: true,
+        cancellationReason: "No longer needed",
+        summaryMarkdown: null,
+      });
+      expect(dismissed.resolvedByUserId).toBe("local-board");
+      expect(dismissed.resolvedByAgentId).toBeNull();
+      expect(dismissed.resolvedAt).not.toBeNull();
+    });
+
+    it("dismisses a suggest_tasks interaction as cancelled with a rejection reason", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Dismiss suggest_tasks");
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "suggest_tasks",
+        continuationPolicy: "wake_assignee",
+        payload: {
+          version: 1,
+          tasks: [{ clientKey: "root", title: "Create the root follow-up" }],
+        },
+      }, { userId: "local-board" });
+
+      const dismissed = await interactionsSvc.dismissInteraction(
+        { id: issueId, companyId },
+        created.id,
+        { reason: "Not needed anymore" },
+        { userId: "local-board" },
+      );
+
+      expect(dismissed.status).toBe("cancelled");
+      expect(dismissed.result).toEqual({
+        version: 1,
+        rejectionReason: "Not needed anymore",
+      });
+    });
+
+    it("dismisses a request_confirmation interaction as cancelled with a rejected outcome", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Dismiss request_confirmation");
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: {
+          version: 1,
+          prompt: "Apply this plan?",
+        },
+      }, { userId: "local-board" });
+
+      const dismissed = await interactionsSvc.dismissInteraction(
+        { id: issueId, companyId },
+        created.id,
+        { reason: "Stale, agent no longer needs approval" },
+        { userId: "local-board" },
+      );
+
+      expect(dismissed.status).toBe("cancelled");
+      expect(dismissed.result).toEqual({
+        version: 1,
+        outcome: "rejected",
+        reason: "Stale, agent no longer needs approval",
+      });
+    });
+
+    it("dismisses a request_checkbox_confirmation interaction as cancelled with a null reason when none is given", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Dismiss request_checkbox_confirmation");
+      const agentId = randomUUID();
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "CodexCoder",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_checkbox_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: {
+          version: 1,
+          prompt: "Which files should be deleted?",
+          options: [
+            { id: "file-a", label: "a.txt" },
+            { id: "file-b", label: "b.txt" },
+          ],
+        },
+      }, { userId: "local-board" });
+
+      const dismissed = await interactionsSvc.dismissInteraction(
+        { id: issueId, companyId },
+        created.id,
+        {},
+        { agentId },
+      );
+
+      expect(dismissed.status).toBe("cancelled");
+      expect(dismissed.result).toEqual({
+        version: 1,
+        outcome: "rejected",
+        reason: null,
+      });
+      expect(dismissed.resolvedByAgentId).toBe(agentId);
+      expect(dismissed.resolvedByUserId).toBeNull();
+    });
+
+    it("throws not found when the interaction belongs to a different issue in the same company", async () => {
+      const { companyId, goalId, issueId } = await seedConfirmationIssue("Dismiss issue mismatch owner");
+      const otherIssueId = randomUUID();
+      await db.insert(issues).values({
+        id: otherIssueId,
+        companyId,
+        goalId,
+        title: "Unrelated issue",
+        status: "in_progress",
+        priority: "medium",
+      });
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: { version: 1, prompt: "Apply this plan?" },
+      }, { userId: "local-board" });
+
+      await expect(interactionsSvc.dismissInteraction(
+        { id: otherIssueId, companyId },
+        created.id,
+        {},
+        { userId: "local-board" },
+      )).rejects.toThrow("Interaction not found");
+    });
+
+    it("throws not found when the interaction belongs to a different company", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Dismiss company mismatch owner");
+      const otherCompanyId = randomUUID();
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: { version: 1, prompt: "Apply this plan?" },
+      }, { userId: "local-board" });
+
+      await expect(interactionsSvc.dismissInteraction(
+        { id: issueId, companyId: otherCompanyId },
+        created.id,
+        {},
+        { userId: "local-board" },
+      )).rejects.toThrow("Interaction not found");
+    });
+
+    it("throws a conflict when dismissing an interaction that is not pending", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Dismiss already resolved");
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: { version: 1, prompt: "Apply this plan?" },
+      }, { userId: "local-board" });
+
+      await db
+        .update(issueThreadInteractions)
+        .set({ status: "rejected" })
+        .where(eq(issueThreadInteractions.id, created.id));
+
+      await expect(interactionsSvc.dismissInteraction(
+        { id: issueId, companyId },
+        created.id,
+        {},
+        { userId: "local-board" },
+      )).rejects.toThrow("Interaction has already been resolved");
+    });
+
+    it("allows only one winner when two dismiss calls race the same pending interaction", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Dismiss concurrent race");
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: { version: 1, prompt: "Apply this plan?" },
+      }, { userId: "local-board" });
+
+      const [first, second] = await Promise.allSettled([
+        interactionsSvc.dismissInteraction(
+          { id: issueId, companyId },
+          created.id,
+          { reason: "First caller" },
+          { userId: "local-board" },
+        ),
+        interactionsSvc.dismissInteraction(
+          { id: issueId, companyId },
+          created.id,
+          { reason: "Second caller" },
+          { userId: "local-board" },
+        ),
+      ]);
+
+      const outcomes = [first, second];
+      const fulfilled = outcomes.filter(
+        (outcome): outcome is PromiseFulfilledResult<Awaited<ReturnType<typeof interactionsSvc.dismissInteraction>>> =>
+          outcome.status === "fulfilled",
+      );
+      const rejected = outcomes.filter(
+        (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+      );
+
+      // Exactly one caller wins the atomic conditional update; the loser must see a
+      // conflict rather than silently overwriting the winner's result.
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect(fulfilled[0]?.value.status).toBe("cancelled");
+      expect((rejected[0]?.reason as Error).message).toBe("Interaction has already been resolved");
+
+      const winnerReason = (fulfilled[0]?.value.result as { reason?: string | null } | null)?.reason;
+
+      const rows = await db
+        .select()
+        .from(issueThreadInteractions)
+        .where(eq(issueThreadInteractions.id, created.id));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.status).toBe("cancelled");
+      // The persisted row must match the winner's reason, never a mix of both callers.
+      expect((rows[0]?.result as { reason?: string | null } | null)?.reason).toBe(winnerReason);
+      expect(["First caller", "Second caller"]).toContain(winnerReason);
+    });
+  });
 });
