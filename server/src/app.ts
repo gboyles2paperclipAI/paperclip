@@ -57,6 +57,7 @@ import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
 import { readBrandedStaticIndexHtml } from "./static-index-html.js";
 import { applyUiBranding } from "./ui-branding.js";
 import { logger } from "./middleware/logger.js";
+import { startSlackSocketMode } from "./services/slack-integration.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createPluginJobScheduler } from "./services/plugin-job-scheduler.js";
@@ -222,6 +223,7 @@ export async function createApp(
     persistPath: path.join(resolvePaperclipInstanceRoot(), "cooldown-state.json"),
   });
   const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager({ providerCooldownService });
+  const slackSocketMode = startSlackSocketMode(db, { pluginWorkerManager: workerManager });
 
   // Mount API routes
   const api = Router();
@@ -579,6 +581,7 @@ export async function createApp(
     appServicesShutdown = true;
     disableFeedbackExportFlushes();
     devWatcher?.close();
+    slackSocketMode?.close();
     viteHtmlRenderer?.dispose();
     hostServiceCleanup.disposeAll();
     hostServiceCleanup.teardown();

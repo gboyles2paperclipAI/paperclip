@@ -121,6 +121,8 @@ export async function logActivity(db: Db, input: LogActivityInput) {
   void import("./slack-integration.js")
     .then(({ maybeNotifySlackForActivity }) => {
       maybeNotifySlackForActivity({
+        db,
+        companyId: input.companyId,
         action: input.action,
         entityType: input.entityType,
         entityId: input.entityId,

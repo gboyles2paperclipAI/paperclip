@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import request from "supertest";
@@ -19,7 +19,10 @@ import {
 } from "@paperclipai/db";
 import {
   buildSlackApprovalBlocks,
+  handleSlackSocketEnvelope,
+  isSlackSocketInteractiveEnvelope,
   parseSlackApprovalInteraction,
+  parseSlackSocketEnvelope,
   postSlackMessage,
   redactSlackText,
   verifySlackRequestSignature,
@@ -175,10 +178,47 @@ describe("Slack integration utilities", () => {
     delete process.env.SLACK_ALERTS_CHANNEL_ID;
   });
 
-  it("keeps legacy chat references limited to the explicit webhook deprecation note", () => {
+  it("parses and identifies Slack Socket Mode interactive envelopes", () => {
+    const envelope = parseSlackSocketEnvelope(JSON.stringify({
+      envelope_id: "env-1",
+      type: "interactive",
+      payload: {
+        user: { id: "U123" },
+        actions: [{ action_id: "approve", value: JSON.stringify({ approval_id: "appr-1", action: "approve" }) }],
+      },
+    }));
+
+    expect(isSlackSocketInteractiveEnvelope(envelope)).toBe(true);
+  });
+
+  it("acks Slack Socket Mode interactions and uses the envelope ID for idempotency", async () => {
+    const ack = vi.fn();
+    const handleInteraction = vi.fn(async () => ({ id: "appr-1", status: "approved" }));
+    const envelope = parseSlackSocketEnvelope(JSON.stringify({
+      envelope_id: "env-1",
+      type: "interactive",
+      payload: {
+        team: { id: "T123" },
+        channel: { id: "C123" },
+        message: { ts: "1710000000.000100" },
+        user: { id: "U123" },
+        actions: [{ action_id: "approve", value: JSON.stringify({ approval_id: "appr-1", action: "approve" }) }],
+      },
+    }));
+
+    await handleSlackSocketEnvelope({ envelope, ack, service: { handleInteraction } });
+
+    expect(ack).toHaveBeenCalledOnce();
+    expect(handleInteraction).toHaveBeenCalledWith(expect.objectContaining({
+      approvalId: "appr-1",
+      userId: "U123",
+    }), "socket:env-1");
+  });
+
+  it("keeps legacy chat references retired", () => {
     const legacyName = ["Dis", "cord"].join("");
     const legacyEnv = ["DIS", "CORD_WEBHOOK_URL"].join("");
-    const output = execFileSync(
+    const result = spawnSync(
       "git",
       [
         "grep",
@@ -190,8 +230,9 @@ describe("Slack integration utilities", () => {
         ":(exclude)packages/db/src/migrations/meta",
       ],
       { cwd: fileURLToPath(new URL("../../..", import.meta.url)), encoding: "utf8" },
-    ).trim();
-    expect(output).toBe(`.env.example:14:# Deprecated: ${legacyEnv} was used by the former digest script.`);
+    );
+    expect(result.status).toBe(1);
+    expect(result.stdout.trim()).toBe("");
   });
 });
 

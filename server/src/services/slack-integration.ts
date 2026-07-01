@@ -1,10 +1,11 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { and, desc, eq, sql } from "drizzle-orm";
+import WebSocket from "ws";
+import { and, desc, eq, inArray, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { activityLog, companyMemberships } from "@paperclipai/db";
+import { activityLog, companyMemberships, companySecrets } from "@paperclipai/db";
 import { badRequest, forbidden, HttpError, unauthorized, unprocessable } from "../errors.js";
 import { redactEventPayload, redactSensitiveText } from "../redaction.js";
-import { approvalService, heartbeatService, issueApprovalService, logActivity } from "./index.js";
+import { approvalService, heartbeatService, issueApprovalService, logActivity, secretService } from "./index.js";
 import { logger } from "../middleware/logger.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 
@@ -16,6 +17,19 @@ const SECRET_TEXT_RE =
 const IMAGE_KEY_RE = /(?:image|screenshot|attachment|asset|file|upload|photo)/i;
 const SENSITIVE_LABEL_TEXT_RE =
   /\b(?:password|passcode|mfa|2fa|otp|recovery key|api key|secret|token|authorization|bearer|credit card|card number|cvv|ssn)\b\s*[:=]\s*[^\s,;]+/gi;
+const NOISE_PAYLOAD_KEYS = new Set([
+  "adapterConfig",
+  "attachments",
+  "blocks",
+  "image",
+  "images",
+  "raw",
+  "rawBody",
+  "screenshot",
+  "screenshots",
+  "upload",
+  "uploads",
+]);
 
 export type SlackApprovalAction = "approve" | "reject" | "needs_changes";
 
@@ -36,6 +50,24 @@ export interface SlackSignatureVerificationInput {
   signatureHeader: string | undefined;
   rawBody: Buffer | string | undefined;
   nowSeconds?: number;
+}
+
+interface SlackSocketEnvelope {
+  envelope_id?: unknown;
+  type?: unknown;
+  accepts_response_payload?: unknown;
+  payload?: unknown;
+  reason?: unknown;
+  debug_info?: unknown;
+}
+
+interface SlackSocketConnection {
+  close(): void;
+}
+
+interface SlackSocketModeOptions {
+  pluginWorkerManager?: PluginWorkerManager;
+  reconnectDelayMs?: number;
 }
 
 export function verifySlackRequestSignature(input: SlackSignatureVerificationInput): string {
@@ -132,6 +164,31 @@ export function parseSlackApprovalInteraction(payload: unknown): SlackInteractio
   };
 }
 
+export function parseSlackSocketEnvelope(message: string): SlackSocketEnvelope {
+  const parsed = JSON.parse(message) as unknown;
+  if (!isRecord(parsed)) throw badRequest("Malformed Slack Socket Mode envelope");
+  return parsed;
+}
+
+export function isSlackSocketInteractiveEnvelope(envelope: SlackSocketEnvelope): boolean {
+  return envelope.type === "interactive" && isRecord(envelope.payload);
+}
+
+export async function handleSlackSocketEnvelope(input: {
+  envelope: SlackSocketEnvelope;
+  ack: (payload?: Record<string, unknown>) => void;
+  service: Pick<ReturnType<typeof slackIntegrationService>, "handleInteraction">;
+}) {
+  const envelopeId = stringValue(input.envelope.envelope_id);
+  if (!envelopeId) throw badRequest("Slack Socket Mode envelope is missing envelope_id");
+  input.ack();
+
+  if (!isSlackSocketInteractiveEnvelope(input.envelope)) return { ignored: true as const };
+  const interaction = parseSlackApprovalInteraction(input.envelope.payload);
+  const approval = await input.service.handleInteraction(interaction, `socket:${envelopeId}`);
+  return { ignored: false as const, approval };
+}
+
 function slackUserMapFromEnv(): Record<string, string> {
   const raw = process.env.SLACK_USER_MAP_JSON?.trim();
   if (!raw) return {};
@@ -148,8 +205,51 @@ function slackUserMapFromEnv(): Record<string, string> {
   }
 }
 
-export function mapSlackUserToPaperclipUser(slackUserId: string): string | null {
-  return slackUserMapFromEnv()[slackUserId] ?? null;
+async function findCompanySecretByKey(db: Db, companyId: string | null, key: string) {
+  const keys = Array.from(new Set([key, key.toLowerCase()]));
+  const names = Array.from(new Set([key, key.toLowerCase()]));
+  const rows = await db
+    .select()
+    .from(companySecrets)
+    .where(and(
+      companyId ? eq(companySecrets.companyId, companyId) : undefined,
+      ne(companySecrets.status, "deleted"),
+      or(inArray(companySecrets.key, keys), inArray(companySecrets.name, names)),
+    ))
+    .orderBy(desc(companySecrets.createdAt))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+async function resolveSlackSetting(db: Db | undefined, companyId: string | null | undefined, key: string): Promise<string | null> {
+  const fromEnv = process.env[key]?.trim();
+  if (fromEnv) return fromEnv;
+  if (!db) return null;
+  const secret = await findCompanySecretByKey(db, companyId ?? null, key);
+  if (!secret) return null;
+  return secretService(db).resolveSecretValue(secret.companyId, secret.id, "latest").catch((err) => {
+    logger.warn({ err, companyId: secret.companyId, secretKey: secret.key }, "Slack secret resolution failed");
+    return null;
+  });
+}
+
+export async function mapSlackUserToPaperclipUser(
+  slackUserId: string,
+  db?: Db,
+  companyId?: string | null,
+): Promise<string | null> {
+  const fromEnv = slackUserMapFromEnv()[slackUserId];
+  if (fromEnv) return fromEnv;
+  const raw = await resolveSlackSetting(db, companyId, "SLACK_USER_MAP_JSON");
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed)) return null;
+    const mapped = parsed[slackUserId];
+    return typeof mapped === "string" && mapped.trim() ? mapped.trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 export function redactSlackText(input: unknown): string {
@@ -161,14 +261,104 @@ export function redactSlackText(input: unknown): string {
     .slice(0, 700);
 }
 
+function humanizeKey(key: string): string {
+  return key
+    .replace(/[_-]+/g, " ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^./, (char) => char.toUpperCase());
+}
+
+function formatSlackValue(value: unknown, maxLength = 140): string {
+  if (value === null || value === undefined || value === "") return "Not provided";
+  if (Array.isArray(value)) {
+    const joined = value.map((entry) => redactSlackText(entry)).filter(Boolean).slice(0, 4).join(", ");
+    return joined.length > 0 ? joined.slice(0, maxLength) : "Not provided";
+  }
+  if (typeof value === "object") {
+    return redactSlackText(value).slice(0, maxLength);
+  }
+  return redactSlackText(String(value)).slice(0, maxLength);
+}
+
+function payloadText(payload: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim()) return redactSlackText(value);
+  }
+  return null;
+}
+
+function approvalTypeLabel(type: string): string {
+  switch (type) {
+    case "hire_agent":
+      return "Hire agent";
+    case "approve_ceo_strategy":
+      return "CEO strategy";
+    case "budget_override_required":
+      return "Budget override";
+    case "request_board_approval":
+      return "Board approval";
+    default:
+      return humanizeKey(type);
+  }
+}
+
+function compactId(id: string): string {
+  return id.length > 12 ? `${id.slice(0, 8)}...${id.slice(-4)}` : id;
+}
+
 function summarizePayload(payload: Record<string, unknown>): string {
   const redacted = redactEventPayload(payload) ?? {};
   const entries = Object.entries(redacted)
-    .filter(([key]) => !IMAGE_KEY_RE.test(key))
+    .filter(([key]) => !IMAGE_KEY_RE.test(key) && !NOISE_PAYLOAD_KEYS.has(key))
     .filter(([, value]) => typeof value !== "string" || !SECRET_TEXT_RE.test(value))
+    .filter(([key]) => !["summary", "title", "scope", "reason", "requestedBy", "requestedByAgentId", "issueId", "issueIds"].includes(key))
     .slice(0, 6);
   if (entries.length === 0) return "Open Paperclip for details.";
-  return entries.map(([key, value]) => `*${key}:* ${redactSlackText(value)}`).join("\n");
+  return entries.map(([key, value]) => `*${humanizeKey(key)}:* ${formatSlackValue(value, 220)}`).join("\n");
+}
+
+function buildPayloadFields(payload: Record<string, unknown>): Array<Record<string, unknown>> {
+  const redacted = redactEventPayload(payload) ?? {};
+  const preferredKeys = [
+    "scope",
+    "reason",
+    "risk",
+    "priority",
+    "customer",
+    "ticketId",
+    "issueId",
+    "issueIds",
+    "requestedBy",
+    "requestedByAgentId",
+  ];
+  const seen = new Set<string>();
+  const fields: Array<Record<string, unknown>> = [];
+  for (const key of preferredKeys) {
+    if (!(key in redacted) || IMAGE_KEY_RE.test(key) || NOISE_PAYLOAD_KEYS.has(key)) continue;
+    const value = redacted[key];
+    if (typeof value === "string" && SECRET_TEXT_RE.test(value)) continue;
+    fields.push({
+      type: "mrkdwn",
+      text: `*${humanizeKey(key)}*\n${formatSlackValue(value)}`,
+    });
+    seen.add(key);
+    if (fields.length >= 8) return fields;
+  }
+  for (const [key, value] of Object.entries(redacted)) {
+    if (seen.has(key)) continue;
+    if (IMAGE_KEY_RE.test(key) || NOISE_PAYLOAD_KEYS.has(key)) continue;
+    if (["summary", "title", "description", "instructions"].includes(key)) continue;
+    if (typeof value === "string" && SECRET_TEXT_RE.test(value)) continue;
+    fields.push({
+      type: "mrkdwn",
+      text: `*${humanizeKey(key)}*\n${formatSlackValue(value)}`,
+    });
+    if (fields.length >= 8) break;
+  }
+  return fields;
 }
 
 export function buildSlackApprovalBlocks(input: {
@@ -179,6 +369,21 @@ export function buildSlackApprovalBlocks(input: {
 }) {
   const paperclipUrl = input.paperclipUrl?.trim();
   const value = (action: SlackApprovalAction) => JSON.stringify({ approval_id: input.approvalId, action });
+  const title =
+    payloadText(input.payload, ["title", "summary", "scope", "reason"])
+    ?? "Paperclip approval requested";
+  const description = payloadText(input.payload, ["description", "instructions"]);
+  const fields = [
+    {
+      type: "mrkdwn",
+      text: `*Approval ID*\n\`${input.approvalId}\``,
+    },
+    {
+      type: "mrkdwn",
+      text: `*Request type*\n${approvalTypeLabel(input.type)}`,
+    },
+    ...buildPayloadFields(input.payload),
+  ].slice(0, 10);
   const elements: Array<Record<string, unknown>> = [
     {
       type: "button",
@@ -210,22 +415,56 @@ export function buildSlackApprovalBlocks(input: {
       value: input.approvalId,
     });
   }
-  return [
+  const blocks: Array<Record<string, unknown>> = [
     {
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `*Paperclip approval requested*\nApproval ID: \`${input.approvalId}\`\nType: \`${input.type}\``,
+        text: `*Action needed: ${approvalTypeLabel(input.type)}*\n${title}`,
       },
     },
-    { type: "section", text: { type: "mrkdwn", text: summarizePayload(input.payload) } },
-    { type: "actions", elements },
+    {
+      type: "section",
+      fields,
+    },
   ];
+  if (description) {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: `*Context*\n${description}` },
+    });
+  }
+  const extraContext = summarizePayload(input.payload);
+  if (extraContext !== "Open Paperclip for details.") {
+    blocks.push({ type: "section", text: { type: "mrkdwn", text: extraContext } });
+  }
+  blocks.push(
+    {
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: "Slack is only the approval interface. Paperclip records the decision before any agent acts.",
+        },
+      ],
+    },
+    { type: "actions", elements },
+  );
+  return blocks;
 }
 
-export async function postSlackMessage(input: { channel: string | undefined; text: string; blocks?: unknown[] }) {
-  const token = process.env.SLACK_BOT_TOKEN?.trim();
-  const channel = input.channel?.trim();
+export async function postSlackMessage(input: {
+  db?: Db;
+  companyId?: string | null;
+  channel: string | undefined;
+  channelKey?: "SLACK_APPROVALS_CHANNEL_ID" | "SLACK_ALERTS_CHANNEL_ID" | "SLACK_TICKETS_CHANNEL_ID";
+  text: string;
+  blocks?: unknown[];
+}) {
+  const token = await resolveSlackSetting(input.db, input.companyId, "SLACK_BOT_TOKEN");
+  const channel = input.channel?.trim() || (input.channelKey
+    ? await resolveSlackSetting(input.db, input.companyId, input.channelKey)
+    : null);
   if (!token || !channel) return { skipped: true as const };
   const response = await fetch("https://slack.com/api/chat.postMessage", {
     method: "POST",
@@ -271,30 +510,96 @@ export async function updateSlackInteractionMessage(input: {
   });
 }
 
+function buildActivityNotificationBlocks(input: {
+  title: string;
+  summary: string;
+  entityType: string;
+  entityId: string;
+  details: Record<string, unknown>;
+}) {
+  const fields: Array<Record<string, unknown>> = [
+    { type: "mrkdwn", text: `*Entity*\n${humanizeKey(input.entityType)} ${compactId(input.entityId)}` },
+  ];
+  for (const [key, value] of Object.entries(redactEventPayload(input.details) ?? {})) {
+    if (fields.length >= 7) break;
+    if (IMAGE_KEY_RE.test(key) || NOISE_PAYLOAD_KEYS.has(key)) continue;
+    if (typeof value === "string" && SECRET_TEXT_RE.test(value)) continue;
+    fields.push({ type: "mrkdwn", text: `*${humanizeKey(key)}*\n${formatSlackValue(value, 120)}` });
+  }
+  return [
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: `*${input.title}*\n${input.summary}` },
+    },
+    {
+      type: "section",
+      fields,
+    },
+  ];
+}
+
 export function maybeNotifySlackForActivity(input: {
+  db?: Db;
+  companyId?: string;
   action: string;
   entityType: string;
   entityId: string;
   details: Record<string, unknown> | null;
 }) {
   const details = input.details ?? {};
-  const textForAction = (): { channel: string | undefined; text: string } | null => {
+  const textForAction = (): {
+    channel: string | undefined;
+    channelKey?: "SLACK_APPROVALS_CHANNEL_ID" | "SLACK_ALERTS_CHANNEL_ID" | "SLACK_TICKETS_CHANNEL_ID";
+    text: string;
+    blocks: unknown[];
+  } | null => {
     if (input.action === "issue.created") {
+      const ticketsChannel = process.env.SLACK_TICKETS_CHANNEL_ID;
+      const title = "Ticket created";
+      const summary = payloadText(details, ["title", "summary", "description"]) ?? `New ticket ${compactId(input.entityId)} was created.`;
       return {
-        channel: process.env.SLACK_TICKETS_CHANNEL_ID ?? process.env.SLACK_ALERTS_CHANNEL_ID,
-        text: `Ticket created: ${input.entityId}`,
+        channel: ticketsChannel ?? process.env.SLACK_ALERTS_CHANNEL_ID,
+        channelKey: ticketsChannel ? undefined : "SLACK_TICKETS_CHANNEL_ID",
+        text: `${title}: ${summary}`,
+        blocks: buildActivityNotificationBlocks({
+          title,
+          summary,
+          entityType: input.entityType,
+          entityId: input.entityId,
+          details,
+        }),
       };
     }
     if (input.action === "issue.updated" && details.status === "blocked") {
+      const title = "Agent blocked";
+      const summary = payloadText(details, ["title", "summary", "blocker", "reason"]) ?? `Issue ${compactId(input.entityId)} is blocked.`;
       return {
         channel: process.env.SLACK_ALERTS_CHANNEL_ID,
-        text: `Agent blocked on issue: ${input.entityId}`,
+        channelKey: "SLACK_ALERTS_CHANNEL_ID",
+        text: `${title}: ${summary}`,
+        blocks: buildActivityNotificationBlocks({
+          title,
+          summary,
+          entityType: input.entityType,
+          entityId: input.entityId,
+          details,
+        }),
       };
     }
     if (input.action.includes("escalation") || String(details.type ?? "").includes("escalation")) {
+      const title = String(details.type ?? "").includes("security") ? "Security escalation" : "Escalation requested";
+      const summary = payloadText(details, ["title", "summary", "reason", "scope"]) ?? `${humanizeKey(input.entityType)} ${compactId(input.entityId)} needs attention.`;
       return {
         channel: process.env.SLACK_ALERTS_CHANNEL_ID,
-        text: `Escalation notification: ${input.entityType} ${input.entityId}`,
+        channelKey: "SLACK_ALERTS_CHANNEL_ID",
+        text: `${title}: ${summary}`,
+        blocks: buildActivityNotificationBlocks({
+          title,
+          summary,
+          entityType: input.entityType,
+          entityId: input.entityId,
+          details,
+        }),
       };
     }
     return null;
@@ -302,8 +607,9 @@ export function maybeNotifySlackForActivity(input: {
   const notification = textForAction();
   if (!notification) return;
   void postSlackMessage({
+    db: input.db,
+    companyId: input.companyId,
     ...notification,
-    blocks: [{ type: "section", text: { type: "mrkdwn", text: redactSlackText(notification.text) } }],
   }).catch((err) => logger.warn({ err }, "Slack activity notification failed"));
 }
 
@@ -408,7 +714,10 @@ export function slackIntegrationService(
       const approval = await approvals.getById(approvalId);
       if (!approval) throw unprocessable("Approval not found");
       return postSlackMessage({
+        db,
+        companyId: approval.companyId,
         channel: process.env.SLACK_APPROVALS_CHANNEL_ID,
+        channelKey: "SLACK_APPROVALS_CHANNEL_ID",
         text: `Paperclip approval requested: ${approval.id}`,
         blocks: buildSlackApprovalBlocks({
           approvalId: approval.id,
@@ -420,14 +729,13 @@ export function slackIntegrationService(
     },
 
     handleInteraction: async (interaction: SlackInteractionContext, requestHash: string) => {
-      const paperclipUserId = mapSlackUserToPaperclipUser(interaction.userId);
-      if (!paperclipUserId) throw forbidden("Slack user is not mapped to a Paperclip board user");
-
       const existing = await approvals.getById(interaction.approvalId);
       if (!existing) throw unprocessable("Approval not found");
       if (!["pending", "revision_requested"].includes(existing.status)) {
         throw unprocessable("Approval is not pending");
       }
+      const paperclipUserId = await mapSlackUserToPaperclipUser(interaction.userId, db, existing.companyId);
+      if (!paperclipUserId) throw forbidden("Slack user is not mapped to a Paperclip board user");
       await assertAuthorizedUser(existing.companyId, paperclipUserId);
       await assertNotReplay(existing.companyId, existing.id, requestHash);
 
@@ -518,4 +826,111 @@ export function slackIntegrationService(
 export function slackHttpError(err: unknown): HttpError {
   if (err instanceof HttpError) return err;
   return badRequest(err instanceof Error ? err.message : "Invalid Slack interaction");
+}
+
+async function openSlackSocketModeConnection(appToken: string): Promise<string | null> {
+  const response = await fetch("https://slack.com/api/apps.connections.open", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${appToken}`,
+      "content-type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify({}),
+  }).catch((err) => {
+    logger.warn({ err }, "Slack Socket Mode connection request failed");
+    return null;
+  });
+  if (!response) return null;
+  const body = await response.json().catch(() => ({})) as { ok?: boolean; error?: string; url?: string };
+  if (!response.ok || body.ok === false || !body.url) {
+    logger.warn({ status: response.status, error: body.error }, "Slack Socket Mode connection request failed");
+    return null;
+  }
+  return body.url;
+}
+
+export function startSlackSocketMode(
+  db: Db,
+  options: SlackSocketModeOptions = {},
+): SlackSocketConnection | null {
+  const slack = slackIntegrationService(db, { pluginWorkerManager: options.pluginWorkerManager });
+  const reconnectDelayMs = options.reconnectDelayMs ?? 10_000;
+  let stopped = false;
+  let socket: WebSocket | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearReconnectTimer = () => {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  };
+
+  const scheduleReconnect = () => {
+    if (stopped || reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      void connect();
+    }, reconnectDelayMs);
+    reconnectTimer.unref?.();
+  };
+
+  const connect = async () => {
+    if (stopped) return;
+    const appToken = await resolveSlackSetting(db, null, "SLACK_APP_TOKEN");
+    if (!appToken) return;
+    const url = await openSlackSocketModeConnection(appToken);
+    if (!url || stopped) {
+      scheduleReconnect();
+      return;
+    }
+
+    socket = new WebSocket(url);
+    socket.on("open", () => {
+      logger.info("Slack Socket Mode connected");
+    });
+    socket.on("message", (data) => {
+      let currentEnvelope: SlackSocketEnvelope | null = null;
+      const sendAck = (payload?: Record<string, unknown>) => {
+        const envelopeId = stringValue((currentEnvelope as SlackSocketEnvelope | null)?.envelope_id);
+        if (!envelopeId || socket?.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({ envelope_id: envelopeId, ...(payload ? { payload } : {}) }));
+      };
+      try {
+        currentEnvelope = parseSlackSocketEnvelope(data.toString());
+        if (currentEnvelope.type === "disconnect") {
+          logger.info({ reason: stringValue(currentEnvelope.reason) }, "Slack Socket Mode requested disconnect");
+          socket?.close();
+          scheduleReconnect();
+          return;
+        }
+        if (currentEnvelope.type === "hello") return;
+        void handleSlackSocketEnvelope({
+          envelope: currentEnvelope,
+          ack: sendAck,
+          service: slack,
+        }).catch((err) => {
+          logger.warn({ err }, "Slack Socket Mode interaction failed");
+        });
+      } catch (err) {
+        logger.warn({ err }, "Slack Socket Mode message could not be processed");
+      }
+    });
+    socket.on("error", (err) => {
+      logger.warn({ err }, "Slack Socket Mode websocket error");
+    });
+    socket.on("close", () => {
+      if (!stopped) scheduleReconnect();
+    });
+  };
+
+  void connect();
+  return {
+    close() {
+      stopped = true;
+      clearReconnectTimer();
+      socket?.close();
+      socket = null;
+    },
+  };
 }
