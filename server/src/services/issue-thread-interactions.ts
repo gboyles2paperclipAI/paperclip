@@ -17,6 +17,7 @@ import type {
   CreateIssueThreadInteraction,
   DismissIssueThreadInteraction,
   IssueThreadInteraction,
+  IssueThreadInteractionResult,
   RequestCheckboxConfirmationInteraction,
   RequestConfirmationInteraction,
   RequestConfirmationTarget,
@@ -1528,7 +1529,7 @@ export function issueThreadInteractionService(db: Db) {
       }
 
       const reason = data.reason?.trim() || null;
-      let result: object;
+      let result: IssueThreadInteractionResult;
       switch (current.kind) {
         case "ask_user_questions":
           result = {
