@@ -7,6 +7,7 @@ const CREATED_AGENT_ID = "22222222-2222-4222-8222-222222222222";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
+  assertCheckoutOwner: vi.fn(async () => ({ adoptedFromRunId: null })),
 }));
 
 const mockInteractionService = vi.hoisted(() => ({
@@ -162,7 +163,7 @@ async function createApp(actor: Record<string, unknown> = {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", issueRoutes({} as any, {} as any, { deploymentMode: opts.deploymentMode }));
+  app.use("/api", issueRoutes(mockDb as any, {} as any, { deploymentMode: opts.deploymentMode }));
   app.use(errorHandler);
   return app;
 }
@@ -1028,6 +1029,10 @@ describe.sequential("issue thread interaction routes", () => {
   });
 
   it("allows agent-authored interaction creation and stamps the active run id", async () => {
+    mockIssueService.getById.mockResolvedValueOnce(createIssue({
+      assigneeAgentId: CREATED_AGENT_ID,
+      status: "todo",
+    }));
     const app = await createApp({
       type: "agent",
       agentId: CREATED_AGENT_ID,
