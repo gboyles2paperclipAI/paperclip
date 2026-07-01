@@ -485,6 +485,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
   projectId?: string | null;
   routineId?: string | null;
   executionRunConfig: Record<string, unknown>;
+  executionRunEnvConfigPathPrefix?: string | null;
   projectEnv: unknown;
   routineEnv?: unknown;
   secretsSvc: RuntimeConfigSecretResolver;
@@ -512,6 +513,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
           actorId: input.agentId,
           issueId: input.issueId ?? null,
           heartbeatRunId: input.heartbeatRunId ?? null,
+          configPathPrefix: input.executionRunEnvConfigPathPrefix ?? undefined,
           ...(lowTrustAllowedBindingIds !== undefined ? { allowedBindingIds: lowTrustAllowedBindingIds } : {}),
         }
       : undefined,
@@ -1645,6 +1647,17 @@ export function mergeModelProfileAdapterConfig(input: {
   };
 }
 
+function resolveModelProfileEnvConfigPathPrefix(input: {
+  modelProfile: ModelProfileApplication;
+  issueAdapterConfig: Record<string, unknown> | null | undefined;
+}): string | null {
+  if (input.modelProfile.configSource !== "agent_runtime") return null;
+  if (!input.modelProfile.applied) return null;
+  if (!Object.prototype.hasOwnProperty.call(input.modelProfile.adapterConfig ?? {}, "env")) return null;
+  if (Object.prototype.hasOwnProperty.call(input.issueAdapterConfig ?? {}, "env")) return null;
+  return `runtimeConfig.modelProfiles.${input.modelProfile.applied}.adapterConfig.env`;
+}
+
 function modelProfileRunMetadata(
   modelProfile: ModelProfileApplication,
 ): Record<string, unknown> | null {
@@ -2112,6 +2125,11 @@ export function shouldResetTaskSessionForWake(
 ) {
   if (contextSnapshot?.forceFreshSession === true) return true;
 
+  const wakeSource = readNonEmptyString(contextSnapshot?.wakeSource);
+  if (wakeSource === "on_demand") {
+    return true;
+  }
+
   const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
   if (
     wakeReason === "issue_assigned" ||
@@ -2224,6 +2242,9 @@ export function describeSessionResetReason(
   contextSnapshot: Record<string, unknown> | null | undefined,
 ) {
   if (contextSnapshot?.forceFreshSession === true) return "forceFreshSession was requested";
+
+  const wakeSource = readNonEmptyString(contextSnapshot?.wakeSource);
+  if (wakeSource === "on_demand") return "wake source is on_demand (manual wake starts fresh)";
 
   const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
   if (wakeReason === "issue_assigned") return "wake reason is issue_assigned";
@@ -5013,6 +5034,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     return updated;
+  }
+
+  function normalizeTelemetryCount(...values: Array<unknown>) {
+    let normalized = 0;
+    for (const value of values) {
+      if (typeof value !== "number" || !Number.isFinite(value)) continue;
+      normalized = Math.max(normalized, Math.max(0, Math.floor(value)));
+    }
+    return normalized;
+  }
+
+  function normalizeTelemetryString(value: unknown) {
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  }
+
+  function normalizeTelemetryDurationMs(startedAt: Date | string | null | undefined, finishedAt: Date) {
+    const started = startedAt instanceof Date ? startedAt : startedAt ? new Date(startedAt) : null;
+    if (!started || Number.isNaN(started.getTime())) return null;
+    return Math.max(0, Math.floor(finishedAt.getTime() - started.getTime()));
   }
 
   function publishRunLifecyclePluginEvent(run: typeof heartbeatRuns.$inferSelect) {
@@ -8958,10 +8998,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } else {
       delete context.paperclipModelProfile;
     }
+    const issueAdapterConfig = issueAssigneeOverrides?.adapterConfig ?? null;
     const mergedConfig = mergeModelProfileAdapterConfig({
       baseConfig: persistedWorkspaceManagedConfig,
       modelProfile: modelProfileApplication,
-      issueAdapterConfig: issueAssigneeOverrides?.adapterConfig ?? null,
+      issueAdapterConfig,
+    });
+    const executionRunEnvConfigPathPrefix = resolveModelProfileEnvConfigPathPrefix({
+      modelProfile: modelProfileApplication,
+      issueAdapterConfig,
     });
     const configSnapshot = buildExecutionWorkspaceConfigSnapshot(mergedConfig, selectedEnvironmentId);
     const executionRunConfig = stripWorkspaceRuntimeFromExecutionRunConfig(mergedConfig);
@@ -8993,6 +9038,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           projectId: projectContext?.id ?? null,
           routineId: routineEnvContext.routineId,
           executionRunConfig,
+          executionRunEnvConfigPathPrefix,
           projectEnv: projectContext?.env ?? null,
           routineEnv: routineEnvContext.env,
           secretsSvc,
@@ -10023,10 +10069,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         adapterResult.summary ?? null,
       );
 
+      const finishedAt = new Date();
       let persistedRun = await setRunStatus(run.id, status, {
-        finishedAt: new Date(),
+        finishedAt,
         error: runErrorMessage,
         errorCode: runErrorCode,
+        retryCount: normalizeTelemetryCount(
+          adapterResult.retryCount,
+          latestRun?.scheduledRetryAttempt,
+          run.scheduledRetryAttempt,
+          latestRun?.processLossRetryCount,
+          run.processLossRetryCount,
+        ),
+        fallbackFrom: normalizeTelemetryString(adapterResult.fallbackFrom),
+        fallbackTo: normalizeTelemetryString(adapterResult.fallbackTo),
+        fallbackSuccess: typeof adapterResult.fallbackSuccess === "boolean" ? adapterResult.fallbackSuccess : null,
+        durationMs: typeof adapterResult.durationMs === "number" && Number.isFinite(adapterResult.durationMs)
+          ? Math.max(0, Math.floor(adapterResult.durationMs))
+          : normalizeTelemetryDurationMs(latestRun?.startedAt ?? run.startedAt, finishedAt),
         exitCode: adapterResult.exitCode,
         signal: adapterResult.signal,
         usageJson,

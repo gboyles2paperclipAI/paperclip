@@ -729,6 +729,13 @@
       "when": 1781800000000,
       "tag": "0103_issue_thread_interaction_resolution_audit",
       "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1782993000000,
+      "tag": "0104_moi_run_telemetry",
+      "breakpoints": true
     }
   ]
 }
