@@ -1804,4 +1804,594 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       });
     });
   });
+
+  describe("continuationPolicy auto-upgrade", () => {
+    async function seedInReviewIssueWithAgent(title: string) {
+      const companyId = randomUUID();
+      const goalId = randomUUID();
+      const issueId = randomUUID();
+      const agentId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+      await db.insert(goals).values({
+        id: goalId,
+        companyId,
+        title,
+        level: "task",
+        status: "active",
+      });
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Platform Lead",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        goalId,
+        title: "Awaiting continuation",
+        status: "in_review",
+        priority: "medium",
+        assigneeAgentId: agentId,
+      });
+
+      return { companyId, goalId, issueId, agentId };
+    }
+
+    it("upgrades continuationPolicy none → wake_assignee_on_accept for request_confirmation on an in_review issue with an agent assignee", async () => {
+      const { companyId, issueId, agentId } = await seedInReviewIssueWithAgent("Auto-upgrade confirmation");
+
+      const created = await interactionsSvc.create({
+        id: issueId,
+        companyId,
+        status: "in_review",
+        assigneeAgentId: agentId,
+      }, {
+        kind: "request_confirmation",
+        continuationPolicy: "none",
+        payload: {
+          version: 1,
+          prompt: "Grant Vercel staging access?",
+        },
+      }, {
+        userId: "local-board",
+      });
+
+      expect(created.continuationPolicy).toBe("wake_assignee_on_accept");
+    });
+
+    it("upgrades continuationPolicy none → wake_assignee_on_accept for request_checkbox_confirmation on an in_review issue with an agent assignee", async () => {
+      const { companyId, issueId, agentId } = await seedInReviewIssueWithAgent("Auto-upgrade checkbox confirmation");
+
+      const created = await interactionsSvc.create({
+        id: issueId,
+        companyId,
+        status: "in_review",
+        assigneeAgentId: agentId,
+      }, {
+        kind: "request_checkbox_confirmation",
+        continuationPolicy: "none",
+        payload: {
+          version: 1,
+          prompt: "Select deployment targets",
+          options: [
+            { id: "staging", label: "Staging" },
+            { id: "prod", label: "Production" },
+          ],
+        },
+      }, {
+        userId: "local-board",
+      });
+
+      expect(created.continuationPolicy).toBe("wake_assignee_on_accept");
+    });
+
+    it("does not upgrade continuationPolicy none for request_confirmation on a non-in_review issue", async () => {
+      const companyId = randomUUID();
+      const goalId = randomUUID();
+      const issueId = randomUUID();
+      const agentId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+      await db.insert(goals).values({ id: goalId, companyId, title: "No upgrade", level: "task", status: "active" });
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Platform Lead",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        goalId,
+        title: "In progress issue",
+        status: "in_progress",
+        priority: "medium",
+        assigneeAgentId: agentId,
+      });
+
+      const created = await interactionsSvc.create({
+        id: issueId,
+        companyId,
+        status: "in_progress",
+        assigneeAgentId: agentId,
+      }, {
+        kind: "request_confirmation",
+        continuationPolicy: "none",
+        payload: {
+          version: 1,
+          prompt: "Are you sure?",
+        },
+      }, {
+        userId: "local-board",
+      });
+
+      expect(created.continuationPolicy).toBe("none");
+    });
+
+    it("does not upgrade continuationPolicy none for request_confirmation on an in_review issue without an agent assignee", async () => {
+      const companyId = randomUUID();
+      const goalId = randomUUID();
+      const issueId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+      await db.insert(goals).values({ id: goalId, companyId, title: "No upgrade user", level: "task", status: "active" });
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        goalId,
+        title: "User-assigned review",
+        status: "in_review",
+        priority: "medium",
+        assigneeUserId: "local-board",
+      });
+
+      const created = await interactionsSvc.create({
+        id: issueId,
+        companyId,
+        status: "in_review",
+        assigneeAgentId: null,
+      }, {
+        kind: "request_confirmation",
+        continuationPolicy: "none",
+        payload: {
+          version: 1,
+          prompt: "Approve?",
+        },
+      }, {
+        userId: "local-board",
+      });
+
+      expect(created.continuationPolicy).toBe("none");
+    });
+  });
+
+  describe("agent review gate guardrail (FUL-11226)", () => {
+    async function seedAgentIssue(title: string, status = "in_progress") {
+      const companyId = randomUUID();
+      const goalId = randomUUID();
+      const issueId = randomUUID();
+      const agentId = randomUUID();
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      });
+      await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+      await db.insert(goals).values({ id: goalId, companyId, title, level: "task", status: "active" });
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Platform Lead",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        goalId,
+        title,
+        status,
+        priority: "medium",
+        assigneeAgentId: agentId,
+      });
+      return { companyId, goalId, issueId, agentId };
+    }
+
+    it("detectAgentReviewGateInConfirmationPrompt identifies FUL-11220 pattern", () => {
+      const prompt =
+        "Implementation complete (commit cd17743be). Per AC-4, Code Quality Specialist must re-review and accept before merge. Confirm when CQS review is done and this is approved for merge.";
+      expect(detectAgentReviewGateInConfirmationPrompt(prompt)).toBe("Code Quality Specialist");
+    });
+
+    it("detectAgentReviewGateInConfirmationPrompt returns null for legitimate Board decisions", () => {
+      expect(detectAgentReviewGateInConfirmationPrompt("Grant Vercel staging access?")).toBeNull();
+      expect(detectAgentReviewGateInConfirmationPrompt("Approve production deployment?")).toBeNull();
+      expect(detectAgentReviewGateInConfirmationPrompt("The code quality looks great — approve?")).toBeNull();
+    });
+
+    it("blocks agent from creating request_confirmation that names a reviewer agent gate (FUL-11220 regression)", async () => {
+      const { companyId, issueId, agentId } = await seedAgentIssue("Fix stale approval context");
+
+      await expect(interactionsSvc.create(
+        { id: issueId, companyId, status: "in_progress", assigneeAgentId: agentId },
+        {
+          kind: "request_confirmation",
+          continuationPolicy: "wake_assignee_on_accept",
+          payload: {
+            version: 1,
+            prompt:
+              "Implementation complete. Per AC-4, Code Quality Specialist must re-review and accept before merge. Confirm when CQS review is done.",
+          },
+        },
+        { agentId },
+      )).rejects.toThrow(/Board confirmations must not gate reviewer-agent handoffs/);
+    });
+
+    it("allows Board user to create request_confirmation even with reviewer role mention", async () => {
+      const { companyId, issueId } = await seedAgentIssue("Board can still confirm");
+
+      const created = await interactionsSvc.create(
+        { id: issueId, companyId },
+        {
+          kind: "request_confirmation",
+          continuationPolicy: "none",
+          payload: {
+            version: 1,
+            prompt:
+              "Code Quality Specialist review is complete — approve for merge?",
+          },
+        },
+        { userId: "local-board" },
+      );
+
+      expect(created.status).toBe("pending");
+    });
+
+    it("allows agent to create request_confirmation without reviewer gate language", async () => {
+      const { companyId, issueId, agentId } = await seedAgentIssue("Agent non-gate confirmation");
+
+      const created = await interactionsSvc.create(
+        { id: issueId, companyId, status: "in_progress", assigneeAgentId: agentId },
+        {
+          kind: "request_confirmation",
+          continuationPolicy: "none",
+          payload: {
+            version: 1,
+            prompt: "Grant Vercel staging credentials?",
+          },
+        },
+        { agentId },
+      );
+
+      expect(created.status).toBe("pending");
+    });
+
+    it("expireAgentReviewGateConfirmations removes pending Board confirmations for reviewer agent gates", async () => {
+      const { companyId, issueId } = await seedAgentIssue("Cleanup stale review gates");
+
+      // Directly insert a bad interaction (bypasses guardrail to simulate pre-guardrail card)
+      await db.insert(issueThreadInteractions).values({
+        companyId,
+        issueId,
+        kind: "request_confirmation",
+        status: "pending",
+        continuationPolicy: "wake_assignee_on_accept",
+        payload: {
+          version: 1,
+          prompt:
+            "Implementation complete. Per AC-4, Code Quality Specialist must re-review and accept before merge. Confirm when CQS review is done.",
+          supersedeOnUserComment: true,
+        },
+        createdByAgentId: null,
+        createdByUserId: null,
+      });
+
+      const expired = await interactionsSvc.expireAgentReviewGateConfirmations(
+        { id: issueId, companyId },
+        { userId: "local-board" },
+      );
+
+      expect(expired).toHaveLength(1);
+      expect(expired[0]?.status).toBe("expired");
+      expect(expired[0]?.kind).toBe("request_confirmation");
+    });
+  });
+
+  describe("dismissInteraction (FUL-14276)", () => {
+    it("dismisses an ask_user_questions interaction as cancelled with an empty answer set", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Dismiss ask_user_questions");
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "ask_user_questions",
+        continuationPolicy: "wake_assignee",
+        payload: {
+          version: 1,
+          questions: [
+            {
+              id: "scope",
+              prompt: "Choose the scope",
+              selectionMode: "single",
+              required: true,
+              options: [
+                { id: "phase-1", label: "Phase 1" },
+                { id: "phase-2", label: "Phase 2" },
+              ],
+            },
+          ],
+        },
+      }, { userId: "local-board" });
+
+      const dismissed = await interactionsSvc.dismissInteraction(
+        { id: issueId, companyId },
+        created.id,
+        { reason: "No longer needed" },
+        { userId: "local-board" },
+      );
+
+      expect(dismissed.status).toBe("cancelled");
+      expect(dismissed.result).toEqual({
+        version: 1,
+        answers: [],
+        cancelled: true,
+        cancellationReason: "No longer needed",
+        summaryMarkdown: null,
+      });
+      expect(dismissed.resolvedByUserId).toBe("local-board");
+      expect(dismissed.resolvedByAgentId).toBeNull();
+      expect(dismissed.resolvedAt).not.toBeNull();
+    });
+
+    it("dismisses a suggest_tasks interaction as cancelled with a rejection reason", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Dismiss suggest_tasks");
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "suggest_tasks",
+        continuationPolicy: "wake_assignee",
+        payload: {
+          version: 1,
+          tasks: [{ clientKey: "root", title: "Create the root follow-up" }],
+        },
+      }, { userId: "local-board" });
+
+      const dismissed = await interactionsSvc.dismissInteraction(
+        { id: issueId, companyId },
+        created.id,
+        { reason: "Not needed anymore" },
+        { userId: "local-board" },
+      );
+
+      expect(dismissed.status).toBe("cancelled");
+      expect(dismissed.result).toEqual({
+        version: 1,
+        rejectionReason: "Not needed anymore",
+      });
+    });
+
+    it("dismisses a request_confirmation interaction as cancelled with a rejected outcome", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Dismiss request_confirmation");
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: {
+          version: 1,
+          prompt: "Apply this plan?",
+        },
+      }, { userId: "local-board" });
+
+      const dismissed = await interactionsSvc.dismissInteraction(
+        { id: issueId, companyId },
+        created.id,
+        { reason: "Stale, agent no longer needs approval" },
+        { userId: "local-board" },
+      );
+
+      expect(dismissed.status).toBe("cancelled");
+      expect(dismissed.result).toEqual({
+        version: 1,
+        outcome: "rejected",
+        reason: "Stale, agent no longer needs approval",
+      });
+    });
+
+    it("dismisses a request_checkbox_confirmation interaction as cancelled with a null reason when none is given", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Dismiss request_checkbox_confirmation");
+      const agentId = randomUUID();
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "CodexCoder",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_checkbox_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: {
+          version: 1,
+          prompt: "Which files should be deleted?",
+          options: [
+            { id: "file-a", label: "a.txt" },
+            { id: "file-b", label: "b.txt" },
+          ],
+        },
+      }, { userId: "local-board" });
+
+      const dismissed = await interactionsSvc.dismissInteraction(
+        { id: issueId, companyId },
+        created.id,
+        {},
+        { agentId },
+      );
+
+      expect(dismissed.status).toBe("cancelled");
+      expect(dismissed.result).toEqual({
+        version: 1,
+        outcome: "rejected",
+        reason: null,
+      });
+      expect(dismissed.resolvedByAgentId).toBe(agentId);
+      expect(dismissed.resolvedByUserId).toBeNull();
+    });
+
+    it("throws not found when the interaction belongs to a different issue in the same company", async () => {
+      const { companyId, goalId, issueId } = await seedConfirmationIssue("Dismiss issue mismatch owner");
+      const otherIssueId = randomUUID();
+      await db.insert(issues).values({
+        id: otherIssueId,
+        companyId,
+        goalId,
+        title: "Unrelated issue",
+        status: "in_progress",
+        priority: "medium",
+      });
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: { version: 1, prompt: "Apply this plan?" },
+      }, { userId: "local-board" });
+
+      await expect(interactionsSvc.dismissInteraction(
+        { id: otherIssueId, companyId },
+        created.id,
+        {},
+        { userId: "local-board" },
+      )).rejects.toThrow("Interaction not found");
+    });
+
+    it("throws not found when the interaction belongs to a different company", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Dismiss company mismatch owner");
+      const otherCompanyId = randomUUID();
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: { version: 1, prompt: "Apply this plan?" },
+      }, { userId: "local-board" });
+
+      await expect(interactionsSvc.dismissInteraction(
+        { id: issueId, companyId: otherCompanyId },
+        created.id,
+        {},
+        { userId: "local-board" },
+      )).rejects.toThrow("Interaction not found");
+    });
+
+    it("throws a conflict when dismissing an interaction that is not pending", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Dismiss already resolved");
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: { version: 1, prompt: "Apply this plan?" },
+      }, { userId: "local-board" });
+
+      await db
+        .update(issueThreadInteractions)
+        .set({ status: "rejected" })
+        .where(eq(issueThreadInteractions.id, created.id));
+
+      await expect(interactionsSvc.dismissInteraction(
+        { id: issueId, companyId },
+        created.id,
+        {},
+        { userId: "local-board" },
+      )).rejects.toThrow("Interaction has already been resolved");
+    });
+
+    it("allows only one winner when two dismiss calls race the same pending interaction", async () => {
+      const { companyId, issueId } = await seedConfirmationIssue("Dismiss concurrent race");
+
+      const created = await interactionsSvc.create({ id: issueId, companyId }, {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: { version: 1, prompt: "Apply this plan?" },
+      }, { userId: "local-board" });
+
+      const [first, second] = await Promise.allSettled([
+        interactionsSvc.dismissInteraction(
+          { id: issueId, companyId },
+          created.id,
+          { reason: "First caller" },
+          { userId: "local-board" },
+        ),
+        interactionsSvc.dismissInteraction(
+          { id: issueId, companyId },
+          created.id,
+          { reason: "Second caller" },
+          { userId: "local-board" },
+        ),
+      ]);
+
+      const outcomes = [first, second];
+      const fulfilled = outcomes.filter(
+        (outcome): outcome is PromiseFulfilledResult<Awaited<ReturnType<typeof interactionsSvc.dismissInteraction>>> =>
+          outcome.status === "fulfilled",
+      );
+      const rejected = outcomes.filter(
+        (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+      );
+
+      // Exactly one caller wins the atomic conditional update; the loser must see a
+      // conflict rather than silently overwriting the winner's result.
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect(fulfilled[0]?.value.status).toBe("cancelled");
+      expect((rejected[0]?.reason as Error).message).toBe("Interaction has already been resolved");
+
+      const winnerReason = (fulfilled[0]?.value.result as { reason?: string | null } | null)?.reason;
+
+      const rows = await db
+        .select()
+        .from(issueThreadInteractions)
+        .where(eq(issueThreadInteractions.id, created.id));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.status).toBe("cancelled");
+      // The persisted row must match the winner's reason, never a mix of both callers.
+      expect((rows[0]?.result as { reason?: string | null } | null)?.reason).toBe(winnerReason);
+      expect(["First caller", "Second caller"]).toContain(winnerReason);
+    });
+  });
 });
