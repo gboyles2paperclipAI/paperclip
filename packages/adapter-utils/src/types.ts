@@ -74,6 +74,11 @@ export interface AdapterExecutionResult {
   errorCode?: string | null;
   errorFamily?: AdapterExecutionErrorFamily | null;
   retryNotBefore?: string | null;
+  retryCount?: number | null;
+  fallbackFrom?: string | null;
+  fallbackTo?: string | null;
+  fallbackSuccess?: boolean | null;
+  durationMs?: number | null;
   errorMeta?: Record<string, unknown>;
   usage?: UsageSummary;
   /**

@@ -176,6 +176,7 @@ type SecretConsumerContext = {
   consumerType: SecretBindingTargetType;
   consumerId: string;
   configPath?: string | null;
+  configPathPrefix?: string | null;
   actorType?: "agent" | "user" | "system" | "plugin";
   actorId?: string | null;
   issueId?: string | null;
@@ -2328,14 +2329,15 @@ export function secretService(db: Db) {
         if (binding.type === "plain") {
           resolved[key] = binding.value;
         } else {
+          const configPath = context?.configPathPrefix ? `${context.configPathPrefix}.${key}` : `env.${key}`;
           const secretResolution = await resolveRuntimeSecretResolution(
             companyId,
             binding.secretId,
             binding.version,
-            context ? { ...context, configPath: `env.${key}` } : undefined,
+            context ? { ...context, configPath } : undefined,
           );
           resolved[key] = secretResolution.value;
-          manifest.push(secretResolution.manifestEntry);
+          manifest.push({ ...secretResolution.manifestEntry, envKey: key });
           secretKeys.add(key);
         }
       }
@@ -2371,14 +2373,15 @@ export function secretService(db: Db) {
         if (binding.type === "plain") {
           env[key] = binding.value;
         } else {
+          const configPath = context?.configPathPrefix ? `${context.configPathPrefix}.${key}` : `env.${key}`;
           const secretResolution = await resolveRuntimeSecretResolution(
             companyId,
             binding.secretId,
             binding.version,
-            context ? { ...context, configPath: `env.${key}` } : undefined,
+            context ? { ...context, configPath } : undefined,
           );
           env[key] = secretResolution.value;
-          manifest.push(secretResolution.manifestEntry);
+          manifest.push({ ...secretResolution.manifestEntry, envKey: key });
           secretKeys.add(key);
         }
       }
