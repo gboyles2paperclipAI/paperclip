@@ -442,6 +442,10 @@ export interface IssueExecutionMonitorPolicy {
   recoveryPolicy?: IssueExecutionMonitorRecoveryPolicy | null;
 }
 
+export interface IssueExecutionPolicyStanding {
+  reason?: string;
+}
+
 export interface IssueExecutionPolicy {
   mode: IssueExecutionPolicyMode;
   commentRequired: boolean;
@@ -449,6 +453,8 @@ export interface IssueExecutionPolicy {
   monitor?: IssueExecutionMonitorPolicy | null;
   reviewPreset?: LowTrustReviewPresetPolicy;
   authorizationPolicy?: TrustAuthorizationPolicy;
+  /** Marks this issue as a long-running standing log. Exempts it from churn auto-stop. */
+  standing?: IssueExecutionPolicyStanding | null;
 }
 
 export interface IssueExecutionMonitorState {
