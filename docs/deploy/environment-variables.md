@@ -28,6 +28,20 @@ All environment variables that Paperclip uses for server configuration.
 | `PAPERCLIP_SECRETS_MASTER_KEY_FILE` | `~/.paperclip/.../secrets/master.key` | Path to key file |
 | `PAPERCLIP_SECRETS_STRICT_MODE` | `false` | Require secret refs for sensitive env vars |
 
+## Slack Integration
+
+These values can be set as environment variables or stored as Paperclip company secrets. See [Slack Integration](/deploy/slack-integration) for setup and smoke tests.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SLACK_BOT_TOKEN` | (unset) | Bot token used to post Slack notifications |
+| `SLACK_APP_TOKEN` | (unset) | App-level token used for Socket Mode |
+| `SLACK_SIGNING_SECRET` | (unset) | Signing secret used to verify HTTP interaction requests |
+| `SLACK_APPROVALS_CHANNEL_ID` | (unset) | Channel ID for approval cards |
+| `SLACK_ALERTS_CHANNEL_ID` | (unset) | Channel ID for blocker and escalation alerts |
+| `SLACK_TICKETS_CHANNEL_ID` | (unset) | Channel ID for ticket-created notifications |
+| `SLACK_USER_MAP_JSON` | (unset) | JSON object mapping Slack user IDs to Paperclip board user IDs |
+
 ## Agent Runtime (Injected into agent processes)
 
 These are set automatically by the server when invoking agents:

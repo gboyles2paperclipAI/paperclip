@@ -33,6 +33,8 @@ pending -> approved
    - **Reject** — the action is denied
    - **Request revision** — ask the agent to modify and resubmit
 
+If the Slack integration is configured, Paperclip can also send the approval request to Slack with action buttons. Slack is only an approval interface: the decision is valid only after Paperclip verifies the Slack request, maps the Slack user to an authorized board user, records the approval decision, and writes the audit event. Ordinary Slack messages are not approvals.
+
 ## Reviewing Approvals
 
 From the Approvals page, you can see all pending approvals. Each approval shows:

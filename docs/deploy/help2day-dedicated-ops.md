@@ -32,6 +32,12 @@ Before touching runtime, service, or database settings:
 
 Never print database URLs, passwords, tokens, cookies, or webhook URLs in logs or issue comments.
 
+## Slack Notifications And Approvals
+
+Help2day uses Paperclip's native Slack integration for operational notifications and board approval actions. Use Socket Mode for this private deployment; Paperclip does not need a public inbound URL for Slack approval buttons.
+
+Required secrets and test commands are documented in [Slack Integration](./slack-integration.md). Keep Paperclip as the approval source of truth: Slack button clicks must be processed by Paperclip before any agent treats an approval as granted. Free-form Slack replies are not approval authority.
+
 ## Approval Evidence Gate
 
 No Help2day or Paperclip agent may request human approval for a merge, deploy, service restart, database restart, or runtime activation unless it can present current, machine-verifiable evidence tied to the exact commit and configuration being approved.

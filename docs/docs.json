@@ -83,6 +83,7 @@
               "deploy/deployment-modes",
               "deploy/database",
               "deploy/secrets",
+              "deploy/slack-integration",
               "deploy/storage",
               "deploy/environment-variables"
             ]
