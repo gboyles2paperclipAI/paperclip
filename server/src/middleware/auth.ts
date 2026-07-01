@@ -28,6 +28,7 @@ interface ActorMiddlewareOptions {
 export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHandler {
   const boardAuth = boardAuthService(db);
   return async (req, _res, next) => {
+    const runIdHeader = normalizeRunIdHeader(req.header("x-paperclip-run-id"));
     req.actor =
       opts.deploymentMode === "local_trusted"
         ? {
@@ -37,10 +38,9 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
             userEmail: null,
             isInstanceAdmin: true,
             source: "local_implicit",
+            runId: runIdHeader,
           }
         : { type: "none", source: "none" };
-
-    const runIdHeader = normalizeRunIdHeader(req.header("x-paperclip-run-id"));
 
     const authHeader = req.header("authorization");
     if (!authHeader?.toLowerCase().startsWith("bearer ")) {

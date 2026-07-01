@@ -222,6 +222,28 @@ describeEmbeddedPostgres("authorization service", () => {
     expect(decision.explanation).toContain("Agent key cannot access another company");
   });
 
+  it("ignores malformed run ids before loading run-scoped policy", async () => {
+    const company = await createCompany(db, "MalformedRunId");
+    const actorAgent = await createAgent(db, company.id);
+
+    const decision = await authorizationService(db).decide({
+      actor: {
+        type: "agent",
+        agentId: actorAgent.id,
+        companyId: company.id,
+        runId: "'11111111-1111-4111-8111-111111111111'",
+        source: "agent_key",
+      },
+      action: "issue:read",
+      resource: { type: "company", companyId: company.id },
+    });
+
+    expect(decision).toMatchObject({
+      allowed: true,
+      reason: "allow_company_agent",
+    });
+  });
+
   it("allows simple-mode task assignment between same-company agents without explicit grants", async () => {
     const company = await createCompany(db, "AssignmentDefault");
     const actorAgent = await createAgent(db, company.id, { role: "engineer" });
