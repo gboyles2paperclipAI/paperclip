@@ -317,12 +317,14 @@ describe("agent issue mutation checkout ownership", () => {
       allowed:
         input.action === "tasks:assign" ||
         input.action === "issue:read" ||
+        input.action === "issue:comment" ||
         input.action === "issue:mutate" ||
         input.action === "company_scope:read",
       action: input.action,
       reason:
         input.action === "tasks:assign" ||
           input.action === "issue:read" ||
+          input.action === "issue:comment" ||
           input.action === "issue:mutate" ||
           input.action === "company_scope:read"
           ? "allow_explicit_grant"
@@ -330,6 +332,7 @@ describe("agent issue mutation checkout ownership", () => {
       explanation:
         input.action === "tasks:assign" ||
           input.action === "issue:read" ||
+          input.action === "issue:comment" ||
           input.action === "issue:mutate" ||
           input.action === "company_scope:read"
           ? "Allowed by test default."
@@ -606,6 +609,74 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockWorkProductService.update).not.toHaveBeenCalled();
     expect(mockStorageService.putFile).not.toHaveBeenCalled();
     expect(mockStorageService.deleteObject).not.toHaveBeenCalled();
+  });
+
+  it("allows an assigned child agent to post completion evidence on the parent issue", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "todo",
+      assigneeAgentId: ownerAgentId,
+      title: "Parent issue",
+    }));
+    mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+      allowed:
+        input.action === "issue:comment" ||
+        input.action === "issue:read" ||
+        input.action === "company_scope:read",
+      action: input.action,
+      reason:
+        input.action === "issue:comment"
+          ? "allow_assigned_descendant_ancestor_comment"
+          : input.action === "issue:read" || input.action === "company_scope:read"
+            ? "allow_explicit_grant"
+            : "deny_missing_grant",
+      explanation:
+        input.action === "issue:comment"
+          ? "Allowed because the actor is assigned to a descendant of the target issue."
+          : input.action === "issue:read" || input.action === "company_scope:read"
+            ? "Allowed by test default."
+            : "Missing permission.",
+    }));
+
+    const res = await request(await createApp(peerActor()))
+      .post(`/api/issues/${issueId}/comments`)
+      .send({ body: "FUL-14445 complete; evidence attached." });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      issueId,
+      "FUL-14445 complete; evidence attached.",
+      expect.objectContaining({ agentId: peerAgentId }),
+      expect.objectContaining({ authorType: "agent" }),
+    );
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("denies an agent comment on an unrelated issue owned by another agent", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "todo",
+      assigneeAgentId: ownerAgentId,
+      title: "Unrelated issue",
+    }));
+    mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+      allowed: input.action === "issue:read" || input.action === "company_scope:read",
+      action: input.action,
+      reason:
+        input.action === "issue:read" || input.action === "company_scope:read"
+          ? "allow_explicit_grant"
+          : "deny_missing_grant",
+      explanation:
+        input.action === "issue:read" || input.action === "company_scope:read"
+          ? "Allowed by test default."
+          : "Missing permission.",
+    }));
+
+    const res = await request(await createApp(peerActor()))
+      .post(`/api/issues/${issueId}/comments`)
+      .send({ body: "unrelated update" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Issue is outside this actor's authorization boundary");
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
   });
 
   it("rejects the checked-out owner without a run id on attachment upload (401)", async () => {

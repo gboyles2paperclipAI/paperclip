@@ -765,6 +765,100 @@ describeEmbeddedPostgres("authorization service", () => {
     });
   });
 
+  it("allows agents to comment on an ancestor issue when assigned to its descendant", async () => {
+    const company = await createCompany(db, "AncestorComment");
+    const actorAgent = await createAgent(db, company.id, { role: "engineer" });
+    const parentOwner = await createAgent(db, company.id, { role: "manager" });
+    const parentIssue = await createIssue(db, company.id, {
+      title: "Parent owned by another chain",
+      assigneeAgentId: parentOwner.id,
+    });
+    await createIssue(db, company.id, {
+      title: "Child assigned to actor",
+      parentId: parentIssue.id,
+      assigneeAgentId: actorAgent.id,
+    });
+
+    const authorization = authorizationService(db);
+    const actor = {
+      type: "agent",
+      agentId: actorAgent.id,
+      companyId: company.id,
+      source: "agent_key",
+    } as const;
+    const parentResource = {
+      type: "issue",
+      companyId: company.id,
+      issueId: parentIssue.id,
+      projectId: parentIssue.projectId,
+      parentIssueId: parentIssue.parentId,
+      assigneeAgentId: parentIssue.assigneeAgentId,
+      assigneeUserId: parentIssue.assigneeUserId,
+      status: parentIssue.status,
+    } as const;
+
+    await expect(authorization.decide({
+      actor,
+      action: "issue:comment",
+      resource: parentResource,
+    })).resolves.toMatchObject({
+      allowed: true,
+      reason: "allow_assigned_descendant_ancestor_comment",
+    });
+    await expect(authorization.decide({
+      actor,
+      action: "issue:mutate",
+      resource: parentResource,
+    })).resolves.toMatchObject({
+      allowed: false,
+      reason: "deny_missing_grant",
+    });
+  });
+
+  it("denies agent comments on unrelated issues owned by another agent", async () => {
+    const company = await createCompany(db, "UnrelatedComment");
+    const actorAgent = await createAgent(db, company.id, { role: "engineer" });
+    const parentOwner = await createAgent(db, company.id, { role: "manager" });
+    const heldParent = await createIssue(db, company.id, {
+      title: "Held parent",
+      assigneeAgentId: parentOwner.id,
+    });
+    await createIssue(db, company.id, {
+      title: "Held child assigned to actor",
+      parentId: heldParent.id,
+      assigneeAgentId: actorAgent.id,
+    });
+    const unrelatedIssue = await createIssue(db, company.id, {
+      title: "Unrelated parent",
+      assigneeAgentId: parentOwner.id,
+    });
+
+    const decision = await authorizationService(db).decide({
+      actor: {
+        type: "agent",
+        agentId: actorAgent.id,
+        companyId: company.id,
+        source: "agent_key",
+      },
+      action: "issue:comment",
+      resource: {
+        type: "issue",
+        companyId: company.id,
+        issueId: unrelatedIssue.id,
+        projectId: unrelatedIssue.projectId,
+        parentIssueId: unrelatedIssue.parentId,
+        assigneeAgentId: unrelatedIssue.assigneeAgentId,
+        assigneeUserId: unrelatedIssue.assigneeUserId,
+        status: unrelatedIssue.status,
+      },
+    });
+
+    expect(decision).toMatchObject({
+      allowed: false,
+      reason: "deny_missing_grant",
+    });
+  });
+
   it("allows scoped assignment inside a granted project and denies other projects", async () => {
     const company = await createCompany(db, "ProjectScope");
     const project = await createProject(db, company.id, "Allowed");

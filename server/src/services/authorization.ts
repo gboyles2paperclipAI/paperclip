@@ -45,6 +45,7 @@ export type AuthorizationAction =
   | "agent:read"
   | "agent:wake"
   | "company_scope:read"
+  | "issue:comment"
   | "issue:mutate"
   | "issue:read"
   | "project:read"
@@ -76,6 +77,7 @@ export type AuthorizationDecision = {
     | "allow_instance_admin"
     | "allow_explicit_grant"
     | "allow_legacy_agent_creator"
+    | "allow_assigned_descendant_ancestor_comment"
     | "allow_self"
     | "allow_company_agent"
     | "allow_company_member"
@@ -118,7 +120,7 @@ function permissionForAction(action: AuthorizationAction): PermissionKey | null 
   ) {
     return null;
   }
-  if (action === "issue:mutate") return null;
+  if (action === "issue:comment" || action === "issue:mutate") return null;
   return action;
 }
 
@@ -753,7 +755,7 @@ export function authorizationService(db: Db) {
         : lowTrustDeny("Project is outside this low-trust boundary.");
     }
 
-    if (input.action === "issue:read" || input.action === "issue:mutate") {
+    if (input.action === "issue:read" || input.action === "issue:comment" || input.action === "issue:mutate") {
       if (input.resource.type !== "issue") {
         return lowTrustDeny("Low-trust issue access is missing an issue resource.");
       }
@@ -848,6 +850,42 @@ export function authorizationService(db: Db) {
 
   async function isManagerOf(companyId: string, managerAgentId: string, assigneeAgentId: string) {
     return isAgentInSubtree(db, companyId, managerAgentId, assigneeAgentId);
+  }
+
+  async function issueHasAssignedDescendant(
+    companyId: string,
+    ancestorIssueId: string | null | undefined,
+    actorAgentId: string,
+  ) {
+    if (!ancestorIssueId) return false;
+    const rows = await db.execute(sql`
+      WITH RECURSIVE descendants(id, depth) AS (
+        SELECT id, 0
+        FROM issues
+        WHERE company_id = ${companyId}
+          AND id = ${ancestorIssueId}
+        UNION ALL
+        SELECT child.id, descendants.depth + 1
+        FROM issues child
+        JOIN descendants ON child.parent_id = descendants.id
+        WHERE child.company_id = ${companyId}
+          AND descendants.depth < ${LOW_TRUST_ISSUE_ANCESTRY_MAX_DEPTH - 1}
+      )
+      SELECT EXISTS(
+        SELECT 1
+        FROM descendants
+        JOIN issues assigned_issue ON assigned_issue.id = descendants.id
+        WHERE descendants.depth > 0
+          AND assigned_issue.company_id = ${companyId}
+          AND assigned_issue.assignee_agent_id = ${actorAgentId}
+      ) AS has_assigned_descendant
+    `);
+    const first = Array.isArray(rows) ? rows[0] : null;
+    return Boolean(
+      first &&
+        typeof first === "object" &&
+        (first as Record<string, unknown>).has_assigned_descendant === true,
+    );
   }
 
   async function decide(input: {
@@ -956,7 +994,10 @@ export function authorizationService(db: Db) {
               explanation: "Allowed by active cloud tenant company membership.",
             });
           }
-          if (input.action === "issue:mutate" && membership.membershipRole !== "viewer") {
+          if (
+            (input.action === "issue:comment" || input.action === "issue:mutate") &&
+            membership.membershipRole !== "viewer"
+          ) {
             return allow({
               action: input.action,
               reason: "allow_company_member",
@@ -1154,7 +1195,7 @@ export function authorizationService(db: Db) {
       });
     }
 
-    if (input.action === "issue:mutate") {
+    if (input.action === "issue:comment" || input.action === "issue:mutate") {
       const resource = input.resource.type === "issue" ? input.resource : null;
       if (resource?.assigneeAgentId === actorAgentId) {
         return allow({
@@ -1179,6 +1220,16 @@ export function authorizationService(db: Db) {
           action: input.action,
           reason: "allow_legacy_agent_creator",
           explanation: "Allowed by legacy agent creator authority (CEO role or canCreateAgents).",
+        });
+      }
+      if (
+        input.action === "issue:comment" &&
+        await issueHasAssignedDescendant(companyId, resource?.issueId, actorAgentId)
+      ) {
+        return allow({
+          action: input.action,
+          reason: "allow_assigned_descendant_ancestor_comment",
+          explanation: "Allowed because the actor is assigned to a descendant of the target issue.",
         });
       }
     }
