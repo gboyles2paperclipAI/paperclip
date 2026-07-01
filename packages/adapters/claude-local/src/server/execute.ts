@@ -621,7 +621,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const runtimeRemoteExecution = parseObject(runtimeSessionParams.remoteExecution);
   const runtimePromptBundleKey = asString(runtimeSessionParams.promptBundleKey, "");
   const hasMatchingPromptBundle =
-    runtimePromptBundleKey.length === 0 || runtimePromptBundleKey === promptBundle.bundleKey;
+    !promptBundle.instructionsFilePath || runtimePromptBundleKey === promptBundle.bundleKey;
   const isValidUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(runtimeSessionId);
   const canResumeSession =
     runtimeSessionId.length > 0 &&
@@ -726,10 +726,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     if (effectiveEffort) args.push("--effort", effectiveEffort);
     if (maxTurns > 0) args.push("--max-turns", String(maxTurns));
-    // On resumed sessions the instructions are already in the session cache;
-    // re-injecting them via --append-system-prompt-file wastes 5-10K tokens
-    // per heartbeat and the Claude CLI may reject the combination outright.
-    if (attemptInstructionsFilePath && !resumeSessionId) {
+    if (attemptInstructionsFilePath) {
       args.push("--append-system-prompt-file", attemptInstructionsFilePath);
     }
     args.push("--add-dir", effectivePromptBundleAddDir);
@@ -754,7 +751,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   const runAttempt = async (resumeSessionId: string | null) => {
-    const attemptInstructionsFilePath = resumeSessionId ? undefined : effectiveInstructionsFilePath;
+    const attemptInstructionsFilePath = effectiveInstructionsFilePath;
     const args = buildClaudeArgs(resumeSessionId, attemptInstructionsFilePath);
     const commandNotes: string[] = [];
     if (!resumeSessionId) {
@@ -765,7 +762,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         "Using a broad --allowedTools whitelist for remote execution so hosted targets do not inherit local Claude bypass permissions.",
       );
     }
-    if (attemptInstructionsFilePath && !resumeSessionId) {
+    if (attemptInstructionsFilePath) {
       commandNotes.push(
         `Injected agent instructions via --append-system-prompt-file ${instructionsFilePath} (with path directive appended)`,
       );

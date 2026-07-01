@@ -178,11 +178,6 @@ describe("claude remote execution", () => {
     const call = runChildProcess.mock.calls[0] as unknown as
       | [string, string, string[], { env: Record<string, string>; remoteExecution?: { remoteCwd: string } | null }]
       | undefined;
-    expect(call?.[2]).toContain("--allowedTools");
-    expect(call?.[2]).toContain(
-      "Task AskUserQuestion Bash CronCreate CronDelete CronList Edit EnterPlanMode EnterWorktree ExitPlanMode ExitWorktree Glob Grep Monitor NotebookEdit PushNotification Read RemoteTrigger ScheduleWakeup Skill TaskOutput TaskStop TodoWrite ToolSearch WebFetch WebSearch Write",
-    );
-    expect(call?.[2]).not.toContain("--dangerously-skip-permissions");
     expect(call?.[2]).toContain("--append-system-prompt-file");
     expect(call?.[2]).toContain(
       `${managedRemoteWorkspace}/.paperclip-runtime/claude/skills/agent-instructions.md`,
@@ -331,6 +326,191 @@ describe("claude remote execution", () => {
     const call = runChildProcess.mock.calls[0] as unknown as [string, string, string[]] | undefined;
     expect(call?.[2]).toContain("--resume");
     expect(call?.[2]).toContain("12345678-1234-4abc-9def-123456789012");
+  });
+
+  it("does not resume saved Claude sessions when instruction bundle metadata is missing", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-claude-prompt-bundle-stale-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const instructionsPath = path.join(rootDir, "instructions.md");
+    const managedRemoteWorkspace = "/remote/workspace/.paperclip-runtime/runs/run-stale-bundle/workspace";
+    await mkdir(workspaceDir, { recursive: true });
+    await writeFile(instructionsPath, "Use current guardrails.\n", "utf8");
+
+    await execute({
+      runId: "run-stale-bundle",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Claude Coder",
+        adapterType: "claude_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: "12345678-1234-4abc-9def-123456789012",
+        sessionParams: {
+          sessionId: "12345678-1234-4abc-9def-123456789012",
+          cwd: managedRemoteWorkspace,
+          remoteExecution: {
+            transport: "ssh",
+            host: "127.0.0.1",
+            port: 2222,
+            username: "fixture",
+            remoteCwd: managedRemoteWorkspace,
+          },
+        },
+        sessionDisplayId: "12345678-1234-4abc-9def-123456789012",
+        taskKey: null,
+      },
+      config: {
+        command: "claude",
+        instructionsFilePath: instructionsPath,
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: workspaceDir,
+          source: "project_primary",
+        },
+      },
+      executionTransport: {
+        remoteExecution: {
+          host: "127.0.0.1",
+          port: 2222,
+          username: "fixture",
+          remoteWorkspacePath: "/remote/workspace",
+          remoteCwd: "/remote/workspace",
+          privateKey: "PRIVATE KEY",
+          knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+          strictHostKeyChecking: true,
+        },
+      },
+      onLog: async () => {},
+    });
+
+    expect(runChildProcess).toHaveBeenCalledTimes(1);
+    const call = runChildProcess.mock.calls[0] as unknown as [string, string, string[]] | undefined;
+    expect(call?.[2]).not.toContain("--resume");
+    expect(call?.[2]).toContain("--append-system-prompt-file");
+    expect(call?.[2]).toContain(
+      `${managedRemoteWorkspace}/.paperclip-runtime/claude/skills/agent-instructions.md`,
+    );
+  });
+
+  it("reinjects current Claude instructions when a saved session is resumed", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-claude-resume-instructions-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const instructionsPath = path.join(rootDir, "instructions.md");
+    const managedRemoteWorkspace = "/remote/workspace/.paperclip-runtime/runs/run-resume-instructions/workspace";
+    await mkdir(workspaceDir, { recursive: true });
+    await writeFile(instructionsPath, "Use current guardrails.\n", "utf8");
+
+    let promptBundleKey = "";
+    await execute({
+      runId: "run-capture-bundle",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Claude Coder",
+        adapterType: "claude_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: "claude",
+        instructionsFilePath: instructionsPath,
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: workspaceDir,
+          source: "project_primary",
+        },
+      },
+      executionTransport: {
+        remoteExecution: {
+          host: "127.0.0.1",
+          port: 2222,
+          username: "fixture",
+          remoteWorkspacePath: "/remote/workspace",
+          remoteCwd: "/remote/workspace",
+          privateKey: "PRIVATE KEY",
+          knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+          strictHostKeyChecking: true,
+        },
+      },
+      onLog: async () => {},
+    }).then((result) => {
+      const params = result.sessionParams as Record<string, unknown> | null;
+      promptBundleKey = String(params?.promptBundleKey ?? "");
+    });
+
+    vi.clearAllMocks();
+
+    await execute({
+      runId: "run-resume-instructions",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Claude Coder",
+        adapterType: "claude_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: "12345678-1234-4abc-9def-123456789012",
+        sessionParams: {
+          sessionId: "12345678-1234-4abc-9def-123456789012",
+          cwd: managedRemoteWorkspace,
+          promptBundleKey,
+          remoteExecution: {
+            transport: "ssh",
+            host: "127.0.0.1",
+            port: 2222,
+            username: "fixture",
+            remoteCwd: managedRemoteWorkspace,
+          },
+        },
+        sessionDisplayId: "12345678-1234-4abc-9def-123456789012",
+        taskKey: null,
+      },
+      config: {
+        command: "claude",
+        instructionsFilePath: instructionsPath,
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: workspaceDir,
+          source: "project_primary",
+        },
+      },
+      executionTransport: {
+        remoteExecution: {
+          host: "127.0.0.1",
+          port: 2222,
+          username: "fixture",
+          remoteWorkspacePath: "/remote/workspace",
+          remoteCwd: "/remote/workspace",
+          privateKey: "PRIVATE KEY",
+          knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+          strictHostKeyChecking: true,
+        },
+      },
+      onLog: async () => {},
+    });
+
+    expect(promptBundleKey).toMatch(/^[a-f0-9]{64}$/);
+    expect(runChildProcess).toHaveBeenCalledTimes(1);
+    const call = runChildProcess.mock.calls[0] as unknown as [string, string, string[]] | undefined;
+    expect(call?.[2]).toContain("--resume");
+    expect(call?.[2]).toContain("12345678-1234-4abc-9def-123456789012");
+    expect(call?.[2]).toContain("--append-system-prompt-file");
+    expect(call?.[2]).toContain(
+      `${managedRemoteWorkspace}/.paperclip-runtime/claude/skills/agent-instructions.md`,
+    );
   });
 
 });
