@@ -4,7 +4,11 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const execMock = vi.fn();
 
 vi.mock("@kubernetes/client-node", () => ({
-  Exec: vi.fn().mockImplementation(() => ({ exec: execMock })),
+  // Must be a real `function` (not an arrow function) so `new Exec(kc)` in
+  // pod-exec.ts can invoke it as a constructor.
+  Exec: vi.fn().mockImplementation(function MockExec() {
+    return { exec: execMock };
+  }),
 }));
 
 const { execInPod } = await import("../../src/pod-exec.js");
@@ -15,9 +19,15 @@ describe("execInPod", () => {
   });
 
   it("returns success when the Kubernetes exec status callback reports success", async () => {
-    execMock.mockImplementation((_namespace, _pod, _container, _command, stdout, _stderr, _stdin, _tty, statusCallback) => {
+    execMock.mockImplementation((_namespace, _pod, _container, _command, stdout, stderr, _stdin, _tty, statusCallback) => {
       stdout.write("ok\n");
       statusCallback({ status: "Success" });
+      // The real @kubernetes/client-node Exec ends both output streams once
+      // it has processed the status frame; execInPod waits for both `end`
+      // events before resolving so it never returns before all buffered
+      // stdout/stderr bytes have been drained into its accumulators.
+      stdout.end();
+      stderr.end();
       return Promise.resolve(new EventEmitter());
     });
 

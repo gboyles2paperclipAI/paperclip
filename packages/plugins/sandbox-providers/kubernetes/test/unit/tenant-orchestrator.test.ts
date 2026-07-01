@@ -153,9 +153,13 @@ describe("ensureTenant", () => {
 
   it("tolerates a 409 AlreadyExists from a concurrent ensure for the same tenant", async () => {
     const clients = makeMockClients();
-    // Both racers saw the 404 read; the loser's create returns 409, which means
-    // the desired state exists and must not fail the lease acquisition.
+    // Both racers saw the 404 read; the loser's create returns 409. The loser
+    // then re-reads (this time the winner's write is visible) and replaces
+    // with its own desired manifest, so the lease acquisition must not fail.
     clients.core.createNamespace.mockRejectedValue({ statusCode: 409 });
+    clients.core.readNamespacedServiceAccount
+      .mockRejectedValueOnce({ code: 404 })
+      .mockResolvedValue({ metadata: { resourceVersion: "rv-loser" } });
     clients.core.createNamespacedServiceAccount.mockRejectedValue({ code: 409 });
     await expect(ensureTenant(clients as never, baseInput)).resolves.not.toThrow();
   });
