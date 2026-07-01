@@ -31,7 +31,7 @@ These almost always get merged quickly when they're clean.
 
 ### Path 2: Bigger or Impactful Changes
 
-- **First** talk about it in Discord → #dev channel  
+- **First** talk about it in GitHub Discussions before writing code.
   → Describe what you're trying to solve  
   → Share rough ideas / approach
 - Once there's rough agreement, build it
@@ -106,7 +106,7 @@ Uncoordinated feature PRs against the core product may be closed, even when the 
 If you want to contribute a feature:
 
 - Check [ROADMAP.md](ROADMAP.md) first
-- Start the discussion in Discord -> `#dev` before writing code
+- Start the discussion in GitHub Discussions before writing code
 - If the idea fits as an extension, prefer building it with the [plugin system](doc/plugins/PLUGIN_SPEC.md)
 - If you want to show a possible direction, reference implementations are welcome as feedback, but they generally will not be merged directly into core
 

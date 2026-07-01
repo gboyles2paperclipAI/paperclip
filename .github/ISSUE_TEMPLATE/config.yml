@@ -1,7 +1,7 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Discord (#dev)
-    url: https://discord.gg/paperclipai
+  - name: GitHub Discussions
+    url: https://github.com/paperclipai/paperclip/discussions
     about: Design discussions, questions, and feature coordination before opening a PR
   - name: Roadmap
     url: https://github.com/paperclipai/paperclip/blob/master/ROADMAP.md

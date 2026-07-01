@@ -20,6 +20,7 @@ import {
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+import { slackIntegrationService } from "../services/slack-integration.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -40,6 +41,9 @@ export function approvalRoutes(
   });
   const issueApprovalsSvc = issueApprovalService(db);
   const secretsSvc = secretService(db);
+  const slack = slackIntegrationService(db, {
+    pluginWorkerManager: options.pluginWorkerManager,
+  });
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
   async function requireApprovalAccess(req: Request, id: string) {
@@ -133,6 +137,7 @@ export function approvalRoutes(
       entityId: approval.id,
       details: { type: approval.type, issueIds: uniqueIssueIds },
     });
+    await slack.postApprovalRequested(approval.id);
 
     res.status(201).json(redactApprovalPayload(approval));
   });

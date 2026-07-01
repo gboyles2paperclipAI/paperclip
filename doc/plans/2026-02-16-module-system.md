@@ -605,7 +605,7 @@ pnpm paperclipai store export                  # export current company as templ
 |--------|-------------|-----------|
 | **Observability** | Token usage tracking, cost metrics, agent performance dashboards, Prometheus export | `agent:heartbeat`, `budget:spend_recorded` |
 | **Revenue Tracking** | Connect Stripe/crypto wallets, track income, show P&L against agent costs | `budget:spend_recorded` |
-| **Notifications** | Slack/Discord/email alerts on configurable triggers | All hooks (configurable) |
+| **Notifications** | Slack/email alerts on configurable triggers | All hooks (configurable) |
 
 ### Tier 2 — High value
 

@@ -549,7 +549,7 @@ export const addIssueCommentSchema = z.object({
 
 export type AddIssueComment = z.infer<typeof addIssueCommentSchema>;
 
-export const ISSUE_MARKER_KINDS = ["discord-notified"] as const;
+export const ISSUE_MARKER_KINDS = ["slack-notified"] as const;
 export type IssueMarkerKind = (typeof ISSUE_MARKER_KINDS)[number];
 
 export const addIssueMarkerSchema = z.object({

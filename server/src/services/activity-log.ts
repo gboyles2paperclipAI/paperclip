@@ -117,4 +117,15 @@ export async function logActivity(db: Db, input: LogActivityInput) {
     };
     publishPluginDomainEvent(event);
   }
+
+  void import("./slack-integration.js")
+    .then(({ maybeNotifySlackForActivity }) => {
+      maybeNotifySlackForActivity({
+        action: input.action,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        details: redactedDetails,
+      });
+    })
+    .catch(() => {});
 }

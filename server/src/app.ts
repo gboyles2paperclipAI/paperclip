@@ -31,6 +31,7 @@ import { executionWorkspaceRoutes } from "./routes/execution-workspaces.js";
 import { goalRoutes } from "./routes/goals.js";
 import { boardChatRoutes } from "./routes/board-chat.js";
 import { approvalRoutes } from "./routes/approvals.js";
+import { slackIntegrationRoutes } from "./routes/slack-integrations.js";
 import { secretRoutes } from "./routes/secrets.js";
 import { costRoutes } from "./routes/costs.js";
 import { activityRoutes } from "./routes/activity.js";
@@ -179,6 +180,11 @@ export async function createApp(
     limit: PORTABLE_JSON_BODY_LIMIT,
     verify: captureRawBody,
   }));
+  app.use("/api/integrations/slack/interactions", express.urlencoded({
+    extended: false,
+    limit: DEFAULT_JSON_BODY_LIMIT,
+    verify: captureRawBody,
+  }));
   app.use(express.json({
     limit: DEFAULT_JSON_BODY_LIMIT,
     verify: captureRawBody,
@@ -252,6 +258,7 @@ export async function createApp(
   api.use(executionWorkspaceRoutes(db));
   api.use(goalRoutes(db));
   api.use(boardChatRoutes(db, { deploymentMode: opts.deploymentMode }));
+  api.use(slackIntegrationRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(approvalRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(secretRoutes(db));
   api.use(costRoutes(db, { pluginWorkerManager: workerManager }));

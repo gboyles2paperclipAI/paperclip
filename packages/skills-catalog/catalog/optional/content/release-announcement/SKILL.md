@@ -36,7 +36,7 @@ Write the channel-appropriate announcement for a release without churn. Differen
 | Engineering teams adopting your API | Release notes, dev blog | Examples, migration steps, version pins |
 | Prospective customers | Landing page, marketing blog | Story arc, problem → solution, social proof |
 | Broad audience | Social post, email newsletter | One-sentence pitch, link to depth |
-| Internal team | Slack/Discord post | What changed, who to ping if it breaks |
+| Internal team | Slack post | What changed, who to ping if it breaks |
 
 Pick the audience for *this* writeup. One release often needs several writeups; do not blend them.
 

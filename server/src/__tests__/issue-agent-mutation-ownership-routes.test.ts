@@ -1435,7 +1435,7 @@ describe("issue markers endpoint (cross-assignee dedup write path)", () => {
     mockAccessService.hasPermission.mockResolvedValue(false);
     mockIssueService.addComment.mockResolvedValue({
       id: "cc111111-1111-4111-8111-111111111111",
-      body: "[discord-notified:int-123:2026-05-27T00:00:00Z]",
+      body: "[slack-notified:int-123:2026-05-27T00:00:00Z]",
       authorType: "agent",
       authorAgentId: peerAgentId,
       createdAt: new Date().toISOString(),
@@ -1451,14 +1451,14 @@ describe("issue markers endpoint (cross-assignee dedup write path)", () => {
 
     const res = await request(await createApp(peerActor()))
       .post(`/api/issues/${issueId}/markers`)
-      .send({ kind: "discord-notified", body: "[discord-notified:int-123:2026-05-27T00:00:00Z]" });
+      .send({ kind: "slack-notified", body: "[slack-notified:int-123:2026-05-27T00:00:00Z]" });
 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
-    expect(res.body.kind).toBe("discord-notified");
+    expect(res.body.kind).toBe("slack-notified");
     expect(res.body.comment).toBeDefined();
     expect(mockIssueService.addComment).toHaveBeenCalledWith(
       issueId,
-      "[discord-notified:int-123:2026-05-27T00:00:00Z]",
+      "[slack-notified:int-123:2026-05-27T00:00:00Z]",
       expect.objectContaining({ agentId: peerAgentId }),
       expect.objectContaining({ presentation: null }),
     );
@@ -1471,7 +1471,7 @@ describe("issue markers endpoint (cross-assignee dedup write path)", () => {
 
     await request(await createApp(peerActor()))
       .post(`/api/issues/${issueId}/markers`)
-      .send({ kind: "discord-notified", body: "[discord-notified:int-123:2026-05-27T00:00:00Z]" });
+      .send({ kind: "slack-notified", body: "[slack-notified:int-123:2026-05-27T00:00:00Z]" });
 
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
@@ -1483,7 +1483,7 @@ describe("issue markers endpoint (cross-assignee dedup write path)", () => {
 
     const res = await request(await createApp(boardActor()))
       .post(`/api/issues/${issueId}/markers`)
-      .send({ kind: "discord-notified", body: "[discord-notified:int-123:2026-05-27T00:00:00Z]" });
+      .send({ kind: "slack-notified", body: "[slack-notified:int-123:2026-05-27T00:00:00Z]" });
 
     expect(res.status).toBe(403);
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
@@ -1496,7 +1496,7 @@ describe("issue markers endpoint (cross-assignee dedup write path)", () => {
 
     const res = await request(await createApp(peerActor()))
       .post(`/api/issues/${issueId}/markers`)
-      .send({ kind: "arbitrary-injection", body: "[discord-notified:int-123:2026-05-27T00:00:00Z]" });
+      .send({ kind: "arbitrary-injection", body: "[slack-notified:int-123:2026-05-27T00:00:00Z]" });
 
     expect(res.status).toBe(400);
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
@@ -1509,7 +1509,7 @@ describe("issue markers endpoint (cross-assignee dedup write path)", () => {
 
     const res = await request(await createApp(peerActor()))
       .post(`/api/issues/${issueId}/markers`)
-      .send({ kind: "discord-notified", body: "x".repeat(501) });
+      .send({ kind: "slack-notified", body: "x".repeat(501) });
 
     expect(res.status).toBe(400);
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
@@ -1520,7 +1520,7 @@ describe("issue markers endpoint (cross-assignee dedup write path)", () => {
 
     const res = await request(await createApp(peerActor()))
       .post(`/api/issues/${issueId}/markers`)
-      .send({ kind: "discord-notified", body: "[discord-notified:int-999:2026-05-27T00:00:00Z]" });
+      .send({ kind: "slack-notified", body: "[slack-notified:int-999:2026-05-27T00:00:00Z]" });
 
     expect(res.status).toBe(404);
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
