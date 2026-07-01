@@ -14,9 +14,10 @@ export const label = "OpenCode (local)";
 // `sh -c` probe invocations (used by the runtime PATH check) cannot find the
 // binary. We fix that by symlinking the installed binary into a directory on
 // the non-login `sh -c` PATH: prefer `/usr/local/bin` (universally on the
-// default PATH on Linux distros) when root or passwordless sudo is available,
-// otherwise fall back to `$HOME/.local/bin` (which is on the default PATH on
-// the exe.dev sandbox image and most modern home-managed Linux images).
+// default PATH on Linux distros) when root is available. Passwordless sudo is
+// only probed when PAPERCLIP_ALLOW_NOPASSWD_SUDO=1 is explicitly set for an
+// execution target known to have a narrow NOPASSWD rule; otherwise we fall
+// back to `$HOME/.local/bin` to avoid PAM auth noise under paperclip.service.
 //
 // Security tradeoff: this is `curl | bash` without a SHA-256 verification of
 // the install script. We accept this because:
@@ -36,7 +37,7 @@ export const SANDBOX_INSTALL_COMMAND =
   'if [ -x "$HOME/.opencode/bin/opencode" ]; then ' +
   'if [ "$(id -u)" -eq 0 ]; then ' +
   'ln -sf "$HOME/.opencode/bin/opencode" /usr/local/bin/opencode; ' +
-  'elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then ' +
+  'elif [ "${PAPERCLIP_ALLOW_NOPASSWD_SUDO:-}" = "1" ] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then ' +
   'sudo ln -sf "$HOME/.opencode/bin/opencode" /usr/local/bin/opencode; ' +
   'else ' +
   'mkdir -p "$HOME/.local/bin" && ' +
