@@ -13,6 +13,11 @@ export interface RunForIssue {
   createdAt: string;
   invocationSource: string;
   errorCode?: string | null;
+  retryCount?: number;
+  fallbackFrom?: string | null;
+  fallbackTo?: string | null;
+  fallbackSuccess?: boolean | null;
+  durationMs?: number | null;
   usageJson: Record<string, unknown> | null;
   resultJson: Record<string, unknown> | null;
   logBytes?: number | null;

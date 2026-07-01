@@ -485,6 +485,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
   projectId?: string | null;
   routineId?: string | null;
   executionRunConfig: Record<string, unknown>;
+  executionRunEnvConfigPathPrefix?: string | null;
   projectEnv: unknown;
   routineEnv?: unknown;
   secretsSvc: RuntimeConfigSecretResolver;
@@ -512,6 +513,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
           actorId: input.agentId,
           issueId: input.issueId ?? null,
           heartbeatRunId: input.heartbeatRunId ?? null,
+          configPathPrefix: input.executionRunEnvConfigPathPrefix ?? undefined,
           ...(lowTrustAllowedBindingIds !== undefined ? { allowedBindingIds: lowTrustAllowedBindingIds } : {}),
         }
       : undefined,
@@ -1645,6 +1647,17 @@ export function mergeModelProfileAdapterConfig(input: {
   };
 }
 
+function resolveModelProfileEnvConfigPathPrefix(input: {
+  modelProfile: ModelProfileApplication;
+  issueAdapterConfig: Record<string, unknown> | null | undefined;
+}): string | null {
+  if (input.modelProfile.configSource !== "agent_runtime") return null;
+  if (!input.modelProfile.applied) return null;
+  if (!Object.prototype.hasOwnProperty.call(input.modelProfile.adapterConfig ?? {}, "env")) return null;
+  if (Object.prototype.hasOwnProperty.call(input.issueAdapterConfig ?? {}, "env")) return null;
+  return `runtimeConfig.modelProfiles.${input.modelProfile.applied}.adapterConfig.env`;
+}
+
 function modelProfileRunMetadata(
   modelProfile: ModelProfileApplication,
 ): Record<string, unknown> | null {
@@ -2112,6 +2125,11 @@ export function shouldResetTaskSessionForWake(
 ) {
   if (contextSnapshot?.forceFreshSession === true) return true;
 
+  const wakeSource = readNonEmptyString(contextSnapshot?.wakeSource);
+  if (wakeSource === "on_demand") {
+    return true;
+  }
+
   const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
   if (
     wakeReason === "issue_assigned" ||
@@ -2224,6 +2242,9 @@ export function describeSessionResetReason(
   contextSnapshot: Record<string, unknown> | null | undefined,
 ) {
   if (contextSnapshot?.forceFreshSession === true) return "forceFreshSession was requested";
+
+  const wakeSource = readNonEmptyString(contextSnapshot?.wakeSource);
+  if (wakeSource === "on_demand") return "wake source is on_demand (manual wake starts fresh)";
 
   const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
   if (wakeReason === "issue_assigned") return "wake reason is issue_assigned";
@@ -5014,6 +5035,70 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     return updated;
   }
+
+  async function setRunStatusIfRunning(
+    runId: string,
+    status: string,
+    patch?: Partial<typeof heartbeatRuns.$inferInsert>,
+  ) {
+    const updated = await db
+      .update(heartbeatRuns)
+      .set({ status, ...patch, updatedAt: new Date() })
+      .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.status, "running")))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+
+    if (updated) {
+      if (isHeartbeatRunTerminalStatus(updated.status)) {
+        clearHeartbeatRunRuntimeStatus(updated.id);
+      }
+      publishLiveEvent({
+        companyId: updated.companyId,
+        type: "heartbeat.run.status",
+        payload: {
+          runId: updated.id,
+          agentId: updated.agentId,
+          status: updated.status,
+          invocationSource: updated.invocationSource,
+          triggerDetail: updated.triggerDetail,
+          error: updated.error ?? null,
+          errorCode: updated.errorCode ?? null,
+          startedAt: updated.startedAt ? new Date(updated.startedAt).toISOString() : null,
+          finishedAt: updated.finishedAt ? new Date(updated.finishedAt).toISOString() : null,
+        },
+      });
+      publishRunLifecyclePluginEvent(updated);
+      return { run: updated, updated: true as const };
+    }
+
+    const current = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+
+    return { run: current, updated: false as const };
+  }
+
+  function normalizeTelemetryCount(...values: Array<unknown>) {
+    let normalized = 0;
+    for (const value of values) {
+      if (typeof value !== "number" || !Number.isFinite(value)) continue;
+      normalized = Math.max(normalized, Math.max(0, Math.floor(value)));
+    }
+    return normalized;
+  }
+
+  function normalizeTelemetryString(value: unknown) {
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  }
+
+  function normalizeTelemetryDurationMs(startedAt: Date | string | null | undefined, finishedAt: Date) {
+    const started = startedAt instanceof Date ? startedAt : startedAt ? new Date(startedAt) : null;
+    if (!started || Number.isNaN(started.getTime())) return null;
+    return Math.max(0, Math.floor(finishedAt.getTime() - started.getTime()));
+  }
+
 
   function publishRunLifecyclePluginEvent(run: typeof heartbeatRuns.$inferSelect) {
     const eventType =
@@ -8958,10 +9043,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } else {
       delete context.paperclipModelProfile;
     }
+    const issueAdapterConfig = issueAssigneeOverrides?.adapterConfig ?? null;
     const mergedConfig = mergeModelProfileAdapterConfig({
       baseConfig: persistedWorkspaceManagedConfig,
       modelProfile: modelProfileApplication,
-      issueAdapterConfig: issueAssigneeOverrides?.adapterConfig ?? null,
+      issueAdapterConfig,
+    });
+    const executionRunEnvConfigPathPrefix = resolveModelProfileEnvConfigPathPrefix({
+      modelProfile: modelProfileApplication,
+      issueAdapterConfig,
     });
     const configSnapshot = buildExecutionWorkspaceConfigSnapshot(mergedConfig, selectedEnvironmentId);
     const executionRunConfig = stripWorkspaceRuntimeFromExecutionRunConfig(mergedConfig);
@@ -9116,6 +9206,48 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       companyId: agent.companyId,
       issueId,
     });
+    const pushCapabilityPreflightRequired = requiresPushCapabilityPreflight({
+      adapterType: agent.adapterType,
+      issueId,
+      explicitRunScopedSkillKeys: runScopedMentionedSkillKeys,
+    });
+    const fullResolved = await resolveExecutionRunAdapterConfig({
+      companyId: agent.companyId,
+      agentId: agent.id,
+      adapterType: agent.adapterType,
+      issueId,
+      heartbeatRunId: run.id,
+      environmentId: selectedEnvironmentForConfig?.id ?? null,
+      environmentEnv: selectedEnvironmentForConfig?.envVars ?? null,
+      projectId: projectContext?.id ?? null,
+      routineId: routineEnvContext.routineId,
+      executionRunConfig,
+      executionRunEnvConfigPathPrefix,
+      projectEnv: projectContext?.env ?? null,
+      routineEnv: routineEnvContext.env,
+      secretsSvc,
+      trustPreset,
+      requiredScopedEnvBinding: pushCapabilityPreflightRequired
+        ? {
+            keys: [...PUSH_CAPABILITY_ENV_KEYS],
+            consumerScopes: ["agent", "project"],
+            reason: "push_write_credential_missing",
+            remediation:
+              "GitHub PR workflow requires GH_TOKEN or GITHUB_TOKEN bound at project or agent scope.",
+          }
+        : undefined,
+    });
+    resolvedConfig = fullResolved.resolvedConfig;
+    secretKeys = fullResolved.secretKeys;
+    secretManifest = fullResolved.secretManifest;
+    if (secretManifest.length > 0) {
+      context.paperclipSecrets = {
+        manifest: secretManifest,
+      };
+    } else {
+      delete context.paperclipSecrets;
+    }
+
     const effectiveResolvedConfig = applyRunScopedMentionedSkillKeys(
       resolvedConfig,
       runScopedMentionedSkillKeys,
@@ -10023,10 +10155,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         adapterResult.summary ?? null,
       );
 
-      let persistedRun = await setRunStatus(run.id, status, {
-        finishedAt: new Date(),
+      const finishedAt = new Date();
+      const persistedRunWrite = await setRunStatusIfRunning(run.id, status, {
+        finishedAt,
         error: runErrorMessage,
         errorCode: runErrorCode,
+        retryCount: normalizeTelemetryCount(
+          adapterResult.retryCount,
+          latestRun?.scheduledRetryAttempt,
+          run.scheduledRetryAttempt,
+          latestRun?.processLossRetryCount,
+          run.processLossRetryCount,
+        ),
+        fallbackFrom: normalizeTelemetryString(adapterResult.fallbackFrom),
+        fallbackTo: normalizeTelemetryString(adapterResult.fallbackTo),
+        fallbackSuccess: typeof adapterResult.fallbackSuccess === "boolean" ? adapterResult.fallbackSuccess : null,
+        durationMs: typeof adapterResult.durationMs === "number" && Number.isFinite(adapterResult.durationMs)
+          ? Math.max(0, Math.floor(adapterResult.durationMs))
+          : normalizeTelemetryDurationMs(latestRun?.startedAt ?? run.startedAt, finishedAt),
         exitCode: adapterResult.exitCode,
         signal: adapterResult.signal,
         usageJson,
@@ -10038,6 +10184,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         logSha256: logSummary?.sha256,
         logCompressed: logSummary?.compressed ?? false,
       });
+      let persistedRun = persistedRunWrite.run;
       if (persistedRun) {
         persistedRun = await classifyAndPersistRunLiveness(persistedRun, persistedResultJson) ?? persistedRun;
       }
