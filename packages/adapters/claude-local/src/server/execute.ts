@@ -810,7 +810,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       parsedStream: ReturnType<typeof parseClaudeStreamJson>;
       parsed: Record<string, unknown> | null;
     },
-    opts: { fallbackSessionId: string | null; clearSessionOnMissingSession?: boolean },
+    opts: { fallbackSessionId: string | null; clearSessionOnMissingSession?: boolean; retryCount?: number },
   ): AdapterExecutionResult => {
     const { proc, parsedStream, parsed } = attempt;
     const loginMeta = detectClaudeLoginRequired({
@@ -832,6 +832,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         timedOut: true,
         errorMessage: `Timed out after ${timeoutSec}s`,
         errorCode: "timeout",
+        retryCount: opts.retryCount ?? 0,
         errorMeta,
         clearSession: Boolean(opts.clearSessionOnMissingSession),
       };
@@ -869,6 +870,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         errorCode,
         errorFamily: transientUpstream ? "transient_upstream" : null,
         retryNotBefore: transientRetryNotBefore ? transientRetryNotBefore.toISOString() : null,
+        retryCount: opts.retryCount ?? 0,
+        fallbackFrom: opts.clearSessionOnMissingSession ? `${model || "claude_local"}:resume_session` : null,
+        fallbackTo: opts.clearSessionOnMissingSession ? `${model || "claude_local"}:fresh_session` : null,
+        fallbackSuccess: opts.clearSessionOnMissingSession ? false : null,
         errorMeta,
         resultJson: {
           stdout: proc.stdout,
@@ -986,6 +991,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ? "model_refusal"
         : null,
       retryNotBefore: transientRetryNotBefore ? transientRetryNotBefore.toISOString() : null,
+      retryCount: opts.retryCount ?? 0,
+      fallbackFrom: opts.clearSessionOnMissingSession ? `${model || "claude_local"}:resume_session` : null,
+      fallbackTo: opts.clearSessionOnMissingSession ? `${model || "claude_local"}:fresh_session` : null,
+      fallbackSuccess: opts.clearSessionOnMissingSession ? !failed : null,
       errorMeta,
       usage,
       sessionId: resolvedSessionId,
@@ -1056,7 +1065,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         }
       }
       const retry = await runAttempt(null);
-      return toAdapterResult(retry, { fallbackSessionId: null, clearSessionOnMissingSession: true });
+      return toAdapterResult(retry, { fallbackSessionId: null, clearSessionOnMissingSession: true, retryCount: 1 });
     }
 
     return toAdapterResult(initial, { fallbackSessionId: runtimeSessionId || runtime.sessionId });

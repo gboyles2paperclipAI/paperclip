@@ -132,6 +132,68 @@ describe("resolveExecutionRunAdapterConfig", () => {
     });
   });
 
+  it("passes model-profile env config path prefixes into agent env secret resolution", async () => {
+    const resolveAdapterConfigForRuntime = vi.fn().mockResolvedValue({
+      config: {
+        model: "gemini-2.5-flash-lite",
+        env: {
+          GEMINI_API_KEY: "resolved",
+        },
+      },
+      secretKeys: new Set(["GEMINI_API_KEY"]),
+      manifest: [
+        {
+          configPath: "runtimeConfig.modelProfiles.cheap.adapterConfig.env.GEMINI_API_KEY",
+          envKey: "GEMINI_API_KEY",
+          secretId: "secret-gemini",
+          secretKey: "gemini",
+          version: 1,
+          provider: "local_encrypted",
+          outcome: "success",
+        },
+      ],
+    });
+    const resolveEnvBindings = vi.fn();
+
+    const result = await resolveExecutionRunAdapterConfig({
+      companyId: "company-1",
+      agentId: "agent-1",
+      issueId: "issue-1",
+      heartbeatRunId: "run-1",
+      executionRunConfig: {
+        model: "gemini-2.5-flash-lite",
+        env: {
+          GEMINI_API_KEY: {
+            type: "secret_ref",
+            secretId: "secret-gemini",
+            version: "latest",
+          },
+        },
+      },
+      executionRunEnvConfigPathPrefix: "runtimeConfig.modelProfiles.cheap.adapterConfig.env",
+      projectEnv: null,
+      secretsSvc: {
+        resolveAdapterConfigForRuntime,
+        resolveEnvBindings,
+      } as any,
+    });
+
+    expect(resolveAdapterConfigForRuntime.mock.calls[0]?.[2]).toMatchObject({
+      consumerType: "agent",
+      consumerId: "agent-1",
+      issueId: "issue-1",
+      heartbeatRunId: "run-1",
+      configPathPrefix: "runtimeConfig.modelProfiles.cheap.adapterConfig.env",
+    });
+    expect(result.resolvedConfig.env).toEqual({
+      GEMINI_API_KEY: "resolved",
+    });
+    expect(result.secretManifest[0]).toMatchObject({
+      configPath: "runtimeConfig.modelProfiles.cheap.adapterConfig.env.GEMINI_API_KEY",
+      envKey: "GEMINI_API_KEY",
+    });
+  });
+
   it("drops Paperclip runtime-owned env before resolving environment, agent, project, and routine overlays", async () => {
     const resolveAdapterConfigForRuntime = vi.fn(async (_companyId, config: Record<string, unknown>) => ({
       config: {

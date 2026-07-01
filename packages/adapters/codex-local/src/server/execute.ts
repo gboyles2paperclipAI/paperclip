@@ -1017,6 +1017,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           stderr: attempt.proc.stderr,
           errorMessage: fallbackErrorMessage,
         });
+      const fallbackLabel = model || "codex_local";
+      const fallbackFrom =
+        forceFreshSession
+          ? `${fallbackLabel}:resume_session`
+          : isRetry
+          ? `${fallbackLabel}:unavailable_session`
+          : null;
+      const fallbackTo =
+        forceFreshSession
+          ? `${fallbackLabel}:fresh_session`
+          : isRetry
+          ? `${fallbackLabel}:fresh_session`
+          : null;
 
       return {
         exitCode: attempt.proc.exitCode,
@@ -1032,6 +1045,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             : null,
         errorFamily: transientUpstream ? "transient_upstream" : null,
         retryNotBefore: transientRetryNotBefore ? transientRetryNotBefore.toISOString() : null,
+        retryCount: isRetry || forceFreshSession || forceSaferInvocation ? 1 : 0,
+        fallbackFrom,
+        fallbackTo,
+        fallbackSuccess: fallbackFrom && fallbackTo ? (attempt.proc.exitCode ?? 0) === 0 : null,
         usage: attempt.parsed.usage,
         sessionId: resolvedSessionId,
         sessionParams: resolvedSessionParams,
