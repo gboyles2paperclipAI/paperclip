@@ -883,16 +883,20 @@ export function environmentCustomImageService(
           ))
           .limit(limit);
       } catch (err) {
-        // Migration skew guard: table absent (SQLSTATE 42P01) -- skip silently.
+        // Migration skew guard: table absent (SQLSTATE 42P01) or older partial
+        // table missing columns (SQLSTATE 42703) -- skip silently.
         // Drizzle wraps the raw PostgresError in DrizzleQueryError; walk the
         // cause chain so both the direct code and the wrapped code are caught.
-        const is42P01 = (e: unknown): boolean => {
+        const isMigrationSkew = (e: unknown): boolean => {
           if (!e || typeof e !== 'object') return false;
-          if ('code' in e && (e as { code: unknown }).code === '42P01') return true;
-          if ('cause' in e) return is42P01((e as { cause: unknown }).cause);
+          if ('code' in e) {
+            const code = (e as { code: unknown }).code;
+            if (code === '42P01' || code === '42703') return true;
+          }
+          if ('cause' in e) return isMigrationSkew((e as { cause: unknown }).cause);
           return false;
         };
-        if (is42P01(err)) return { scanned: 0, timedOut: 0, failed: 0 };
+        if (isMigrationSkew(err)) return { scanned: 0, timedOut: 0, failed: 0 };
         throw err;
       }
       let timedOut = 0;
