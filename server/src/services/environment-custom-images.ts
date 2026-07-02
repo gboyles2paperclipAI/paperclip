@@ -872,14 +872,29 @@ export function environmentCustomImageService(
     } = {}): Promise<EnvironmentCustomImageSetupCleanupResult> => {
       const now = input.now ?? new Date();
       const limit = Math.max(1, Math.min(input.limit ?? 25, 100));
-      const rows = await db
-        .select()
-        .from(environmentCustomImageSetupSessions)
-        .where(and(
-          inArray(environmentCustomImageSetupSessions.status, [...ACTIVE_SETUP_STATUSES]),
-          lte(environmentCustomImageSetupSessions.expiresAt, now),
-        ))
-        .limit(limit);
+      let rows: (typeof environmentCustomImageSetupSessions.$inferSelect)[];
+      try {
+        rows = await db
+          .select()
+          .from(environmentCustomImageSetupSessions)
+          .where(and(
+            inArray(environmentCustomImageSetupSessions.status, [...ACTIVE_SETUP_STATUSES]),
+            lte(environmentCustomImageSetupSessions.expiresAt, now),
+          ))
+          .limit(limit);
+      } catch (err) {
+        // Migration skew guard: table absent (SQLSTATE 42P01) -- skip silently.
+        // Drizzle wraps the raw PostgresError in DrizzleQueryError; walk the
+        // cause chain so both the direct code and the wrapped code are caught.
+        const is42P01 = (e: unknown): boolean => {
+          if (!e || typeof e !== 'object') return false;
+          if ('code' in e && (e as { code: unknown }).code === '42P01') return true;
+          if ('cause' in e) return is42P01((e as { cause: unknown }).cause);
+          return false;
+        };
+        if (is42P01(err)) return { scanned: 0, timedOut: 0, failed: 0 };
+        throw err;
+      }
       let timedOut = 0;
       let failed = 0;
       for (const row of rows) {
