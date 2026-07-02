@@ -10948,6 +10948,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         return { kind: "released" as const };
       }
 
+      const issuePolicy = normalizeIssueExecutionPolicy(issue.executionPolicy ?? null);
+      if (issue.status === "in_progress" && issuePolicy?.standing) {
+        return { kind: "released" as const };
+      }
+
       if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) {
         return { kind: "released" as const };
       }

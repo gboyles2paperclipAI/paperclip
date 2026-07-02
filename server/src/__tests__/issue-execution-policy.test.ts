@@ -43,6 +43,20 @@ describe("normalizeIssueExecutionPolicy", () => {
     expect(normalizeIssueExecutionPolicy({ stages: [] })).toBeNull();
   });
 
+  it("keeps standing-only policies", () => {
+    expect(
+      normalizeIssueExecutionPolicy({
+        stages: [],
+        standing: { reason: "Provider health running log" },
+      }),
+    ).toMatchObject({
+      mode: "normal",
+      commentRequired: true,
+      stages: [],
+      standing: { reason: "Provider health running log" },
+    });
+  });
+
   it("throws when all participants are invalid (missing agentId)", () => {
     expect(() =>
       normalizeIssueExecutionPolicy({
