@@ -185,6 +185,62 @@ describe("issue thread interaction schemas", () => {
     });
   });
 
+  it("normalizes legacy ask_user_questions inputs from agent tools", () => {
+    const parsed = createIssueThreadInteractionSchema.parse({
+      kind: "ask_user_questions",
+      idempotencyKey: "ask:FUL-14806:stripe-smoke-test:v1",
+      title: "Stripe Preview Smoke Test",
+      summary: "Manual confirmation needed.",
+      continuationPolicy: "wake_assignee",
+      payload: {
+        version: 1,
+        prompt: "Please test checkout.",
+        questions: [
+          {
+            id: "smoke_result",
+            label: "Smoke test result",
+            type: "select",
+            options: [
+              { value: "pass", label: "PASS - checkout worked" },
+              { value: "fail", label: "FAIL - error encountered" },
+            ],
+            required: true,
+          },
+          {
+            id: "error_details",
+            label: "Error details",
+            type: "text",
+            required: false,
+          },
+        ],
+      },
+    });
+
+    expect(parsed).toMatchObject({
+      kind: "ask_user_questions",
+      continuationPolicy: "wake_assignee",
+      payload: {
+        questions: [
+          {
+            id: "smoke_result",
+            prompt: "Smoke test result",
+            selectionMode: "single",
+            options: [
+              { id: "pass", label: "PASS - checkout worked" },
+              { id: "fail", label: "FAIL - error encountered" },
+            ],
+          },
+          {
+            id: "error_details",
+            prompt: "Error details",
+            selectionMode: "single",
+            options: [{ id: "response", label: "Provide response" }],
+          },
+        ],
+      },
+    });
+  });
+
   it("rejects unsafe request_confirmation target hrefs", () => {
     const base = {
       kind: "request_confirmation",
