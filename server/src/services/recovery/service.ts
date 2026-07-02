@@ -116,12 +116,15 @@ type RecoveryFinalizedRunHook = (run: typeof heartbeatRuns.$inferSelect) => Prom
 type LatestIssueRun = Pick<
   typeof heartbeatRuns.$inferSelect,
   "id" | "agentId" | "status" | "error" | "errorCode" | "contextSnapshot" | "livenessState"
-> | null;
+> & {
+  resultJson?: unknown;
+} | null;
 type SuccessfulLatestIssueRun = NonNullable<LatestIssueRun> & { status: "succeeded" };
 
 type StrandedRecoveryCause =
   | "stranded_assigned_issue"
   | "workspace_validation_failed"
+  | "configuration_incomplete"
   | typeof SUCCESSFUL_RUN_MISSING_STATE_REASON;
 
 type SuccessfulRunHandoffRecoveryEvidence = {
@@ -131,6 +134,16 @@ type SuccessfulRunHandoffRecoveryEvidence = {
   handoffAttempt: number;
   maxHandoffAttempts: number;
 };
+
+function readWorkspaceValidationPayload(latestRun: LatestIssueRun): Record<string, unknown> | null {
+  const payload = parseObject(parseObject(latestRun?.resultJson).workspaceValidation);
+  return Object.keys(payload).length > 0 ? payload : null;
+}
+
+function readWorkspaceValidationFingerprint(latestRun: LatestIssueRun): string | null {
+  const payload = readWorkspaceValidationPayload(latestRun);
+  return readNonEmptyString(payload?.fingerprint);
+}
 
 type WatchdogDecisionActor =
   | { type: "board"; userId?: string | null; runId?: string | null }
@@ -195,6 +208,12 @@ const NON_RETRYABLE_CONTINUATION_ERROR_CODES = new Set<string>([
   "issue_dependencies_blocked",
 ]);
 
+// A continuation cancelled with this code is a *deliberate wait* (the latest run
+// reported it was parked for review/approval), not a lost execution path. When the
+// issue has a real waiting target we convert it into a normal dependency wait rather
+// than escalating it as stranded.
+const CONTINUATION_WAITING_ON_REVIEW_ERROR_CODE = "issue_continuation_waiting_on_review";
+
 const CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS = 3;
 const CONTINUATION_RECOVERY_DEFAULT_MAX_ATTEMPTS = 1;
 const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = 60_000;
@@ -206,7 +225,7 @@ type ContinuationRetryClassification = {
   errorCode: string | null;
 };
 
-function classifyContinuationFailure(latestRun: LatestIssueRun): ContinuationRetryClassification {
+export function classifyContinuationFailure(latestRun: LatestIssueRun): ContinuationRetryClassification {
   const errorCode = readNonEmptyString(latestRun?.errorCode);
   if (errorCode && NON_RETRYABLE_CONTINUATION_ERROR_CODES.has(errorCode)) {
     return { kind: "non_retryable", maxAttempts: 0, baseBackoffMs: 0, errorCode };
@@ -511,6 +530,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup; o
         errorCode: heartbeatRuns.errorCode,
         contextSnapshot: heartbeatRuns.contextSnapshot,
         livenessState: heartbeatRuns.livenessState,
+        resultJson: heartbeatRuns.resultJson,
       })
       .from(heartbeatRuns)
       .where(
@@ -2448,13 +2468,28 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup; o
       ? "missing_disposition" as const
       : cause === "workspace_validation_failed"
         ? "workspace_validation" as const
+      : cause === "configuration_incomplete"
+        ? "configuration_validation" as const
       : "stranded_assigned_issue" as const;
   }
 
   function strandedRecoveryActionFingerprint(input: {
     issue: typeof issues.$inferSelect;
     recoveryCause: StrandedRecoveryCause;
+    latestRun: LatestIssueRun;
   }) {
+    if (input.recoveryCause === "workspace_validation_failed") {
+      const workspaceFingerprint = readWorkspaceValidationFingerprint(input.latestRun);
+      if (workspaceFingerprint) {
+        return [
+          "source_scoped_recovery",
+          input.issue.companyId,
+          input.issue.id,
+          input.recoveryCause,
+          workspaceFingerprint,
+        ].join(":");
+      }
+    }
     return [
       "source_scoped_recovery",
       input.issue.companyId,
@@ -2471,6 +2506,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup; o
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
   }) {
     const context = parseObject(input.latestRun?.contextSnapshot);
+    const workspaceValidation = input.recoveryCause === "workspace_validation_failed"
+      ? readWorkspaceValidationPayload(input.latestRun)
+      : null;
     return {
       sourceIssueId: input.issue.id,
       sourceIdentifier: input.issue.identifier,
@@ -2486,6 +2524,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup; o
       missingDisposition: input.successfulRunHandoffEvidence?.missingDisposition ?? null,
       handoffAttempt: input.successfulRunHandoffEvidence?.handoffAttempt ?? null,
       maxHandoffAttempts: input.successfulRunHandoffEvidence?.maxHandoffAttempts ?? null,
+      ...(workspaceValidation ? { workspaceValidation } : {}),
     };
   }
 
@@ -2511,6 +2550,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup; o
       fingerprint: strandedRecoveryActionFingerprint({
         issue: input.issue,
         recoveryCause,
+        latestRun: input.latestRun,
       }),
       evidence: buildStrandedRecoveryActionEvidence({
         issue: input.issue,
@@ -2522,12 +2562,16 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup; o
       nextAction: recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON
         ? "Choose and record a valid issue disposition without copying transcript content."
         : recoveryCause === "workspace_validation_failed"
-          ? "Repair the source issue workspace link, project workspace cwd, or git checkout before resuming adapter execution."
+          ? readWorkspaceValidationPayload(input.latestRun)?.reason === "git_worktree_branch_incoherence"
+            ? "Repair the source issue git worktree branch incoherence, or choose a new execution workspace, before resuming adapter execution."
+            : "Repair the source issue workspace link, project workspace cwd, or git checkout before resuming adapter execution."
+        : recoveryCause === "configuration_incomplete"
+          ? "Bind the missing secret(s) named in the run failure to the agent/project/routine env before resuming adapter execution."
         : "Restore a live execution path, fix the runtime/adapter failure, or record an intentional manual resolution.",
-      wakePolicy: recoveryCause === "workspace_validation_failed"
+      wakePolicy: recoveryCause === "workspace_validation_failed" || recoveryCause === "configuration_incomplete"
         ? {
           type: "manual_repair_required",
-          reason: "workspace_validation_failed",
+          reason: recoveryCause,
           ownerAgentId,
         }
         : ownerAgentId
@@ -2560,6 +2604,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup; o
     recoveryCause: StrandedRecoveryCause;
   }) {
     if (input.recoveryCause === "workspace_validation_failed") return;
+    if (input.recoveryCause === "configuration_incomplete") return;
     if (!input.action.ownerAgentId) return;
     if (input.action.attemptCount > MAX_STRANDED_RECOVERY_AGENT_WAKE_ATTEMPTS) {
       return;
@@ -2678,9 +2723,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup; o
       .then((rows) => rows.map((row) => row.blockerIssueId));
   }
 
-  async function existingUnresolvedBlockerIssueIds(companyId: string, issueId: string) {
+  async function existingUnresolvedBlockerIssues(companyId: string, issueId: string) {
     return db
-      .select({ blockerIssueId: issueRelations.issueId })
+      .select({ id: issueRelations.issueId, identifier: issues.identifier })
       .from(issueRelations)
       .innerJoin(
         issues,
@@ -2696,8 +2741,60 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup; o
           eq(issueRelations.type, "blocks"),
           notInArray(issues.status, ["done", "cancelled"]),
         ),
-      )
-      .then((rows) => rows.map((row) => row.blockerIssueId));
+      );
+  }
+
+  async function existingUnresolvedBlockerIssueIds(companyId: string, issueId: string) {
+    return existingUnresolvedBlockerIssues(companyId, issueId).then((rows) => rows.map((row) => row.id));
+  }
+
+  async function resolveContinuationWaitingOnReview(issue: typeof issues.$inferSelect) {
+    const existingBlockers = await existingUnresolvedBlockerIssues(issue.companyId, issue.id);
+    const openChildren = await db
+      .select({ id: issues.id, identifier: issues.identifier })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, issue.companyId),
+          eq(issues.parentId, issue.id),
+          isNull(issues.hiddenAt),
+          notInArray(issues.status, ["done", "cancelled"]),
+        ),
+      );
+    const blockedByIssueIds = [...new Set([...existingBlockers.map((row) => row.id), ...openChildren.map((row) => row.id)])];
+    if (blockedByIssueIds.length === 0) return null;
+
+    const updated = await issuesSvc.update(issue.id, { status: "blocked", blockedByIssueIds });
+    if (!updated) return null;
+
+    const waitingOn = formatIssueLinksForComment([...openChildren, ...existingBlockers]);
+    await issuesSvc.addComment(
+      issue.id,
+      `This task is waiting on ${waitingOn} to finish. ` +
+        "It will continue automatically when that work is done — there's nothing you need to do. " +
+        "(It was paused because the latest run reported it was waiting for review/approval; " +
+        "Paperclip turned that into a normal dependency wait instead of flagging it as stuck.)",
+      {},
+      { authorType: "system" },
+    );
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: "system",
+      actorId: "system",
+      agentId: null,
+      runId: null,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        identifier: issue.identifier,
+        status: "blocked",
+        previousStatus: issue.status,
+        source: "recovery.reconcile_continuation_waiting_on_review",
+        blockedByIssueIds,
+      },
+    });
+    return updated;
   }
 
   async function escalateStrandedAssignedIssue(input: {
@@ -2768,7 +2865,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup; o
 
     const shouldPostEscalationComment =
       recoveryAction.attemptCount === 1 ||
-      input.recoveryCause === "workspace_validation_failed";
+      input.recoveryCause === "workspace_validation_failed" ||
+      input.recoveryCause === "configuration_incomplete";
     if (shouldPostEscalationComment) {
       const escalationCommentMarker = `Recovery action: \`${recoveryAction.id}\``;
 
@@ -2822,6 +2920,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup; o
           ? "recovery.reconcile_successful_run_handoff_missing_state"
           : input.recoveryCause === "workspace_validation_failed"
             ? "recovery.reconcile_workspace_validation_failed"
+          : input.recoveryCause === "configuration_incomplete"
+            ? "recovery.reconcile_configuration_incomplete"
           : "recovery.reconcile_stranded_assigned_issue",
         recoveryCause: input.recoveryCause ?? "stranded_assigned_issue",
         latestRunId: input.latestRun?.id ?? null,
@@ -2888,6 +2988,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup; o
       orphanBlockersAssigned: 0,
       successfulRunHandoffEscalated: 0,
       escalated: 0,
+      waitingOnReviewResolved: 0,
       recentProgressExempted: 0,
       skipped: 0,
       issueIds: [] as string[],
@@ -3216,6 +3317,15 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup; o
       }
       if (isUnsuccessfulTerminalIssueRun(latestRun)) {
         const classification = classifyContinuationFailure(latestRun);
+
+        if (classification.errorCode === CONTINUATION_WAITING_ON_REVIEW_ERROR_CODE) {
+          const resolved = await resolveContinuationWaitingOnReview(issue);
+          if (resolved) {
+            result.waitingOnReviewResolved += 1;
+            result.issueIds.push(issue.id);
+            continue;
+          }
+        }
 
         if (classification.kind === "non_retryable") {
           const failureSummary = summarizeRunFailureForIssueComment(latestRun);

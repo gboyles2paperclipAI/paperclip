@@ -355,6 +355,7 @@ export function decideSuccessfulRunHandoff(input: {
   hasExplicitBlockerPath: boolean;
   hasOpenRecoveryIssue: boolean;
   hasPauseHold: boolean;
+  hasActiveRoutineContinuation: boolean;
   budgetBlocked: boolean;
   idempotentWakeExists: boolean;
 }): SuccessfulRunHandoffDecision {
@@ -363,6 +364,7 @@ export function decideSuccessfulRunHandoff(input: {
   if (run.status !== "succeeded") return { kind: "skip", reason: "source run did not succeed" };
   if (isCorrectiveHandoffRun(run)) return { kind: "skip", reason: "source run is already a corrective handoff run" };
   if (isIssueMonitorMaintenanceRun(run)) return { kind: "skip", reason: "issue monitor run owns its own recovery path" };
+  if (isCommentDrivenWake(run)) return { kind: "skip", reason: "comment-driven wake already owns the next action" };
   if (run.issueCommentStatus === "retry_queued" || run.issueCommentStatus === "retry_exhausted") {
     return { kind: "skip", reason: "missing issue comment retry owns the next action" };
   }
@@ -380,6 +382,9 @@ export function decideSuccessfulRunHandoff(input: {
   if (issue.executionState) return { kind: "skip", reason: "issue has execution policy state" };
   if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") {
     return { kind: "skip", reason: `agent status ${agent.status} is not invokable` };
+  }
+  if (input.hasActiveRoutineContinuation) {
+    return { kind: "skip", reason: "active routine continuation owns the next action" };
   }
   if (!isProductiveSuccessfulRun(input)) {
     return { kind: "skip", reason: "successful run did not produce handoff-relevant progress" };

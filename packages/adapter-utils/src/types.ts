@@ -4,6 +4,7 @@
 
 import type { SshRemoteExecutionSpec } from "./ssh.js";
 import type { AdapterExecutionTarget } from "./execution-target.js";
+import type { RuntimeStatusSink } from "./runtime-progress.js";
 
 export interface AdapterAgent {
   id: string;
@@ -64,7 +65,7 @@ export interface AdapterRuntimeServiceReport {
   healthStatus?: "unknown" | "healthy" | "unhealthy";
 }
 
-export type AdapterExecutionErrorFamily = "transient_upstream";
+export type AdapterExecutionErrorFamily = "transient_upstream" | "model_refusal";
 
 export interface AdapterExecutionResult {
   exitCode: number | null;
@@ -141,6 +142,7 @@ export interface AdapterExecutionContext {
   };
   onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
   onMeta?: (meta: AdapterInvocationMeta) => Promise<void>;
+  onRuntimeProgress?: RuntimeStatusSink;
   onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void>;
   authToken?: string;
 }
@@ -191,7 +193,6 @@ export type AdapterSkillState =
 
 export type AdapterSkillOrigin =
   | "company_managed"
-  | "paperclip_required"
   | "user_installed"
   | "external_unknown";
 
@@ -202,8 +203,6 @@ export interface AdapterSkillEntry {
   currentVersionId?: string | null;
   desired: boolean;
   managed: boolean;
-  required?: boolean;
-  requiredReason?: string | null;
   state: AdapterSkillState;
   origin?: AdapterSkillOrigin;
   originLabel?: string | null;

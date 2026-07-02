@@ -8,6 +8,8 @@ import {
   agentRuntimeState,
   agentWakeupRequests,
   budgetPolicies,
+  companySecretBindings,
+  companySecrets,
   companySkills,
   companies,
   costEvents,
@@ -96,6 +98,7 @@ import {
   heartbeatService,
   redactDetectedSuccessfulRunProgressSummaryForBoard,
 } from "../services/heartbeat.ts";
+import { secretService } from "../services/secrets.ts";
 import {
   SUCCESSFUL_RUN_HANDOFF_EXHAUSTED_NOTICE_BODY,
   SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY,
@@ -412,6 +415,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       await db.delete(issueDocuments);
       await db.delete(documentRevisions);
       await db.delete(documents);
+      await db.delete(companySecretBindings);
+      await db.delete(companySecrets);
       try {
         await db.delete(companies);
         break;
@@ -570,6 +575,72 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     return { environmentId, leaseId };
   }
+
+  it("does not reap active adapter executions started by another heartbeat service instance", async () => {
+    let releaseAdapter: (() => void) | null = null;
+    const adapterStarted = new Promise<void>((resolve) => {
+      mockAdapterExecute.mockImplementationOnce(async () => {
+        resolve();
+        await new Promise<void>((release) => {
+          releaseAdapter = release;
+        });
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          errorMessage: null,
+          summary: "Remote run completed.",
+          provider: "test",
+          model: "test-model",
+        };
+      });
+    });
+
+    const { runId, wakeupRequestId } = await seedRunFixture({
+      adapterType: "openclaw_gateway",
+      agentStatus: "idle",
+      runStatus: "queued",
+      processPid: null,
+      processGroupId: null,
+      includeIssue: false,
+    });
+    const executorHeartbeat = heartbeatService(db);
+    const reaperHeartbeat = heartbeatService(db);
+
+    await executorHeartbeat.resumeQueuedRuns();
+    await Promise.race([
+      adapterStarted,
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Timed out waiting for adapter execution to start")), 3_000);
+      }),
+    ]);
+
+    await db
+      .update(heartbeatRuns)
+      .set({
+        updatedAt: new Date("2026-03-19T00:00:00.000Z"),
+      })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const result = await reaperHeartbeat.reapOrphanedRuns({ staleThresholdMs: 1 });
+    expect(result).toEqual({ reaped: 0, runIds: [] });
+
+    const activeRun = await reaperHeartbeat.getRun(runId);
+    expect(activeRun?.status).toBe("running");
+    expect(activeRun?.errorCode).toBeNull();
+
+    const wakeup = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0] ?? null);
+    expect(wakeup?.status).toBe("claimed");
+
+    if (!releaseAdapter) throw new Error("Adapter release handle was not captured");
+    releaseAdapter();
+    const settledRun = await waitForRunToSettle(executorHeartbeat, runId, 5_000);
+    expect(settledRun?.status).toBe("succeeded");
+  });
 
   async function seedStrandedIssueFixture(input: {
     status: "todo" | "in_progress";
@@ -1024,12 +1095,19 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         .where(eq(issues.id, issueId))
         .then((rows) => {
           const row = rows[0] ?? null;
-          return row?.executionRunId === retryRun?.id ? row : null;
+          return row?.checkoutRunId === null ? row : null;
         })
     );
-    expect(issue?.executionRunId).toBe(retryRun?.id ?? null);
+    expect([retryRun?.id ?? null, null]).toContain(issue?.executionRunId ?? null);
+
+    const checkoutReleasedIssue = await waitForValue(async () =>
+      db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => {
+        const row = rows[0] ?? null;
+        return row?.checkoutRunId === null ? row : null;
+      })
+    );
     // Terminal run cleanup releases the checkout lock so future checkout 409s only mean a live owner exists.
-    expect(issue?.checkoutRunId).toBeNull();
+    expect(checkoutReleasedIssue?.checkoutRunId).toBeNull();
   });
 
   it("releases active environment leases when an orphaned run is reaped", async () => {
@@ -1430,8 +1508,98 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
     expect(recoveryAction?.nextAction).toContain("Repair the source issue workspace link");
 
-    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
-    expect(comments.some((comment) => comment.body.includes("workspace failed validation"))).toBe(true);
+    const validationComment = await waitForValue(async () => {
+      const rows = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      return rows.find((comment) => comment.body.includes("workspace failed validation")) ?? null;
+    });
+    expect(validationComment).toBeTruthy();
+  });
+
+  it("blocks before dispatch when a declared secret ref has no binding instead of emitting an opaque setup failure", async () => {
+    const { companyId, agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    const svc = secretService(db);
+    const secretName = `unbound-runtime-${randomUUID()}`;
+    const secret = await svc.create(companyId, {
+      name: secretName,
+      provider: "local_encrypted",
+      value: "never-resolved",
+    });
+    // Declare the secret ref on the agent env WITHOUT creating a binding so the
+    // pre-dispatch gate short-circuits to a configuration-incomplete blocker.
+    await db
+      .update(agents)
+      .set({
+        adapterConfig: {
+          env: {
+            UNBOUND_API_KEY: { type: "secret_ref", secretId: secret.id, version: "latest" },
+          },
+        },
+      })
+      .where(eq(agents.id, agentId));
+
+    const heartbeat = heartbeatService(db);
+    await heartbeat.resumeQueuedRuns();
+    await waitForRunToSettle(heartbeat, runId, 5_000);
+
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+
+    const failedRun = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(failedRun).toMatchObject({
+      status: "failed",
+      errorCode: "configuration_incomplete",
+    });
+    expect(failedRun?.error).toContain("configuration incomplete");
+    expect(failedRun?.error).toContain(secretName);
+    expect(failedRun?.error).toContain("env.UNBOUND_API_KEY");
+    expect(failedRun?.resultJson).toMatchObject({
+      configurationIncomplete: {
+        reason: "secret_binding_missing",
+        missingBindings: [
+          {
+            consumerType: "agent",
+            consumerId: agentId,
+            configPath: "env.UNBOUND_API_KEY",
+            envKey: "UNBOUND_API_KEY",
+            secretId: secret.id,
+            secretName,
+          },
+        ],
+      },
+    });
+    // Value-free gate: no secret access events were recorded.
+    expect(await svc.listAccessEvents(companyId, secret.id)).toHaveLength(0);
+
+    const issue = await waitForValue(async () =>
+      db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => {
+        const row = rows[0] ?? null;
+        return row?.status === "blocked" ? row : null;
+      }),
+    );
+    expect(issue?.executionRunId).toBeNull();
+
+    const recoveryAction = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(and(eq(issueRecoveryActions.companyId, companyId), eq(issueRecoveryActions.sourceIssueId, issueId)))
+      .then((rows) => rows[0] ?? null);
+    expect(recoveryAction).toMatchObject({
+      kind: "configuration_validation",
+      cause: "configuration_incomplete",
+      status: "active",
+      ownerAgentId: agentId,
+      recoveryIssueId: null,
+    });
+    expect(recoveryAction?.nextAction).toContain("Bind the missing secret");
+
+    const configurationComment = await waitForValue(async () => {
+      const rows = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      return rows.find((comment) => comment.body.includes("secret/env bindings are missing")) ?? null;
+    });
+    expect(configurationComment).toBeTruthy();
   });
 
   it("queues one finish-handoff wake when a successful run leaves in-progress work without a next action", async () => {

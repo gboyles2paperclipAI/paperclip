@@ -192,6 +192,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       agentId: key.agentId,
       companyId: key.companyId,
       keyId: key.id,
+      keyScope: normalizeAgentApiKeyScope(key.scopeConfig),
       runId: runIdHeader || undefined,
       source: "agent_key",
     };
