@@ -3665,6 +3665,12 @@ export function agentRoutes(
     res.json(summary);
   });
 
+  router.get("/heartbeat-runs/live", async (_req, res) => {
+    res.status(404).json({
+      error: "Use /api/companies/{companyId}/heartbeat-runs for company-scoped heartbeat runs",
+    });
+  });
+
   router.get("/heartbeat-runs/:runId", async (req, res) => {
     const runId = req.params.runId as string;
     const run = await heartbeat.getRun(runId);
