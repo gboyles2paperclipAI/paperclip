@@ -3441,6 +3441,12 @@ export function issueRoutes(
       res.status(400).json({ error: "hasPlanDocument must be true or false when provided" });
       return;
     }
+    const parentId = await resolveOptionalParentIssueListFilter(req.query.parentId, companyId);
+
+    if (parentId === null) {
+      res.json({ count: 0 });
+      return;
+    }
 
     const blockedCountFilters = {
       attention: "blocked",
@@ -3451,7 +3457,7 @@ export function issueRoutes(
       projectId: req.query.projectId as string | undefined,
       workspaceId: req.query.workspaceId as string | undefined,
       executionWorkspaceId: req.query.executionWorkspaceId as string | undefined,
-      parentId: req.query.parentId as string | undefined,
+      parentId,
       descendantOf: req.query.descendantOf as string | undefined,
       labelId: req.query.labelId as string | undefined,
       originKind: req.query.originKind as string | undefined,
