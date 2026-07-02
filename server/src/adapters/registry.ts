@@ -347,8 +347,7 @@ const grokLocalAdapter: ServerAdapterModule = {
 };
 
 const hermesGatewayAdapter = createHermesGatewayServerAdapter();
-
-const hermesLocalAdapter = createHermesLocalServerAdapter();
+const hermesLocalBaseAdapter = createHermesLocalServerAdapter();
 
 const openclawGatewayAdapter: ServerAdapterModule = {
   type: "openclaw_gateway",
@@ -402,12 +401,12 @@ const piLocalAdapter: ServerAdapterModule = {
 
 // hermes-paperclip-adapter v0.2.0 predates the authToken field; cast is
 // intentional until hermes ships a matching AdapterExecutionContext type.
-const executeHermesLocal = hermesExecute as unknown as ServerAdapterModule["execute"];
+const executeHermesLocal = hermesLocalBaseAdapter.execute as unknown as ServerAdapterModule["execute"];
 
 const hermesLocalAdapter: ServerAdapterModule = {
-  type: "hermes_local",
+  ...hermesLocalBaseAdapter,
   execute: async (ctx) => {
-    const normalizedCtx = normalizeHermesConfig(ctx);
+    const normalizedCtx = ctx;
     if (!normalizedCtx.authToken) return executeHermesLocal(normalizedCtx);
 
     const existingConfig = (normalizedCtx.agent.adapterConfig ?? {}) as Record<string, unknown>;
@@ -455,16 +454,6 @@ const hermesLocalAdapter: ServerAdapterModule = {
 
     return executeHermesLocal(patchedCtx);
   },
-  testEnvironment: (ctx) => hermesTestEnvironment(normalizeHermesConfig(ctx) as never),
-  sessionCodec: hermesSessionCodec,
-  listSkills: hermesListSkills,
-  syncSkills: hermesSyncSkills,
-  models: hermesModels,
-  supportsLocalAgentJwt: true,
-  supportsInstructionsBundle: false,
-  requiresMaterializedRuntimeSkills: false,
-  agentConfigurationDoc: hermesAgentConfigurationDoc,
-  detectModel: () => detectModelFromHermes(),
 };
 
 const adaptersByType = new Map<string, ServerAdapterModule>();

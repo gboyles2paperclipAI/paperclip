@@ -3138,6 +3138,29 @@ export function issueRoutes(
     return rawId;
   }
 
+  async function resolveOptionalParentIssueListFilter(
+    rawParentId: unknown,
+    companyId: string,
+  ): Promise<string | undefined | null> {
+    if (rawParentId === undefined) return undefined;
+    if (typeof rawParentId !== "string") {
+      throw unprocessable("parentId must be a UUID or issue identifier");
+    }
+
+    const trimmed = rawParentId.trim();
+    if (trimmed.length === 0) return undefined;
+    if (isUuidLike(trimmed)) return trimmed;
+
+    const identifier = normalizeIssueReferenceIdentifier(trimmed);
+    if (!identifier) {
+      throw unprocessable("parentId must be a UUID or issue identifier");
+    }
+
+    const parent = await svc.getByIdentifier(identifier);
+    if (!parent || parent.companyId !== companyId) return null;
+    return parent.id;
+  }
+
   async function resolveIssueProjectAndGoal(issue: {
     companyId: string;
     projectId: string | null;
@@ -3321,6 +3344,12 @@ export function issueRoutes(
       }
     }
     const offset = parsedOffset ?? 0;
+    const parentId = await resolveOptionalParentIssueListFilter(req.query.parentId, companyId);
+
+    if (parentId === null) {
+      res.json([]);
+      return;
+    }
 
     const rawResult = await svc.list(companyId, {
       attention: attention === "blocked" ? "blocked" : undefined,
@@ -3334,7 +3363,7 @@ export function issueRoutes(
       projectId: req.query.projectId as string | undefined,
       workspaceId: req.query.workspaceId as string | undefined,
       executionWorkspaceId: req.query.executionWorkspaceId as string | undefined,
-      parentId: req.query.parentId as string | undefined,
+      parentId,
       descendantOf: req.query.descendantOf as string | undefined,
       labelId: req.query.labelId as string | undefined,
       originKind: req.query.originKind as string | undefined,
