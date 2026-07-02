@@ -265,6 +265,12 @@ function isPermanentWatcherExecutionPolicy(executionPolicy: unknown) {
   return policy.permanentWatcher === true;
 }
 
+function isStandingIssueExecutionPolicy(executionPolicy: unknown) {
+  const policy = parseObject(executionPolicy);
+  const standing = policy.standing;
+  return Boolean(standing && typeof standing === "object" && !Array.isArray(standing));
+}
+
 function issueIdFromRunContext(contextSnapshot: unknown) {
   const context = parseObject(contextSnapshot);
   return readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId);
@@ -2942,6 +2948,11 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup; o
       }
 
       if (await hasPendingWakeInteraction(issue.companyId, issue.id)) {
+        result.skipped += 1;
+        continue;
+      }
+
+      if (issue.status === "in_progress" && isStandingIssueExecutionPolicy(issue.executionPolicy)) {
         result.skipped += 1;
         continue;
       }
