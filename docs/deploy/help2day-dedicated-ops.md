@@ -348,6 +348,54 @@ If queued work rises while running count stays below cap, check:
 - database connectivity,
 - service restarts.
 
+## Paperclip Runtime Package Updates
+
+The Help2day host runtime is fork-owned. Do not replace it by installing public npm `paperclipai@latest` directly over the live service.
+
+Current steady state after the 2026-07-02 packaged-runtime cutover:
+
+- `paperclip.service` runs `/home/paperclipadmin/.local/share/node/node-v22.22.3-linux-x64/bin/paperclipai run --config /home/paperclipadmin/.paperclip/instances/default/config.json --instance default`.
+- That binary must resolve to `/home/paperclipadmin/.local/share/node/node-v22.22.3-linux-x64/lib/node_modules/paperclipai/dist/index.js`.
+- `/api/health.version` is `0.3.1`; `/api/health.buildCommit` is the deploy identity. The first packaged cutover build commit was `5b7ce9cda54adea0187b552a1ac8d13d2cb5bb91`.
+- `serverInfo.git` can be unavailable in packaged mode because the package is not running inside a Git checkout. Use `buildCommit` for packaged deploy identity.
+
+Safe update sequence:
+
+1. Verify no queued/running Help2day live runs unless this is outage recovery.
+2. Preserve the current `help2day/main` SHA with a tag or backup branch.
+3. Fetch upstream `paperclipai/paperclip` read-only, then merge upstream into `gboyles2paperclipAI/paperclip` `help2day/main` through a fork PR.
+4. Keep Help2day-specific fixes unless an upstream change is proven equivalent.
+5. Build and pack from the merged Help2day tree, including local `@paperclipai/*` dependency tarballs and `@paperclipai/server/dist/BUILD_COMMIT`.
+6. Install the built tarballs into a temp prefix first and verify:
+   - `paperclipai --version`
+   - `import("@paperclipai/server")`
+   - `import("@paperclipai/db")`
+   - `@paperclipai/server/ui-dist/index.html`
+   - an isolated alternate-port smoke reports `static-ui`
+   - `/api/health`, `/`, `/FUL/dashboard`, `/FUL/inbox`, and `/FUL/issues` return 200
+7. Back up the current user-prefix install/shim.
+8. Install the built Help2day package into the user prefix with `npm install -g --prefix /home/paperclipadmin/.local/share/node/node-v22.22.3-linux-x64 ...`.
+9. Restart `paperclip.service` once.
+10. Validate:
+    - `systemctl is-active paperclip.service`
+    - only `127.0.0.1:3100` is listening
+    - `/api/health` reports the expected `buildCommit`
+    - dashboard response includes `runActivity`
+    - inbox/issues routes return sane data
+    - recent logs contain no `isCommentDrivenWake`, `Unsupported Slack approval action`, `ERR_HTTP_HEADERS_SENT`, or 404/500/503 regressions
+
+Rollback points from the 2026-07-02 cutover:
+
+- Live-good tag: `help2day-live-good-20260702-a37231b1`
+- Runtime artifacts: `/home/paperclipadmin/ai-collab/ful14770-packaged-runtime-20260702/`
+- Previous shim backup: `/home/paperclipadmin/ai-collab/ful14770-packaged-runtime-20260702/rollback/user-prefix-shim-20260702T144954Z`
+
+Known follow-ups from the cutover:
+
+- `/api/heartbeat-runs/live` is shadowed by the run-id detail route and returns 500 for `"live"` instead of a clean 404/400 or the documented company-scoped route.
+- `server` package `postpack` removes `server/ui-dist/`; do not run packaging directly in a live source-shim checkout without preserving/restoring that generated artifact.
+- The forbidden-token check can block `build-npm.sh` on existing local account/path strings in ops docs/scripts. Treat this as a check precision issue, not as approval to skip secret scanning generally.
+
 ## Board Triage Rules
 
 Use first-class blockers only for dependencies that really prevent completion. Do not keep an issue blocked because of stale comments after the dependency is done.
