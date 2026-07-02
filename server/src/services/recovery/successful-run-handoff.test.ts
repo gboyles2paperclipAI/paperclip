@@ -236,6 +236,20 @@ describe("successful run handoff decision", () => {
       kind: "skip",
       reason: "comment-driven wake already owns the next action",
     });
+
+    expect(decide({
+      run: {
+        ...run,
+        contextSnapshot: {
+          issueId: "issue-1",
+          wakeReason: "issue_commented",
+          wakeCommentId: "comment-1",
+        },
+      } as any,
+    })).toEqual({
+      kind: "skip",
+      reason: "comment-driven wake already owns the next action",
+    });
   });
 
   it("uses a stable one-attempt idempotency key", () => {

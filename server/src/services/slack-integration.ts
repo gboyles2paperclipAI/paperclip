@@ -126,6 +126,20 @@ function parseActionValue(value: unknown): { approvalId: string; action: SlackAp
   }
 }
 
+function parseApprovalAction(action: Record<string, unknown>) {
+  const actionId = stringValue(action.action_id);
+  const parsedValue = parseActionValue(action.value);
+  const decision = parsedValue?.action ?? normalizeAction(actionId);
+  if (!decision) return null;
+  if (actionId && !APPROVAL_ACTIONS.has(actionId) && !parsedValue) return null;
+  return { parsedValue, action: decision };
+}
+
+function hasSlackApprovalDecisionAction(payload: Record<string, unknown>) {
+  const actions = Array.isArray(payload.actions) ? payload.actions : [];
+  return actions.filter(isRecord).some((action) => Boolean(parseApprovalAction(action)));
+}
+
 export function parseSlackApprovalInteraction(payload: unknown): SlackInteractionContext {
   if (!isRecord(payload)) throw badRequest("Malformed Slack interaction payload");
   const user = isRecord(payload.user) ? payload.user : null;
@@ -133,15 +147,12 @@ export function parseSlackApprovalInteraction(payload: unknown): SlackInteractio
   if (!userId) throw badRequest("Slack interaction is missing user ID");
 
   const actions = Array.isArray(payload.actions) ? payload.actions : [];
-  const firstAction = actions.find(isRecord);
-  if (!firstAction) throw badRequest("Slack interaction is missing action");
-  const actionId = stringValue(firstAction.action_id);
-  if (actionId && !APPROVAL_ACTIONS.has(actionId)) {
-    throw badRequest("Unsupported Slack approval action");
-  }
-
-  const parsedValue = parseActionValue(firstAction.value);
-  const action = parsedValue?.action ?? normalizeAction(actionId);
+  const parsedAction = actions
+    .filter(isRecord)
+    .map((candidate) => parseApprovalAction(candidate))
+    .find((parsed) => parsed);
+  if (!parsedAction) throw badRequest("Slack approval action is incomplete");
+  const { parsedValue, action } = parsedAction;
   const approvalId =
     parsedValue?.approvalId
     ?? stringValue(payload.callback_id)?.replace(/^paperclip_approval:/, "")
@@ -184,7 +195,10 @@ export async function handleSlackSocketEnvelope(input: {
   input.ack();
 
   if (!isSlackSocketInteractiveEnvelope(input.envelope)) return { ignored: true as const };
-  const interaction = parseSlackApprovalInteraction(input.envelope.payload);
+  const payload = input.envelope.payload;
+  if (!isRecord(payload)) return { ignored: true as const };
+  if (!hasSlackApprovalDecisionAction(payload)) return { ignored: true as const };
+  const interaction = parseSlackApprovalInteraction(payload);
   const approval = await input.service.handleInteraction(interaction, `socket:${envelopeId}`);
   return { ignored: false as const, approval };
 }
