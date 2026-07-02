@@ -1,0 +1,7 @@
+# Ops docs and scripts that legitimately reference the host account path.
+# These files contain host-specific strings as documentation or restore-test
+# fixtures -- not as credential values.
+# One git path per line. # comments ok. Blank lines ignored.
+docs/deploy/help2day-dedicated-ops.md
+scripts/ops/help2day/fleet-health-check.sh
+scripts/ops/help2day/monthly-restore-test.sh
