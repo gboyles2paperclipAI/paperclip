@@ -55,6 +55,7 @@ describeEmbeddedPostgres("productivity review service", () => {
     startedAt?: Date;
     parentId?: string | null;
     originKind?: string;
+    executionPolicy?: Record<string, unknown> | null;
   }) {
     const companyId = randomUUID();
     const managerId = randomUUID();
@@ -106,6 +107,7 @@ describeEmbeddedPostgres("productivity review service", () => {
       issueNumber: 1,
       identifier: `${issuePrefix}-1`,
       startedAt: opts?.startedAt ?? createdAt,
+      executionPolicy: opts?.executionPolicy ?? null,
       createdAt,
       updatedAt: createdAt,
     });
@@ -383,6 +385,29 @@ describeEmbeddedPostgres("productivity review service", () => {
     expect(review?.description).toContain("Runs in rolling windows: 10/1h");
   });
 
+  it("skips high-churn review for issues with executionPolicy.standing set", async () => {
+    const now = new Date("2026-04-28T12:00:00.000Z");
+    const seeded = await seedAssignedIssue({
+      executionPolicy: { mode: "normal", stages: [], commentRequired: true, standing: { reason: "Standing log" } },
+    });
+    await insertRuns({
+      companyId: seeded.companyId,
+      agentId: seeded.coderId,
+      issueId: seeded.issueId,
+      count: 10,
+      now,
+    });
+
+    const result = await productivityReviewService(db).reconcileProductivityReviews({
+      now,
+      companyId: seeded.companyId,
+    });
+
+    expect(result.skipped).toBe(1);
+    expect(result.created).toBe(0);
+    expect(await listProductivityReviews(seeded.companyId)).toHaveLength(0);
+  });
+
   it("ignores non-assignee comments when evaluating high-churn productivity reviews", async () => {
     const now = new Date("2026-04-28T12:00:00.000Z");
     const seeded = await seedAssignedIssue();
@@ -535,6 +560,35 @@ describeEmbeddedPostgres("productivity review service", () => {
       .where(eq(activityLog.action, "issue.productivity_review_continuation_held"));
     expect(activities).toHaveLength(1);
     expect(activities[0]?.entityId).toBe(seeded.issueId);
+  });
+
+  it("does not hold continuation for standing issues even when an open review exists", async () => {
+    const now = new Date("2026-04-28T12:00:00.000Z");
+    // Seed a non-standing issue first to create a review, then upgrade to standing
+    const seeded = await seedAssignedIssue();
+    await insertRuns({
+      companyId: seeded.companyId,
+      agentId: seeded.coderId,
+      issueId: seeded.issueId,
+      count: 10,
+      now,
+    });
+    const service = productivityReviewService(db);
+    // Manually create a review (simulating one that was created before standing was set)
+    await service.reconcileProductivityReviews({ now, companyId: seeded.companyId });
+    // Now mark the issue as standing
+    await db
+      .update(issues)
+      .set({ executionPolicy: { mode: "normal", stages: [], commentRequired: true, standing: { reason: "Running log" } } })
+      .where(eq(issues.id, seeded.issueId));
+
+    const hold = await service.isProductivityReviewContinuationHoldActive({
+      companyId: seeded.companyId,
+      issueId: seeded.issueId,
+      agentId: seeded.coderId,
+      now,
+    });
+    expect(hold.held).toBe(false);
   });
 
   it("clamps poisoned requestDepth metadata instead of aborting productivity reconciliation", async () => {

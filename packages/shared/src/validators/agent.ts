@@ -121,6 +121,13 @@ export const createAgentKeySchema = z.object({
 
 export type CreateAgentKey = z.infer<typeof createAgentKeySchema>;
 
+export type AgentApiKeyScope = Record<string, unknown>;
+
+export function normalizeAgentApiKeyScope(value: unknown): AgentApiKeyScope {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return { ...(value as Record<string, unknown>) };
+}
+
 export const agentMineInboxQuerySchema = z.object({
   userId: z.string().trim().min(1),
   status: z.string().trim().min(1).optional().default(INBOX_MINE_ISSUE_STATUS_FILTER),

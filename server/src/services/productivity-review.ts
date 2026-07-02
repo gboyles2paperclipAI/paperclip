@@ -224,6 +224,12 @@ export function productivityReviewService(db: Db, deps?: { enqueueWakeup?: Enque
     return Boolean(agent && !["paused", "terminated", "pending_approval"].includes(agent.status));
   }
 
+  /** Standing issues (e.g. running logs) legitimately produce many runs/hour — exempt from churn auto-stop. */
+  function isStandingIssue(issue: Pick<IssueRow, "executionPolicy">) {
+    const policy = issue.executionPolicy as Record<string, unknown> | null | undefined;
+    return policy !== null && policy !== undefined && typeof policy.standing === "object" && policy.standing !== null;
+  }
+
   async function isProductivityReviewDescendant(issue: Pick<IssueRow, "companyId" | "parentId">) {
     let parentId = issue.parentId;
     let depth = 0;
@@ -800,6 +806,10 @@ export function productivityReviewService(db: Db, deps?: { enqueueWakeup?: Enque
         result.skipped += 1;
         continue;
       }
+      if (isStandingIssue(candidate)) {
+        result.skipped += 1;
+        continue;
+      }
       if (await isProductivityReviewDescendant(candidate)) {
         result.skipped += 1;
         continue;
@@ -868,6 +878,7 @@ export function productivityReviewService(db: Db, deps?: { enqueueWakeup?: Enque
     ]);
     if (!sourceIssue || !sourceAgent || !openReview) return { held: false as const };
     if (sourceAgent.companyId !== input.companyId) return { held: false as const };
+    if (isStandingIssue(sourceIssue)) return { held: false as const };
     const evidence = await collectEvidence(sourceIssue, sourceAgent, thresholds, now);
     if (!evidence || !isSoftStopTrigger(evidence.trigger)) return { held: false as const };
     return {
