@@ -414,7 +414,7 @@ describe("inbox helpers", () => {
     expect(issues).toHaveLength(2);
   });
 
-  it("shows actionable approvals on mine, while recent and unread stay company-wide", () => {
+  it("shows only actionable approvals on mine, while recent and unread stay company-wide", () => {
     const approvals = [
       {
         ...makeApprovalWithTimestamps("approval-approved", "approved", "2026-03-11T02:00:00.000Z"),
@@ -432,7 +432,6 @@ describe("inbox helpers", () => {
 
     expect(getApprovalsForTab(approvals, "mine", "all", "user-1").map((approval) => approval.id)).toEqual([
       "approval-revision",
-      "approval-approved",
       "approval-pending",
     ]);
     expect(getApprovalsForTab(approvals, "recent", "all").map((approval) => approval.id)).toEqual([

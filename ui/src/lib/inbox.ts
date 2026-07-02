@@ -763,11 +763,9 @@ export function getApprovalsForTab(
 
 export function isApprovalVisibleInMine(
   approval: Approval,
-  currentUserId?: string | null,
+  _currentUserId?: string | null,
 ): boolean {
-  if (ACTIONABLE_APPROVAL_STATUSES.has(approval.status)) return true;
-  if (!currentUserId) return false;
-  return approval.requestedByUserId === currentUserId || approval.decidedByUserId === currentUserId;
+  return ACTIONABLE_APPROVAL_STATUSES.has(approval.status);
 }
 
 export function approvalActivityTimestamp(approval: Approval): number {
