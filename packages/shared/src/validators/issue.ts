@@ -763,6 +763,33 @@ export const requestConfirmationPayloadSchema = z.object({
   target: requestConfirmationTargetSchema.nullable().optional(),
 });
 
+function normalizeLegacyRequestConfirmationInput(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const input = value as Record<string, unknown>;
+  if (input.kind !== "request_confirmation") return value;
+  const payload =
+    input.payload && typeof input.payload === "object" && !Array.isArray(input.payload)
+      ? input.payload as Record<string, unknown>
+      : {};
+  const prompt =
+    typeof payload.prompt === "string" && payload.prompt.trim()
+      ? payload.prompt
+      : typeof input.title === "string" && input.title.trim()
+        ? input.title
+        : typeof input.summary === "string" && input.summary.trim()
+          ? input.summary
+          : null;
+
+  return {
+    ...input,
+    payload: {
+      ...payload,
+      version: payload.version ?? 1,
+      ...(prompt && typeof payload.prompt !== "string" ? { prompt } : {}),
+    },
+  };
+}
+
 export const requestCheckboxConfirmationOptionSchema = z.object({
   id: z.string().trim().min(1).max(120),
   label: z.string().trim().min(1).max(120),
@@ -890,7 +917,7 @@ export const requestCheckboxConfirmationResultSchema = requestConfirmationResult
   }
 });
 
-export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
+export const createIssueThreadInteractionSchema = z.preprocess(normalizeLegacyRequestConfirmationInput, z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("suggest_tasks"),
     idempotencyKey: z.string().trim().max(255).nullable().optional(),
@@ -931,7 +958,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
     payload: requestCheckboxConfirmationPayloadSchema,
   }),
-]);
+]));
 
 export type CreateIssueThreadInteraction = z.infer<typeof createIssueThreadInteractionSchema>;
 

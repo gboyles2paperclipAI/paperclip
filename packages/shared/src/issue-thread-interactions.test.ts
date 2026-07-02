@@ -38,6 +38,49 @@ describe("issue thread interaction schemas", () => {
     });
   });
 
+  it("normalizes legacy request_confirmation inputs from agent tools", () => {
+    const parsed = createIssueThreadInteractionSchema.parse({
+      kind: "request_confirmation",
+      idempotencyKey: "confirmation:stripe-preview-smoke-test:v1",
+      title: "Stripe preview smoke test",
+      summary: "Confirm checkout works in preview.",
+      continuationPolicy: "wake_assignee",
+      payload: {
+        detailsMarkdown: "Open the preview checkout page and confirm it loads.",
+        supersedeOnUserComment: true,
+      },
+    });
+
+    expect(parsed).toMatchObject({
+      kind: "request_confirmation",
+      continuationPolicy: "wake_assignee",
+      payload: {
+        version: 1,
+        prompt: "Stripe preview smoke test",
+        detailsMarkdown: "Open the preview checkout page and confirm it loads.",
+        supersedeOnUserComment: true,
+      },
+    });
+  });
+
+  it("normalizes legacy request_confirmation inputs without a payload object", () => {
+    const parsed = createIssueThreadInteractionSchema.parse({
+      kind: "request_confirmation",
+      idempotencyKey: "confirmation:stripe-smoke-v1",
+      title: "Confirm Stripe preview smoke test",
+      summary: "Manual browser validation is required.",
+      continuationPolicy: "wake_assignee",
+    });
+
+    expect(parsed).toMatchObject({
+      kind: "request_confirmation",
+      payload: {
+        version: 1,
+        prompt: "Confirm Stripe preview smoke test",
+      },
+    });
+  });
+
   it("accepts issue document targets for request_confirmation interactions", () => {
     const parsed = createIssueThreadInteractionSchema.parse({
       kind: "request_confirmation",
