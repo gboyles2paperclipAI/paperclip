@@ -826,7 +826,10 @@ export function secretService(db: Db) {
     context?: SecretConsumerContext,
   ): Promise<RuntimeSecretResolution> {
     try {
-      return await resolveSecretValueInternal(companyId, secretId, version, context);
+      return await resolveSecretValueInternal(companyId, secretId, version, {
+        bindingContext: context,
+        accessContext: context,
+      });
     } catch (err) {
       markSecretResolutionFailure(err, secretResolutionErrorCode(err));
       throw err;
