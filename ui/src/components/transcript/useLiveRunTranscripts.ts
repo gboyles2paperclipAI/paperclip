@@ -231,6 +231,10 @@ export function useLiveRunTranscripts({
       if (missingTerminalLogRunIdsRef.current.has(run.id)) {
         return;
       }
+      if (isTerminalStatus(run.status) && run.hasStoredOutput !== true && runKnownLogBytes(run) === null) {
+        missingTerminalLogRunIdsRef.current.add(run.id);
+        return;
+      }
       const retryAt = retryAtMsByRunRef.current.get(run.id);
       if (typeof retryAt === "number" && Date.now() < retryAt) return;
       const offset = logOffsetByRunRef.current.get(run.id) ?? resolveInitialLogOffset(run, logReadLimitBytes);

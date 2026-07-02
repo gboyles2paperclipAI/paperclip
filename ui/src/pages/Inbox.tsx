@@ -104,9 +104,6 @@ import {
   ListTree,
 } from "lucide-react";
 
-const INBOX_HEARTBEAT_RUN_LIMIT = 200;
-const INBOX_ISSUE_LIST_LIMIT = 500;
-const INBOX_ALL_ISSUES_PAGE_SIZE = 500;
 import { Input } from "@/components/ui/input";
 import { PageTabBar } from "../components/PageTabBar";
 import type { Approval, HeartbeatRun, Issue, JoinRequest } from "@paperclipai/shared";
@@ -161,6 +158,7 @@ import { useDismissedInboxAlerts, useInboxDismissals, useReadInboxItems } from "
 
 const INBOX_HEARTBEAT_RUN_LIMIT = 200;
 const INBOX_ISSUE_LIST_LIMIT = 500;
+const INBOX_ALL_ISSUES_PAGE_SIZE = 500;
 const INBOX_HOT_PATH_STALE_MS = 30_000;
 
 export { InboxIssueMetaLeading, InboxIssueTrailingColumns } from "../components/IssueColumns";

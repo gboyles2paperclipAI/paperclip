@@ -60,6 +60,7 @@ import {
 } from "../lib/optimistic-issue-comments";
 import { clearIssueExecutionRun, removeLiveRunById, upsertInterruptedRun } from "../lib/optimistic-issue-runs";
 import { useProjectOrder } from "../hooks/useProjectOrder";
+import { useConferenceRoomChatEnabled } from "../hooks/useConferenceRoomChatEnabled";
 import { relativeTime, cn, formatDurationMs, formatTokens, visibleRunCostUsd } from "../lib/utils";
 import { ApprovalCard } from "../components/ApprovalCard";
 import { InlineEditor } from "../components/InlineEditor";
@@ -326,7 +327,7 @@ function useVisibilityAwarePollInterval() {
   return pollMs;
 }
 
-function readIssueRunStateFromCache(queryClient: QueryClient, issueId: string) {
+function readIssueRunStateFromCache(queryClient: QueryClient, issueId: string, issue?: Issue | null) {
   const liveRuns = queryClient.getQueryData<LiveRunForIssue[]>(
     queryKeys.issues.liveRuns(issueId),
   );
@@ -846,7 +847,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   // NUX thread (bubbles, metadata rows, composer chrome); OFF renders the
   // frozen master fork so the task thread looks exactly like master.
   const { enabled: conferenceRoomChatEnabled } = useConferenceRoomChatEnabled();
-  const ThreadComponent = conferenceRoomChatEnabled ? IssueChatThread : IssueChatThreadClassic;
+  const ThreadComponent = conferenceRoomChatEnabled ? IssueChatThread : IssueChatThread;
   const liveRunsPollMs = useVisibilityAwarePollInterval();
   const { data: activity } = useQuery({
     queryKey: queryKeys.issues.activity(issueId),

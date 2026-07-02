@@ -2,6 +2,7 @@ export { execute, ensureCodexSkillsInjected, estimateCodexCostUsd } from "./exec
 export { listCodexSkills, syncCodexSkills } from "./skills.js";
 export { testEnvironment } from "./test.js";
 export { parseCodexJsonl, isCodexTransientUpstreamError, isCodexUnknownSessionError } from "./parse.js";
+export { reconcileManagedCodexHome } from "./codex-home.js";
 export {
   getQuotaWindows,
   readCodexAuthInfo,

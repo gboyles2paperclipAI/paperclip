@@ -653,6 +653,7 @@ export async function startServer(): Promise<StartedServer> {
     persistPath: resolve(resolvePaperclipInstanceRoot(), "cooldown-state.json"),
   });
   const pluginWorkerManager = createPluginWorkerManager({ providerCooldownService });
+  const environmentCustomImages = environmentCustomImageService(db as any, { pluginWorkerManager });
   const app = await createApp(db as any, {
     uiMode,
     serverPort: listenPort,
