@@ -1,0 +1,1168 @@
+{
+  "generatedAt": "2026-07-02T23:51:20.058Z",
+  "baseUrl": "http://127.0.0.1:3100",
+  "companyId": "24c167fc-9271-4800-8834-97a660ffa3f4",
+  "summary": {
+    "total": 31,
+    "pass": 31,
+    "warn": 0,
+    "fail": 0,
+    "dashboardAgents": {
+      "active": 31,
+      "running": 0,
+      "paused": 0,
+      "error": 0
+    },
+    "dashboardTasks": {
+      "open": 7,
+      "inProgress": 0,
+      "blocked": 1,
+      "done": 12576
+    },
+    "pendingApprovals": 0
+  },
+  "agents": [
+    {
+      "id": "ee262558-9f90-43b0-956d-92b8bf6f01ab",
+      "name": "_CEO",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "ceo",
+      "lastHeartbeatAt": "2026-07-02T23:28:45.592Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/ee262558-9f90-43b0-956d-92b8bf6f01ab/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "1320f476-10cb-4c28-b2f6-3d313cd1a787",
+      "name": "_CTO",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "cto",
+      "lastHeartbeatAt": "2026-07-02T22:50:58.737Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/1320f476-10cb-4c28-b2f6-3d313cd1a787/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "ea4d40ac-2e4b-4389-8e45-dec47c7ab589",
+      "name": "_Security Lead",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "security-lead",
+      "lastHeartbeatAt": "2026-07-02T16:17:39.949Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/ea4d40ac-2e4b-4389-8e45-dec47c7ab589/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "55e7e16c-b54f-463a-b7f3-46c50a356721",
+      "name": "AI Engineer",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "ai-engineer",
+      "lastHeartbeatAt": "2026-07-01T08:22:50.961Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/55e7e16c-b54f-463a-b7f3-46c50a356721/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "0e2483cb-b31e-4d6e-aac5-665320c2cfe4",
+      "name": "Architecture Lead",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "architecture-lead",
+      "lastHeartbeatAt": "2026-06-26T21:08:20.452Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/0e2483cb-b31e-4d6e-aac5-665320c2cfe4/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "26a219ab-395d-4e84-92ac-636cfaf3c014",
+      "name": "Backend Lead",
+      "status": "idle",
+      "adapterType": "codex_local",
+      "urlKey": "backend-lead",
+      "lastHeartbeatAt": "2026-07-02T15:19:22.813Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "codex_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/26a219ab-395d-4e84-92ac-636cfaf3c014/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "f79c6774-78d6-4ed7-a6ff-889fa6c8b1f5",
+      "name": "CHESTER-Model Tester",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "chester-model-tester",
+      "lastHeartbeatAt": "2026-06-30T17:37:58.874Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/paperclip-src"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/f79c6774-78d6-4ed7-a6ff-889fa6c8b1f5/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "1d59148e-459a-4987-9bb4-963bb01e2c61",
+      "name": "Code Quality Specialist",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "code-quality-specialist",
+      "lastHeartbeatAt": "2026-07-02T22:58:25.042Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/1d59148e-459a-4987-9bb4-963bb01e2c61/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "7676c249-949b-4865-aa16-ac1c9ef8ffc5",
+      "name": "Data Lead",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "data-lead",
+      "lastHeartbeatAt": "2026-07-02T13:21:44.613Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/7676c249-949b-4865-aa16-ac1c9ef8ffc5/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "552d071a-a092-4fea-a4c9-db158f644e81",
+      "name": "Database Engineer",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "database-engineer",
+      "lastHeartbeatAt": "2026-07-01T19:06:36.729Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/552d071a-a092-4fea-a4c9-db158f644e81/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "01e93e59-739a-4b04-85cc-12d8810e5a0e",
+      "name": "DevOps Engineer",
+      "status": "idle",
+      "adapterType": "codex_local",
+      "urlKey": "devops-engineer",
+      "lastHeartbeatAt": "2026-07-02T21:43:58.528Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "codex_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/01e93e59-739a-4b04-85cc-12d8810e5a0e/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "adb59117-18d1-4888-8580-404d9f33396e",
+      "name": "DevOps Lead",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "devops-lead",
+      "lastHeartbeatAt": "2026-07-02T23:45:32.966Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/adb59117-18d1-4888-8580-404d9f33396e/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "6bb3aa40-dc6b-431c-915f-f6a9dd8c0b27",
+      "name": "Frontend Lead",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "frontend-lead",
+      "lastHeartbeatAt": "2026-07-02T23:18:30.155Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/6bb3aa40-dc6b-431c-915f-f6a9dd8c0b27/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "00ef12c9-5f57-4391-b859-21b771b6e1dc",
+      "name": "Infrastructure Lead",
+      "status": "idle",
+      "adapterType": "codex_local",
+      "urlKey": "infrastructure-lead",
+      "lastHeartbeatAt": "2026-07-02T23:16:25.799Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "codex_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/workspaces/00ef12c9-5f57-4391-b859-21b771b6e1dc"
+        }
+      ]
+    },
+    {
+      "id": "4de9f7f9-87a6-49a0-93d9-b1e528c1dd58",
+      "name": "Kelly-KB Content Lead",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "kelly-kb-content-lead",
+      "lastHeartbeatAt": "2026-07-02T13:37:09.140Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/4de9f7f9-87a6-49a0-93d9-b1e528c1dd58/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "da283e9d-06d6-41c6-a9f0-8b69039007e5",
+      "name": "Liam-Test Engineer",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "liam-test-engineer",
+      "lastHeartbeatAt": "2026-07-02T03:22:57.020Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/da283e9d-06d6-41c6-a9f0-8b69039007e5/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "9c332d6d-e0d7-4478-9b73-ab102da0ea21",
+      "name": "Node Backend Engineer",
+      "status": "idle",
+      "adapterType": "codex_local",
+      "urlKey": "node-backend-engineer",
+      "lastHeartbeatAt": "2026-07-02T15:04:12.975Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "codex_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/9c332d6d-e0d7-4478-9b73-ab102da0ea21/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "9d40be4c-b83b-4364-a7a4-50fc82a0e49b",
+      "name": "Platform Lead",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "platform-lead",
+      "lastHeartbeatAt": "2026-07-02T07:17:48.176Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/9d40be4c-b83b-4364-a7a4-50fc82a0e49b/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "c0e7f2f6-145e-4d8d-a20b-a35043cc3095",
+      "name": "QA Lead",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "qa-lead",
+      "lastHeartbeatAt": "2026-07-02T23:01:14.859Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/c0e7f2f6-145e-4d8d-a20b-a35043cc3095/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "d22fbc5b-c013-4185-a61a-a97cc022617d",
+      "name": "React Engineer",
+      "status": "idle",
+      "adapterType": "codex_local",
+      "urlKey": "react-engineer",
+      "lastHeartbeatAt": "2026-06-29T20:43:21.554Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "codex_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/d22fbc5b-c013-4185-a61a-a97cc022617d/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "a493a801-4681-4e9d-8c66-884fa74af92c",
+      "name": "Security Engineer",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "security-engineer",
+      "lastHeartbeatAt": "2026-07-02T15:35:06.952Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/a493a801-4681-4e9d-8c66-884fa74af92c/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "01efba67-0056-4545-b0ec-0800a6340aae",
+      "name": "SRE Engineer",
+      "status": "idle",
+      "adapterType": "codex_local",
+      "urlKey": "sre-engineer",
+      "lastHeartbeatAt": "2026-07-02T15:04:34.686Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "codex_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/01efba67-0056-4545-b0ec-0800a6340aae/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "ace8596f-c625-45e2-8e1e-ebf958017d74",
+      "name": "Stage 2B Gemini Data/QA Validator",
+      "status": "idle",
+      "adapterType": "gemini_local",
+      "urlKey": "stage-2b-gemini-data-qa-validator",
+      "lastHeartbeatAt": "2026-06-25T02:36:45.875Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "gemini_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/ace8596f-c625-45e2-8e1e-ebf958017d74/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "e8c59bba-8a93-4016-9ae0-cdd716141cc3",
+      "name": "Systems Language Engineer",
+      "status": "idle",
+      "adapterType": "codex_local",
+      "urlKey": "systems-language-engineer",
+      "lastHeartbeatAt": "2026-06-24T17:03:37.108Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "codex_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/workspaces/adb59117-18d1-4888-8580-404d9f33396e/help2day-repo"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/e8c59bba-8a93-4016-9ae0-cdd716141cc3/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "b5e37919-6712-487a-a87d-22095b35362b",
+      "name": "TODD Router (Gemini)",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "todd-router-gemini",
+      "lastHeartbeatAt": "2026-06-24T17:11:13.886Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/b5e37919-6712-487a-a87d-22095b35362b/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "b73b1543-97de-4bab-995b-73fb0ef7c2fe",
+      "name": "TODD-Ticket Router",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "todd-ticket-router",
+      "lastHeartbeatAt": "2026-07-02T09:02:33.627Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/b73b1543-97de-4bab-995b-73fb0ef7c2fe/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "cafa7831-645b-4a66-81be-6e6a811add67",
+      "name": "TODD-Ticket Router",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "todd-ticket-router",
+      "lastHeartbeatAt": "2026-05-28T19:52:21.969Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/cafa7831-645b-4a66-81be-6e6a811add67/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "bcb84e06-731f-4ce8-b552-5e1871b65954",
+      "name": "TypeScript Engineer",
+      "status": "idle",
+      "adapterType": "codex_local",
+      "urlKey": "typescript-engineer",
+      "lastHeartbeatAt": "2026-06-29T14:49:16.258Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "codex_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/bcb84e06-731f-4ce8-b552-5e1871b65954/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "00473d8b-bec1-43ff-ade7-45a502ff1860",
+      "name": "Workspace Resolver",
+      "status": "idle",
+      "adapterType": "claude_local",
+      "urlKey": "workspace-resolver",
+      "lastHeartbeatAt": "2026-06-24T17:04:37.464Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "claude_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/00473d8b-bec1-43ff-ade7-45a502ff1860/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "e3517adc-f73d-474e-80b8-f4274533ee84",
+      "name": "yAPI Engineer",
+      "status": "idle",
+      "adapterType": "codex_local",
+      "urlKey": "yapi-engineer",
+      "lastHeartbeatAt": "2026-05-19T23:53:38.988Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "codex_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/workspaces/adb59117-18d1-4888-8580-404d9f33396e/help2day-repo"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/e3517adc-f73d-474e-80b8-f4274533ee84/instructions/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "id": "cd4b483b-c579-4c6c-ba97-d17382ce2fdd",
+      "name": "yMCP Engineer",
+      "status": "idle",
+      "adapterType": "codex_local",
+      "urlKey": "ymcp-engineer",
+      "lastHeartbeatAt": "2026-05-19T21:42:05.712Z",
+      "liveRun": null,
+      "result": "pass",
+      "checks": [
+        {
+          "name": "status",
+          "status": "pass",
+          "detail": "idle"
+        },
+        {
+          "name": "adapter_type",
+          "status": "pass",
+          "detail": "codex_local"
+        },
+        {
+          "name": "runtime_config",
+          "status": "pass",
+          "detail": "present"
+        },
+        {
+          "name": "cwd",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/workspaces/adb59117-18d1-4888-8580-404d9f33396e/help2day-repo"
+        },
+        {
+          "name": "instructions_file",
+          "status": "pass",
+          "detail": "/home/paperclipadmin/.paperclip/instances/default/companies/24c167fc-9271-4800-8834-97a660ffa3f4/agents/cd4b483b-c579-4c6c-ba97-d17382ce2fdd/instructions/AGENTS.md"
+        }
+      ]
+    }
+  ]
+}
