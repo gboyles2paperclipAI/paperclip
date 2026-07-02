@@ -10,7 +10,7 @@ import {
   projects,
 } from "@paperclipai/db";
 import type { PermissionKey, PrincipalType } from "@paperclipai/shared";
-import { LOW_TRUST_REVIEW_PRESET, type LowTrustBoundary } from "@paperclipai/shared";
+import { LOW_TRUST_REVIEW_PRESET, isUuidLike, type LowTrustBoundary } from "@paperclipai/shared";
 import {
   LOW_TRUST_ISSUE_ANCESTRY_MAX_DEPTH,
   isIssueWithinLowTrustBoundary,
@@ -553,7 +553,7 @@ export function authorizationService(db: Db) {
   }
 
   async function loadRunPolicy(runId: string | null | undefined, companyId: string, agentId: string) {
-    if (!runId) return null;
+    if (!runId || !isUuidLike(runId)) return null;
     const row = await db
       .select({
         id: heartbeatRuns.id,

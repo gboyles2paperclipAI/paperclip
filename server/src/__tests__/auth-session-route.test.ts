@@ -150,6 +150,27 @@ describe("actorMiddleware authenticated session profile", () => {
     expect(res.body.runId).toBeUndefined();
   });
 
+  it("ignores malformed quoted run id headers and preserves valid UUID headers", async () => {
+    const validRunId = "11111111-1111-4111-8111-111111111111";
+    const app = express();
+    app.use(
+      actorMiddleware(createDb(), {
+        deploymentMode: "local_trusted",
+      }),
+    );
+    app.get("/actor", (req, res) => {
+      res.json(req.actor);
+    });
+
+    const malformed = await request(app).get("/actor").set("x-paperclip-run-id", `'${validRunId}'`);
+    const valid = await request(app).get("/actor").set("x-paperclip-run-id", validRunId);
+
+    expect(malformed.status).toBe(200);
+    expect(malformed.body).not.toHaveProperty("runId");
+    expect(valid.status).toBe(200);
+    expect(valid.body).toMatchObject({ runId: validRunId });
+  });
+
   it("trusts Cloud tenant identity headers and seeds board access", async () => {
     process.env.PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN = "tenant-token";
     const inserts: Array<{ values: Record<string, unknown> }> = [];
