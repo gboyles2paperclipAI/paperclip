@@ -313,4 +313,97 @@ describeEmbeddedPostgres("issue list routes assigneeAgentId filter", () => {
       error: "parentId must be a UUID or issue identifier",
     });
   });
+
+  it("accepts issue identifiers in parentId filters on issues/count", async () => {
+    const companyId = randomUUID();
+    const parentIssueId = randomUUID();
+    const matchingChildId = randomUUID();
+    const otherChildId = randomUUID();
+    const issuePrefix = uniqueIssuePrefix();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await seedCloudTenantMember(companyId);
+    await db.insert(issues).values([
+      {
+        id: parentIssueId,
+        companyId,
+        identifier: `${issuePrefix}-1`,
+        title: "Parent issue",
+        status: "in_progress",
+        priority: "medium",
+      },
+      {
+        id: matchingChildId,
+        companyId,
+        identifier: `${issuePrefix}-2`,
+        title: "Matching blocked child",
+        status: "blocked",
+        priority: "medium",
+        parentId: parentIssueId,
+      },
+      {
+        id: otherChildId,
+        companyId,
+        identifier: `${issuePrefix}-3`,
+        title: "Other blocked issue",
+        status: "blocked",
+        priority: "medium",
+      },
+    ]);
+
+    const app = createApp(companyId);
+    const res = await request(app)
+      .get(`/api/companies/${companyId}/issues/count`)
+      .query({ attention: "blocked", parentId: `${issuePrefix}-1` });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual({ count: 1 });
+  });
+
+  it("returns zero for unknown issue identifier parentId filters on issues/count", async () => {
+    const companyId = randomUUID();
+    const issuePrefix = uniqueIssuePrefix();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await seedCloudTenantMember(companyId);
+
+    const app = createApp(companyId);
+    const res = await request(app)
+      .get(`/api/companies/${companyId}/issues/count`)
+      .query({ attention: "blocked", parentId: `${issuePrefix}-999` });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual({ count: 0 });
+  });
+
+  it("returns 422 for malformed parentId filters on issues/count", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: uniqueIssuePrefix(),
+      requireBoardApprovalForNewAgents: false,
+    });
+    await seedCloudTenantMember(companyId);
+
+    const app = createApp(companyId);
+    const res = await request(app)
+      .get(`/api/companies/${companyId}/issues/count`)
+      .query({ attention: "blocked", parentId: "not-an-issue" });
+
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({
+      error: "parentId must be a UUID or issue identifier",
+    });
+  });
 });
