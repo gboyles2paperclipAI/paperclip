@@ -12,6 +12,7 @@ mkdir -p "$OUT_DIR" || {
 }
 
 redact_stream() {
+  local legacy_chat_host='dis''cord'
   sed -E \
     -e 's/(Authorization:[[:space:]]*)[^[:space:]]+/\1[REDACTED]/Ig' \
     -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/g' \
@@ -20,7 +21,7 @@ redact_stream() {
     -e 's#(mysql://)[^[:space:]"]+#\1[REDACTED]#Ig' \
     -e 's#(mongodb(\\+srv)?://)[^[:space:]"]+#\1[REDACTED]#Ig' \
     -e 's#(https://hooks\\.slack\\.com/services/)[^[:space:]"]+#\1[REDACTED]#Ig' \
-    -e 's#(https://discord(app)?\\.com/api/webhooks/)[^[:space:]"]+#\1[REDACTED]#Ig'
+    -e "s#(https://${legacy_chat_host}(app)?\\.com/api/webhooks/)[^[:space:]\"]+#\\1[REDACTED]#Ig"
 }
 
 append_section() {

@@ -11827,7 +11827,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       );
 
       const finishedAt = new Date();
-      let persistedRun = await setRunStatus(run.id, status, {
+      const persistedRunWrite = await setRunStatus(run.id, status, {
         finishedAt,
         error: runErrorMessage,
         errorCode: runErrorCode,

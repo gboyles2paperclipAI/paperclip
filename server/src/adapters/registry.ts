@@ -348,7 +348,7 @@ const grokLocalAdapter: ServerAdapterModule = {
 
 const hermesGatewayAdapter = createHermesGatewayServerAdapter();
 
-const hermesLocalAdapter = createHermesLocalServerAdapter();
+const hermesBaseLocalAdapter = createHermesLocalServerAdapter();
 
 const openclawGatewayAdapter: ServerAdapterModule = {
   type: "openclaw_gateway",
@@ -402,15 +402,14 @@ const piLocalAdapter: ServerAdapterModule = {
 
 // hermes-paperclip-adapter v0.2.0 predates the authToken field; cast is
 // intentional until hermes ships a matching AdapterExecutionContext type.
-const executeHermesLocal = hermesExecute as unknown as ServerAdapterModule["execute"];
+const executeHermesLocal = hermesBaseLocalAdapter.execute as unknown as ServerAdapterModule["execute"];
 
 const hermesLocalAdapter: ServerAdapterModule = {
-  type: "hermes_local",
+  ...hermesBaseLocalAdapter,
   execute: async (ctx) => {
-    const normalizedCtx = normalizeHermesConfig(ctx);
-    if (!normalizedCtx.authToken) return executeHermesLocal(normalizedCtx);
+    if (!ctx.authToken) return executeHermesLocal(ctx);
 
-    const existingConfig = (normalizedCtx.agent.adapterConfig ?? {}) as Record<string, unknown>;
+    const existingConfig = (ctx.agent.adapterConfig ?? {}) as Record<string, unknown>;
     const existingEnv =
       typeof existingConfig.env === "object" && existingConfig.env !== null && !Array.isArray(existingConfig.env)
         ? (existingConfig.env as Record<string, string>)
@@ -433,8 +432,8 @@ const hermesLocalAdapter: ServerAdapterModule = {
       ...existingConfig,
       env: {
         ...existingEnv,
-        ...(!explicitApiKey ? { PAPERCLIP_API_KEY: normalizedCtx.authToken } : {}),
-        PAPERCLIP_RUN_ID: normalizedCtx.runId,
+        ...(!explicitApiKey ? { PAPERCLIP_API_KEY: ctx.authToken } : {}),
+        PAPERCLIP_RUN_ID: ctx.runId,
       },
     };
 
@@ -446,25 +445,15 @@ const hermesLocalAdapter: ServerAdapterModule = {
     }
 
     const patchedCtx = {
-      ...normalizedCtx,
+      ...ctx,
       agent: {
-        ...normalizedCtx.agent,
+        ...ctx.agent,
         adapterConfig: patchedConfig,
       },
     };
 
     return executeHermesLocal(patchedCtx);
   },
-  testEnvironment: (ctx) => hermesTestEnvironment(normalizeHermesConfig(ctx) as never),
-  sessionCodec: hermesSessionCodec,
-  listSkills: hermesListSkills,
-  syncSkills: hermesSyncSkills,
-  models: hermesModels,
-  supportsLocalAgentJwt: true,
-  supportsInstructionsBundle: false,
-  requiresMaterializedRuntimeSkills: false,
-  agentConfigurationDoc: hermesAgentConfigurationDoc,
-  detectModel: () => detectModelFromHermes(),
 };
 
 const adaptersByType = new Map<string, ServerAdapterModule>();
