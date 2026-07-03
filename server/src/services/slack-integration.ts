@@ -538,6 +538,36 @@ function buildActivityNotificationBlocks(input: {
   ];
 }
 
+function buildIssueInteractionNotificationBlocks(input: {
+  title: string;
+  summary: string;
+  entityId: string;
+  details: Record<string, unknown>;
+  paperclipUrl?: string | null;
+}) {
+  const blocks = buildActivityNotificationBlocks({
+    title: input.title,
+    summary: input.summary,
+    entityType: "issue",
+    entityId: input.entityId,
+    details: input.details,
+  });
+  const paperclipUrl = input.paperclipUrl?.trim();
+  if (paperclipUrl) {
+    blocks.push({
+      type: "actions",
+      elements: [{
+        type: "button",
+        text: { type: "plain_text", text: "Open in Paperclip" },
+        action_id: "open_paperclip_issue",
+        url: `${paperclipUrl.replace(/\/$/, "")}/issues/${input.entityId}`,
+        value: input.entityId,
+      }],
+    });
+  }
+  return blocks;
+}
+
 export function maybeNotifySlackForActivity(input: {
   db?: Db;
   companyId?: string;
@@ -554,19 +584,25 @@ export function maybeNotifySlackForActivity(input: {
     blocks: unknown[];
   } | null => {
     if (input.action === "issue.created") {
-      const ticketsChannel = process.env.SLACK_TICKETS_CHANNEL_ID;
-      const title = "Ticket created";
-      const summary = payloadText(details, ["title", "summary", "description"]) ?? `New ticket ${compactId(input.entityId)} was created.`;
+      return null;
+    }
+    if (input.action === "issue.thread_interaction_created") {
+      const kind = String(details.interactionKind ?? "");
+      if (kind !== "request_confirmation" && kind !== "request_checkbox_confirmation") return null;
+      const title = "Approval requested";
+      const summary =
+        payloadText(details, ["title", "summary", "prompt"])
+        ?? `Issue ${compactId(input.entityId)} has a pending ${humanizeKey(kind)} card.`;
       return {
-        channel: ticketsChannel ?? process.env.SLACK_ALERTS_CHANNEL_ID,
-        channelKey: ticketsChannel ? undefined : "SLACK_TICKETS_CHANNEL_ID",
+        channel: process.env.SLACK_APPROVALS_CHANNEL_ID,
+        channelKey: "SLACK_APPROVALS_CHANNEL_ID",
         text: `${title}: ${summary}`,
-        blocks: buildActivityNotificationBlocks({
+        blocks: buildIssueInteractionNotificationBlocks({
           title,
           summary,
-          entityType: input.entityType,
           entityId: input.entityId,
           details,
+          paperclipUrl: process.env.PAPERCLIP_PUBLIC_URL,
         }),
       };
     }

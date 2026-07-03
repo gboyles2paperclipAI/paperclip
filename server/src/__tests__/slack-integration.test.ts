@@ -24,6 +24,7 @@ import {
   parseSlackApprovalInteraction,
   parseSlackSocketEnvelope,
   postSlackMessage,
+  maybeNotifySlackForActivity,
   redactSlackText,
   verifySlackRequestSignature,
 } from "../services/slack-integration.js";
@@ -176,6 +177,83 @@ describe("Slack integration utilities", () => {
 
     delete process.env.SLACK_BOT_TOKEN;
     delete process.env.SLACK_ALERTS_CHANNEL_ID;
+  });
+
+  it("does not post Slack notifications for ticket creation", async () => {
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.SLACK_ALERTS_CHANNEL_ID = "C123";
+    const fetchMock = vi.fn(async () => ({
+      json: async () => ({ ok: true }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    maybeNotifySlackForActivity({
+      action: "issue.created",
+      entityType: "issue",
+      entityId: "iss-1",
+      details: { title: "New intake" },
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    delete process.env.SLACK_BOT_TOKEN;
+    delete process.env.SLACK_ALERTS_CHANNEL_ID;
+  });
+
+  it("posts request confirmation interactions to the approvals Slack channel", async () => {
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.SLACK_APPROVALS_CHANNEL_ID = "CAPPROVE";
+    process.env.PAPERCLIP_PUBLIC_URL = "https://paperclip.example.test/FUL";
+    const fetchMock = vi.fn(async () => ({
+      json: async () => ({ ok: true }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    maybeNotifySlackForActivity({
+      action: "issue.thread_interaction_created",
+      entityType: "issue",
+      entityId: "226b2f6e-ed62-45ab-89f4-c530c1dfaa1d",
+      details: {
+        interactionId: "813e9859-f6f2-4712-8e7d-c3b4ec75d730",
+        interactionKind: "request_confirmation",
+        interactionStatus: "pending",
+        continuationPolicy: "wake_assignee",
+      },
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"));
+    expect(body.channel).toBe("CAPPROVE");
+    expect(body.text).toContain("Approval requested");
+    expect(JSON.stringify(body.blocks)).toContain("Open in Paperclip");
+
+    delete process.env.SLACK_BOT_TOKEN;
+    delete process.env.SLACK_APPROVALS_CHANNEL_ID;
+    delete process.env.PAPERCLIP_PUBLIC_URL;
+  });
+
+  it("does not post non-approval issue interactions to Slack", async () => {
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.SLACK_APPROVALS_CHANNEL_ID = "CAPPROVE";
+    const fetchMock = vi.fn(async () => ({
+      json: async () => ({ ok: true }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    maybeNotifySlackForActivity({
+      action: "issue.thread_interaction_created",
+      entityType: "issue",
+      entityId: "iss-1",
+      details: { interactionKind: "ask_user_questions" },
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    delete process.env.SLACK_BOT_TOKEN;
+    delete process.env.SLACK_APPROVALS_CHANNEL_ID;
   });
 
   it("parses and identifies Slack Socket Mode interactive envelopes", () => {
