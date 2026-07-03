@@ -35,6 +35,8 @@ pending -> approved
 
 If the Slack integration is configured, Paperclip can also send the approval request to Slack with action buttons. Slack is only an approval interface: the decision is valid only after Paperclip verifies the Slack request, maps the Slack user to an authorized board user, records the approval decision, and writes the audit event. Ordinary Slack messages are not approvals.
 
+Issue-thread confirmation cards are separate from formal approvals. Agents use `request_confirmation` or `request_checkbox_confirmation` cards for ordinary issue-scoped decisions such as plan acceptance, dry-run permission, or selecting which proposed tasks to create. When Slack is configured, Paperclip posts these cards to the approvals channel as notifications with an `Open in Paperclip` link. Resolve them in Paperclip; Slack messages alone do not accept or reject the card.
+
 ## Reviewing Approvals
 
 From the Approvals page, you can see all pending approvals. Each approval shows:
