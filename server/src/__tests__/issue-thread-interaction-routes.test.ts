@@ -411,6 +411,64 @@ describe.sequential("issue thread interaction routes", () => {
         details: expect.objectContaining({
           interactionId: "interaction-1",
           interactionKind: "suggest_tasks",
+          issueIdentifier: "PAP-1714",
+          issueTitle: "Persist interactions",
+        }),
+      }),
+    );
+  });
+
+  it("logs readable metadata for request confirmation Slack notifications", async () => {
+    mockInteractionService.create.mockResolvedValueOnce({
+      id: "interaction-approval",
+      companyId: "company-1",
+      issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      kind: "request_confirmation",
+      title: "Approve rollback dry run + merge PR #419",
+      summary: "Rollback documentation is ready.",
+      status: "pending",
+      continuationPolicy: "wake_assignee",
+      idempotencyKey: null,
+      sourceCommentId: null,
+      sourceRunId: "run-1",
+      createdByAgentId: CREATED_AGENT_ID,
+      createdByUserId: null,
+      payload: {
+        version: 1,
+        prompt: "Approve the non-destructive dry run and documentation PR merge.",
+      },
+      result: null,
+      createdAt: "2026-04-20T12:00:00.000Z",
+      updatedAt: "2026-04-20T12:00:00.000Z",
+    });
+    const app = await createApp();
+
+    const createRes = await request(app)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions")
+      .send({
+        kind: "request_confirmation",
+        title: "Approve rollback dry run + merge PR #419",
+        summary: "Rollback documentation is ready.",
+        payload: {
+          version: 1,
+          prompt: "Approve the non-destructive dry run and documentation PR merge.",
+        },
+      });
+
+    expect(createRes.status).toBe(201);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.thread_interaction_created",
+        details: expect.objectContaining({
+          interactionId: "interaction-approval",
+          interactionKind: "request_confirmation",
+          issueIdentifier: "PAP-1714",
+          issueTitle: "Persist interactions",
+          interactionTitle: "Approve rollback dry run + merge PR #419",
+          interactionSummary: "Rollback documentation is ready.",
+          prompt: "Approve the non-destructive dry run and documentation PR merge.",
+          createdByAgentId: CREATED_AGENT_ID,
         }),
       }),
     );

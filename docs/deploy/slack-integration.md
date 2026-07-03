@@ -16,7 +16,9 @@ Slack notifications are sent for:
 
 Approval request messages include `Approve`, `Reject`, `Needs changes`, and `Open in Paperclip` actions. Button payloads contain only the approval identifier and requested action.
 
-Issue-thread `request_confirmation` and `request_checkbox_confirmation` cards are sent to the approvals channel so the board sees ordinary issue-scoped decisions. These cards link back to the issue in Paperclip, where the board accepts or rejects the interaction. They are not formal `/approvals` records and do not use the Slack approval-button resolver.
+Issue-thread `request_confirmation` and `request_checkbox_confirmation` cards are sent only to the approvals channel so the board sees ordinary issue-scoped decisions without mixing them into operational alerts. These cards link back to the issue in Paperclip, where the board accepts or rejects the interaction. They are not formal `/approvals` records and do not use the Slack approval-button resolver.
+
+Operational helpers such as `notify-grant-slack` post to the alerts channel and must not be used for approval requests. Approval and confirmation cards should come from Paperclip's approval or issue-interaction notification paths.
 
 Slack messages must not include raw screenshots, uploaded images, passwords, MFA codes, recovery keys, payment card data, API tokens, or other credential-shaped values. Paperclip redacts and filters these fields before posting.
 

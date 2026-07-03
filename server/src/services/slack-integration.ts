@@ -282,6 +282,13 @@ function formatSlackValue(value: unknown, maxLength = 140): string {
   return redactSlackText(String(value)).slice(0, maxLength);
 }
 
+function truncateSlackText(value: string | null | undefined, maxLength: number): string | null {
+  if (!value) return null;
+  const redacted = redactSlackText(value).replace(/\s+/g, " ").trim();
+  if (!redacted) return null;
+  return redacted.length > maxLength ? `${redacted.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...` : redacted;
+}
+
 function payloadText(payload: Record<string, unknown>, keys: string[]): string | null {
   for (const key of keys) {
     const value = payload[key];
@@ -309,15 +316,10 @@ function compactId(id: string): string {
   return id.length > 12 ? `${id.slice(0, 8)}...${id.slice(-4)}` : id;
 }
 
-function summarizePayload(payload: Record<string, unknown>): string {
-  const redacted = redactEventPayload(payload) ?? {};
-  const entries = Object.entries(redacted)
-    .filter(([key]) => !IMAGE_KEY_RE.test(key) && !NOISE_PAYLOAD_KEYS.has(key))
-    .filter(([, value]) => typeof value !== "string" || !SECRET_TEXT_RE.test(value))
-    .filter(([key]) => !["summary", "title", "scope", "reason", "requestedBy", "requestedByAgentId", "issueId", "issueIds"].includes(key))
-    .slice(0, 6);
-  if (entries.length === 0) return "Open Paperclip for details.";
-  return entries.map(([key, value]) => `*${humanizeKey(key)}:* ${formatSlackValue(value, 220)}`).join("\n");
+function compactAgent(value: unknown): string | null {
+  const raw = stringValue(value);
+  if (!raw) return null;
+  return raw.length > 12 ? `agent ${compactId(raw)}` : raw;
 }
 
 function buildPayloadFields(payload: Record<string, unknown>): Array<Record<string, unknown>> {
@@ -420,23 +422,19 @@ export function buildSlackApprovalBlocks(input: {
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `*Action needed: ${approvalTypeLabel(input.type)}*\n${title}`,
+        text: `*Approval needed*\n${truncateSlackText(title, 240) ?? "Open Paperclip for details."}`,
       },
     },
     {
       type: "section",
-      fields,
+      fields: fields.slice(0, 6),
     },
   ];
   if (description) {
     blocks.push({
-      type: "section",
-      text: { type: "mrkdwn", text: `*Context*\n${description}` },
+      type: "context",
+      elements: [{ type: "mrkdwn", text: `Context: ${truncateSlackText(description, 240)}` }],
     });
-  }
-  const extraContext = summarizePayload(input.payload);
-  if (extraContext !== "Open Paperclip for details.") {
-    blocks.push({ type: "section", text: { type: "mrkdwn", text: extraContext } });
   }
   blocks.push(
     {
@@ -545,13 +543,46 @@ function buildIssueInteractionNotificationBlocks(input: {
   details: Record<string, unknown>;
   paperclipUrl?: string | null;
 }) {
-  const blocks = buildActivityNotificationBlocks({
-    title: input.title,
-    summary: input.summary,
-    entityType: "issue",
-    entityId: input.entityId,
-    details: input.details,
-  });
+  const details = redactEventPayload(input.details) ?? {};
+  const interactionKind = stringValue(details.interactionKind);
+  const issueIdentifier = stringValue(details.issueIdentifier);
+  const issueTitle = truncateSlackText(stringValue(details.issueTitle), 120);
+  const cardTitle = truncateSlackText(stringValue(details.interactionTitle) ?? input.summary, 180);
+  const prompt = truncateSlackText(stringValue(details.prompt) ?? stringValue(details.interactionSummary), 220);
+  const requestedBy = compactAgent(details.createdByAgentId);
+  const optionCount = typeof details.optionCount === "number" ? details.optionCount : null;
+  const fields: Array<Record<string, unknown>> = [
+    {
+      type: "mrkdwn",
+      text: `*Issue*\n${issueIdentifier ? `${issueIdentifier}${issueTitle ? ` - ${issueTitle}` : ""}` : compactId(input.entityId)}`,
+    },
+    {
+      type: "mrkdwn",
+      text: `*Decision type*\n${interactionKind === "request_checkbox_confirmation" ? "Select initiatives" : "Accept or reject"}`,
+    },
+  ];
+  if (requestedBy) {
+    fields.push({ type: "mrkdwn", text: `*Requested by*\n${requestedBy}` });
+  }
+  if (optionCount !== null) {
+    fields.push({ type: "mrkdwn", text: `*Options*\n${optionCount}` });
+  }
+  const blocks: Array<Record<string, unknown>> = [
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: `*${input.title}*\n${cardTitle ?? "Open Paperclip to review this request."}` },
+    },
+    {
+      type: "section",
+      fields,
+    },
+  ];
+  if (prompt && prompt !== cardTitle) {
+    blocks.push({
+      type: "context",
+      elements: [{ type: "mrkdwn", text: `Prompt: ${prompt}` }],
+    });
+  }
   const paperclipUrl = input.paperclipUrl?.trim();
   if (paperclipUrl) {
     blocks.push({
@@ -589,9 +620,9 @@ export function maybeNotifySlackForActivity(input: {
     if (input.action === "issue.thread_interaction_created") {
       const kind = String(details.interactionKind ?? "");
       if (kind !== "request_confirmation" && kind !== "request_checkbox_confirmation") return null;
-      const title = "Approval requested";
+      const title = kind === "request_checkbox_confirmation" ? "Approval options ready" : "Approval needed";
       const summary =
-        payloadText(details, ["title", "summary", "prompt"])
+        payloadText(details, ["interactionTitle", "title", "prompt", "summary"])
         ?? `Issue ${compactId(input.entityId)} has a pending ${humanizeKey(kind)} card.`;
       return {
         channel: process.env.SLACK_APPROVALS_CHANNEL_ID,

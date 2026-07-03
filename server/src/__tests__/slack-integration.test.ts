@@ -204,6 +204,7 @@ describe("Slack integration utilities", () => {
   it("posts request confirmation interactions to the approvals Slack channel", async () => {
     process.env.SLACK_BOT_TOKEN = "xoxb-test";
     process.env.SLACK_APPROVALS_CHANNEL_ID = "CAPPROVE";
+    process.env.SLACK_ALERTS_CHANNEL_ID = "CALERTS";
     process.env.PAPERCLIP_PUBLIC_URL = "https://paperclip.example.test/FUL";
     const fetchMock = vi.fn(async () => ({
       json: async () => ({ ok: true }),
@@ -218,6 +219,11 @@ describe("Slack integration utilities", () => {
         interactionId: "813e9859-f6f2-4712-8e7d-c3b4ec75d730",
         interactionKind: "request_confirmation",
         interactionStatus: "pending",
+        issueIdentifier: "FUL-14840",
+        issueTitle: "Close rollback readiness gap - production documentation",
+        interactionTitle: "Approve rollback dry run + merge PR #419",
+        prompt: "Rollback documentation is complete. Approve the non-destructive dry run and PR merge.",
+        createdByAgentId: "adb59117-18d1-4888-8580-404d9f33396e",
         continuationPolicy: "wake_assignee",
       },
     });
@@ -226,11 +232,18 @@ describe("Slack integration utilities", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"));
     expect(body.channel).toBe("CAPPROVE");
-    expect(body.text).toContain("Approval requested");
-    expect(JSON.stringify(body.blocks)).toContain("Open in Paperclip");
+    expect(body.channel).not.toBe("CALERTS");
+    expect(body.text).toContain("Approval needed");
+    const encodedBlocks = JSON.stringify(body.blocks);
+    expect(encodedBlocks).toContain("FUL-14840");
+    expect(encodedBlocks).toContain("Approve rollback dry run + merge PR #419");
+    expect(encodedBlocks).toContain("agent adb59117...396e");
+    expect(encodedBlocks).toContain("Open in Paperclip");
+    expect(encodedBlocks).not.toContain("813e9859-f6f2-4712-8e7d-c3b4ec75d730");
 
     delete process.env.SLACK_BOT_TOKEN;
     delete process.env.SLACK_APPROVALS_CHANNEL_ID;
+    delete process.env.SLACK_ALERTS_CHANNEL_ID;
     delete process.env.PAPERCLIP_PUBLIC_URL;
   });
 

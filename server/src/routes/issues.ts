@@ -7498,6 +7498,9 @@ export function issueRoutes(
       agentId: actor.agentId,
       userId: actor.actorType === "user" ? actor.actorId : null,
     });
+    const interactionPayload = typeof interaction.payload === "object" && interaction.payload !== null
+      ? interaction.payload as Record<string, unknown>
+      : {};
 
     await logActivity(db, {
       companyId: issue.companyId,
@@ -7512,6 +7515,15 @@ export function issueRoutes(
         interactionId: interaction.id,
         interactionKind: interaction.kind,
         interactionStatus: interaction.status,
+        issueIdentifier: issue.identifier,
+        issueTitle: issue.title,
+        interactionTitle: interaction.title,
+        interactionSummary: interaction.summary,
+        prompt: typeof interactionPayload.prompt === "string" ? interactionPayload.prompt : null,
+        optionCount: Array.isArray(interactionPayload.options)
+          ? interactionPayload.options.length
+          : null,
+        createdByAgentId: interaction.createdByAgentId,
         continuationPolicy: interaction.continuationPolicy,
       },
     });
