@@ -381,6 +381,15 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Stable JSON serialization that sorts object keys so Postgres JSONB round-trips
+// (which alphabetizes keys) compare equal to freshly-constructed JS objects.
+function sortedJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(sortedJson).join(",")}]`;
+  const obj = value as Record<string, unknown>;
+  return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${sortedJson(obj[k])}`).join(",")}}`;
+}
+
 function normalizePackageFileMap(files: Record<string, string>) {
   const out: Record<string, string> = {};
   for (const [rawPath, content] of Object.entries(files)) {
@@ -4351,20 +4360,53 @@ export function companySkillService(db: Db) {
         metadata,
         updatedAt: new Date(),
       };
-      const row = existing
-        ? await db
-          .update(companySkills)
-          .set(values)
-          .where(eq(companySkills.id, existing.id))
-          .returning()
-          .then((rows) => rows[0] ?? null)
-        : await db
+      let persisted: CompanySkill;
+      if (existing) {
+        // Skip the UPDATE when nothing actually changed, so we do not produce
+        // millions of no-op writes against a table that rarely mutates.
+        const changed = (
+          existing.slug !== values.slug
+          || existing.name !== values.name
+          || existing.description !== values.description
+          || existing.markdown !== values.markdown
+          || existing.sourceType !== values.sourceType
+          || existing.sourceLocator !== values.sourceLocator
+          || existing.sourceRef !== values.sourceRef
+          || existing.trustLevel !== values.trustLevel
+          || existing.compatibility !== values.compatibility
+          || JSON.stringify(existing.fileInventory) !== JSON.stringify(values.fileInventory)
+          || existing.iconUrl !== values.iconUrl
+          || existing.color !== values.color
+          || existing.tagline !== values.tagline
+          || existing.authorName !== values.authorName
+          || existing.homepageUrl !== values.homepageUrl
+          || JSON.stringify(existing.categories) !== JSON.stringify(values.categories)
+          || existing.sharingScope !== values.sharingScope
+          || existing.installCount !== values.installCount
+          || sortedJson(existing.metadata ?? null) !== sortedJson(values.metadata ?? null)
+        );
+        if (!changed) {
+          persisted = existing;
+        } else {
+          const row = await db
+            .update(companySkills)
+            .set(values)
+            .where(eq(companySkills.id, existing.id))
+            .returning()
+            .then((rows) => rows[0] ?? null);
+          if (!row) throw notFound("Failed to persist company skill");
+          persisted = toCompanySkill(row);
+        }
+      } else {
+        const row = await db
           .insert(companySkills)
           .values(values)
           .returning()
           .then((rows) => rows[0] ?? null);
-      if (!row) throw notFound("Failed to persist company skill");
-      out.push(toCompanySkill(row));
+        if (!row) throw notFound("Failed to persist company skill");
+        persisted = toCompanySkill(row);
+      }
+      out.push(persisted);
     }
     return out;
   }
