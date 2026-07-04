@@ -14,6 +14,11 @@ const mockIssuesApi = vi.hoisted(() => ({
   get: vi.fn(),
 }));
 
+const mockUseLiveRunTranscripts = vi.hoisted(() => vi.fn(() => ({
+  transcriptByRun: new Map(),
+  hasOutputForRun: () => false,
+})));
+
 vi.mock("@/lib/router", () => ({
   Link: ({ to, children, ...props }: { to: string; children: ReactNode }) => (
     <a href={to} {...props}>
@@ -39,10 +44,7 @@ vi.mock("./RunChatSurface", () => ({
 }));
 
 vi.mock("./transcript/useLiveRunTranscripts", () => ({
-  useLiveRunTranscripts: () => ({
-    transcriptByRun: new Map(),
-    hasOutputForRun: () => false,
-  }),
+  useLiveRunTranscripts: mockUseLiveRunTranscripts,
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -156,6 +158,42 @@ describe("ActiveAgentsPanel", () => {
       anchor.textContent?.includes("more active/recent"),
     );
     expect(moreLink?.getAttribute("href")).toBe("/dashboard/live");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("hydrates dashboard transcripts only for active visible runs", async () => {
+    mockHeartbeatsApi.liveRunsForCompany.mockResolvedValue([
+      createRun(1),
+      { ...createRun(2), status: "failed", finishedAt: "2026-04-24T12:02:00.000Z" },
+      { ...createRun(3), status: "succeeded", finishedAt: "2026-04-24T12:03:00.000Z" },
+      { ...createRun(4), status: "cancelled", finishedAt: "2026-04-24T12:04:00.000Z" },
+      createRun(5),
+    ]);
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <ActiveAgentsPanel companyId="company-1" />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+
+    await waitForMicrotaskAssertion(() => {
+      expect(mockUseLiveRunTranscripts).toHaveBeenCalled();
+      const lastCall = mockUseLiveRunTranscripts.mock.calls.at(-1) as
+        | [{ runs: Array<{ id: string }> }]
+        | undefined;
+      expect(lastCall?.[0].runs.map((run) => run.id)).toEqual(["run-1"]);
+    });
 
     await act(async () => {
       root.unmount();

@@ -106,8 +106,12 @@ export function ActiveAgentsPanel({
     return map;
   }, [issueQueries]);
 
+  const transcriptRuns = useMemo(
+    () => visibleRuns.filter(isRunActive),
+    [visibleRuns],
+  );
   const { transcriptByRun, hasOutputForRun } = useLiveRunTranscripts({
-    runs: visibleRuns,
+    runs: transcriptRuns,
     companyId,
     maxChunksPerRun: DASHBOARD_MAX_CHUNKS_PER_RUN,
     logPollIntervalMs: DASHBOARD_LOG_POLL_INTERVAL_MS,
