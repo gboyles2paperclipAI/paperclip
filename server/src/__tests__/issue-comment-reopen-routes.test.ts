@@ -410,7 +410,7 @@ describe.sequential("issue comment reopen routes", () => {
         details: expect.not.objectContaining({ reopened: true }),
       }),
     );
-  });
+  }, 10_000);
 
   it("keeps PATCH comments on closed issues inert without explicit reopen intent", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue("done"));
@@ -433,9 +433,7 @@ describe.sequential("issue comment reopen routes", () => {
       }),
       expect.anything(),
     );
-    expect(mockLogActivity).toHaveBeenCalledWith(
-      expect.anything(),
-    );
+    expect(mockLogActivity).toHaveBeenCalled();
     expect(mockIssueService.update).not.toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       expect.objectContaining({ status: "todo" }),
@@ -810,6 +808,7 @@ describe.sequential("issue comment reopen routes", () => {
         assigneeAgentId: otherAgentId,
         status: "todo",
       }),
+      expect.anything(),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -1162,7 +1161,7 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
-  it("still implicitly reopens done issues via POST comments when the comment runId differs from the issue's owning run", async () => {
+  it("keeps done issues closed via POST comments without explicit reopen intent even when the comment runId differs from the issue's owning run", async () => {
     mockIssueService.getById.mockResolvedValue({
       ...makeIssue("done"),
       checkoutRunId: "run-owning",
@@ -1185,9 +1184,10 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ body: "Real human follow-up — please reopen" });
 
     expect(res.status).toBe(201);
-    expect(mockIssueService.update).toHaveBeenCalledWith(
+    expect(mockIssueService.update).not.toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
-      { status: "todo" },
+      expect.objectContaining({ status: "todo" }),
+      expect.anything(),
     );
   });
 

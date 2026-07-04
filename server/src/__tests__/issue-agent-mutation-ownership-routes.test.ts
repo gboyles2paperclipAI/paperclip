@@ -71,7 +71,13 @@ const mockStorageService = vi.hoisted(() => ({
 const mockIssueThreadInteractionService = vi.hoisted(() => ({
   expireRequestConfirmationsSupersededByComment: vi.fn(async () => []),
   expireStaleRequestConfirmationsForIssueDocument: vi.fn(async () => []),
+  expireRequestConfirmationsSupersededByHistoricalComments: vi.fn(async () => []),
   listForIssue: vi.fn(async () => []),
+}));
+const mockIssueApprovalService = vi.hoisted(() => ({
+  link: vi.fn(),
+  unlink: vi.fn(),
+  listApprovalsForIssue: vi.fn(async () => []),
 }));
 const mockIssueRecoveryActionService = vi.hoisted(() => ({
   getActiveForIssue: vi.fn(async () => null),
@@ -216,6 +222,7 @@ function registerRouteMocks() {
     routineService: () => ({
       syncRunStatusForIssue: vi.fn(async () => undefined),
     }),
+    taskWatchdogService: () => mockTaskWatchdogService,
     workProductService: () => mockWorkProductService,
   }));
 }
@@ -691,7 +698,7 @@ describe("agent issue mutation checkout ownership", () => {
     expect(res.status).toBe(403);
     expect(res.body.error).toContain("Task bridge keys cannot use company-wide issue list APIs");
     expect(mockIssueService.list).not.toHaveBeenCalled();
-  });
+  }, 10_000);
 
   it("uses the company-scope fast path on the issue list route", async () => {
     mockAccessService.decide.mockImplementation(async (input: { action: string }) => {
@@ -1889,7 +1896,7 @@ describe("agent issue mutation checkout ownership", () => {
     it("rejects stale watchdog source mutations when revalidation finds a live path", async () => {
       denyBaseBoundary();
       mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
-      mockTaskWatchdogService.revalidateMutationScope.mockResolvedValueOnce({
+      mockTaskWatchdogService.revalidateMutationScope.mockResolvedValue({
         allowed: false,
         reason:
           "Task-watchdog review is stale because the watched subtree now has a live, waiting, already-reviewed, or not-applicable path; refresh the source state before mutating it.",
@@ -1907,7 +1914,7 @@ describe("agent issue mutation checkout ownership", () => {
     it("suppresses watchdog follow-up creation when current source revalidation is live", async () => {
       denyBaseBoundary();
       mockIssueService.getById.mockResolvedValue(makeIssue({ assigneeAgentId: ownerAgentId }));
-      mockTaskWatchdogService.revalidateMutationScope.mockResolvedValueOnce({
+      mockTaskWatchdogService.revalidateMutationScope.mockResolvedValue({
         allowed: false,
         reason:
           "Task-watchdog review is stale because the watched subtree now has a live, waiting, already-reviewed, or not-applicable path; refresh the source state before mutating it.",

@@ -256,9 +256,7 @@ const HEARTBEAT_MAX_CONCURRENT_RUNS_MIN = 1;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 50;
 // Concurrency caps (FUL-4341)
 const GLOBAL_MAX_CONCURRENT_RUNS = 6;
-const PREMIUM_MAX_CONCURRENT_RUNS = 6;
 const PER_AGENT_MAX_CONCURRENT_RUNS_HARD_CAP = 6;
-const PREMIUM_ADAPTER_TYPES: ReadonlyArray<string> = ["claude_local"];
 const PREMIUM_MANAGED_MAX_CONCURRENT_RUNS_DEFAULT = 3;
 const PREMIUM_MANAGED_MAX_CONCURRENT_RUNS_MIN = 1;
 const PREMIUM_MANAGED_MAX_CONCURRENT_RUNS_MAX = 20;
@@ -8790,7 +8788,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(count ?? 0);
   }
 
-  async function listPremiumRunningRuns() {
+  async function listPremiumManagedRunningRuns() {
     return db
       .select({
         id: heartbeatRuns.id,
@@ -8802,7 +8800,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .where(
         and(
           eq(heartbeatRuns.status, "running"),
-          inArray(agents.adapterType, [...PREMIUM_ADAPTER_TYPES]),
+          inArray(agents.adapterType, [...PREMIUM_MANAGED_ADAPTER_TYPES]),
           sql`coalesce(${heartbeatRuns.contextSnapshot} ->> 'modelProfile', '') != 'cheap'`,
         ),
       );
@@ -8843,10 +8841,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     // Premium cap: defer (leave queued) if premium slot is occupied (FUL-5144)
-    if (PREMIUM_ADAPTER_TYPES.includes(agent.adapterType ?? "")) {
+    if (isPremiumManagedAdapter(agent.adapterType)) {
       const contextModelProfile = readContextModelProfile(context);
       if (contextModelProfile !== "cheap") {
-        const premiumRunningRuns = await listPremiumRunningRuns();
+        const premiumRunningRuns = await listPremiumManagedRunningRuns();
         let activePremiumRunningCount = 0;
         for (const run of premiumRunningRuns) {
           if (run.processGroupId && !isProcessGroupAlive(run.processGroupId)) {
@@ -8864,7 +8862,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           activePremiumRunningCount++;
         }
 
-        if (activePremiumRunningCount >= PREMIUM_MAX_CONCURRENT_RUNS) {
+        if (activePremiumRunningCount >= premiumManagedMaxConcurrentRuns()) {
           return null; // Defer — do not cancel
         }
       }
@@ -15175,7 +15173,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const [globalRunning, globalQueued, premiumRunning, pausedWakeBackoffRows] = await Promise.all([
         countGlobalRunningRuns(),
         countGlobalQueuedRuns(),
-        listPremiumRunningRuns().then((rows) => rows.length),
+        listPremiumManagedRunningRuns().then((rows) => rows.length),
         db
           .select({
             agentId: heartbeatRuns.agentId,
@@ -15199,7 +15197,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           queued: globalQueued,
         },
         premium: {
-          max: PREMIUM_MAX_CONCURRENT_RUNS,
+          max: premiumManagedMaxConcurrentRuns(),
           running: premiumRunning,
         },
         perAgent: {

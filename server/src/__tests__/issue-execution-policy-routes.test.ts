@@ -295,6 +295,40 @@ describe("issue execution policy routes", () => {
     );
   });
 
+  it("rejects marking an issue done while any issue-thread interaction is pending", async () => {
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: "in_progress",
+      assigneeAgentId: "33333333-3333-4333-8333-333333333333",
+      assigneeUserId: null,
+      createdByUserId: "local-board",
+      identifier: "PAP-1004",
+      title: "Pending confirmation close",
+      executionPolicy: null,
+      executionState: null,
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueThreadInteractionService.listForIssue.mockResolvedValue([
+      { id: "interaction-1", kind: "request_confirmation", status: "pending" },
+    ]);
+
+    const res = await request(await createApp())
+      .patch("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+      .send({ status: "done" });
+
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({
+      error: "Cannot mark issue done while an issue-thread interaction is pending",
+      details: {
+        code: "pending_issue_thread_interaction",
+        interactionId: "interaction-1",
+        interactionKind: "request_confirmation",
+      },
+    });
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
   it("allows an agent-authored in_review transition with a typed execution participant", async () => {
     const issue = {
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -400,6 +434,43 @@ describe("issue execution policy routes", () => {
         monitorNextCheckAt: new Date("2026-12-01T12:00:00.000Z"),
       }),
     );
+  });
+
+  it("rejects an invalid monitor scheduledBy value as validation instead of updating the issue", async () => {
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: "in_progress",
+      assigneeAgentId: "33333333-3333-4333-8333-333333333333",
+      assigneeUserId: null,
+      createdByUserId: "local-board",
+      identifier: "PAP-1006",
+      title: "Invalid monitor scheduler",
+      executionPolicy: null,
+      executionState: null,
+      monitorAttemptCount: 0,
+      monitorNextCheckAt: null,
+      monitorLastTriggeredAt: null,
+      monitorNotes: null,
+      monitorScheduledBy: null,
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+
+    const res = await request(await createApp())
+      .patch("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+      .send({
+        executionPolicy: {
+          monitor: {
+            nextCheckAt: "2026-12-01T12:00:00.000Z",
+            scheduledBy: "33333333-3333-4333-8333-333333333333",
+            notes: "Wait for external QA report.",
+          },
+        },
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Validation error");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
   it("allows board-authored in_review repair updates without a review path", async () => {

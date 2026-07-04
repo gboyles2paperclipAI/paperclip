@@ -622,6 +622,69 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     });
   });
 
+  it("expires ask_user_questions interactions by default when an agent comments after creation", async () => {
+    const { companyId, issueId } = await seedConfirmationIssue("Question agent supersede");
+    const commentId = randomUUID();
+    const agentId = randomUUID();
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Code Reviewer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const created = await interactionsSvc.create({
+      id: issueId,
+      companyId,
+    }, {
+      kind: "ask_user_questions",
+      payload: {
+        version: 1,
+        questions: [{
+          id: "scope",
+          prompt: "Choose the scope",
+          selectionMode: "single",
+          options: [{ id: "phase-1", label: "Phase 1" }],
+        }],
+      },
+    }, {
+      userId: "local-board",
+    });
+
+    const expired = await interactionsSvc.expireRequestConfirmationsSupersededByComment({
+      id: issueId,
+      companyId,
+    }, {
+      id: commentId,
+      createdAt: new Date(new Date(created.createdAt).getTime() + 1_000),
+      authorAgentId: agentId,
+    }, {
+      agentId,
+    });
+
+    expect(expired).toHaveLength(1);
+    expect(expired[0]).toMatchObject({
+      id: created.id,
+      kind: "ask_user_questions",
+      status: "expired",
+      result: {
+        version: 1,
+        answers: [],
+        expirationReason: "superseded_by_comment",
+        commentId,
+        summaryMarkdown: null,
+      },
+      resolvedByAgentId: agentId,
+      resolvedByUserId: null,
+    });
+  });
+
   it("keeps ask_user_questions pending when user-comment supersede is explicitly disabled", async () => {
     const { companyId, issueId } = await seedConfirmationIssue("Question supersede opt-out");
 
@@ -661,7 +724,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     expect(rows[0]?.status).toBe("pending");
   });
 
-  it("does not supersede ask_user_questions for agent, system, or older user comments", async () => {
+  it("does not supersede ask_user_questions for system or older user comments", async () => {
     const { companyId, issueId } = await seedConfirmationIssue("Question supersede exclusions");
 
     const created = await interactionsSvc.create({
@@ -682,17 +745,6 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       userId: "local-board",
     });
     const createdAtMs = new Date(created.createdAt).getTime();
-
-    await expect(interactionsSvc.expireRequestConfirmationsSupersededByComment({
-      id: issueId,
-      companyId,
-    }, {
-      id: randomUUID(),
-      createdAt: new Date(createdAtMs + 1_000),
-      authorUserId: null,
-    }, {
-      agentId: randomUUID(),
-    })).resolves.toHaveLength(0);
 
     await expect(interactionsSvc.expireRequestConfirmationsSupersededByComment({
       id: issueId,
@@ -1286,6 +1338,61 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     });
   });
 
+  it("expires request confirmations by default when an agent comments after creation", async () => {
+    const { companyId, issueId } = await seedConfirmationIssue("Agent comment supersede");
+    const commentId = randomUUID();
+    const agentId = randomUUID();
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Code Reviewer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const created = await interactionsSvc.create({
+      id: issueId,
+      companyId,
+    }, {
+      kind: "request_confirmation",
+      payload: {
+        version: 1,
+        prompt: "Proceed with the current draft?",
+      },
+    }, {
+      userId: "local-board",
+    });
+
+    const expired = await interactionsSvc.expireRequestConfirmationsSupersededByComment({
+      id: issueId,
+      companyId,
+    }, {
+      id: commentId,
+      createdAt: new Date(new Date(created.createdAt).getTime() + 1_000),
+      authorAgentId: agentId,
+    }, {
+      agentId,
+    });
+
+    expect(expired).toHaveLength(1);
+    expect(expired[0]).toMatchObject({
+      id: created.id,
+      status: "expired",
+      result: {
+        version: 1,
+        outcome: "superseded_by_comment",
+        commentId,
+      },
+      resolvedByAgentId: agentId,
+      resolvedByUserId: null,
+    });
+  });
+
   it("keeps request confirmations pending when user-comment supersede is explicitly disabled", async () => {
     const { companyId, issueId } = await seedConfirmationIssue("Comment supersede opt-out");
 
@@ -1354,7 +1461,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     expect(rows[0]?.status).toBe("pending");
   });
 
-  it("does not supersede request confirmations for agent, system, or older user comments", async () => {
+  it("does not supersede request confirmations for system or older user comments", async () => {
     const { companyId, issueId } = await seedConfirmationIssue("Comment supersede exclusions");
 
     const created = await interactionsSvc.create({
