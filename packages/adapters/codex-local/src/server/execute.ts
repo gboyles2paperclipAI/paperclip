@@ -76,6 +76,31 @@ type CodexModelPricing = {
   outputUsdPerMillion: number;
 };
 
+function signalCodexChild(
+  target: { pid: number | null; processGroupId: number | null },
+  signal: NodeJS.Signals,
+): boolean {
+  if (target.processGroupId && target.processGroupId > 0) {
+    try {
+      process.kill(-target.processGroupId, signal);
+      return true;
+    } catch {
+      // The child can exit between monitor fire and signal delivery.
+    }
+  }
+
+  if (target.pid && target.pid > 0) {
+    try {
+      process.kill(target.pid, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
+}
+
 const CODEX_MODEL_PRICING: Record<string, CodexModelPricing> = {
   "gpt-5.5": { inputUsdPerMillion: 5, cachedInputUsdPerMillion: 0.5, outputUsdPerMillion: 30 },
   "gpt-5.4": { inputUsdPerMillion: 2.5, cachedInputUsdPerMillion: 0.25, outputUsdPerMillion: 15 },

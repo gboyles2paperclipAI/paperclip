@@ -306,6 +306,28 @@ describe("Slack integration utilities", () => {
     }), "socket:env-1");
   });
 
+  it("acks and ignores Slack Socket Mode URL button interactions", async () => {
+    const ack = vi.fn();
+    const handleInteraction = vi.fn(async () => ({ id: "appr-1", status: "approved" }));
+    const envelope = parseSlackSocketEnvelope(JSON.stringify({
+      envelope_id: "env-open",
+      type: "interactive",
+      payload: {
+        team: { id: "T123" },
+        channel: { id: "C123" },
+        message: { ts: "1710000000.000100" },
+        user: { id: "U123" },
+        actions: [{ action_id: "open_paperclip", value: "appr-1", url: "https://paperclip.example.test/approvals/appr-1" }],
+      },
+    }));
+
+    const result = await handleSlackSocketEnvelope({ envelope, ack, service: { handleInteraction } });
+
+    expect(result).toEqual({ ignored: true });
+    expect(ack).toHaveBeenCalledOnce();
+    expect(handleInteraction).not.toHaveBeenCalled();
+  });
+
   it("keeps legacy chat references retired", () => {
     const legacyName = ["Dis", "cord"].join("");
     const legacyEnv = ["DIS", "CORD_WEBHOOK_URL"].join("");

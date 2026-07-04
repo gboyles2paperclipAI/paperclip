@@ -826,7 +826,10 @@ export function secretService(db: Db) {
     context?: SecretConsumerContext,
   ): Promise<RuntimeSecretResolution> {
     try {
-      return await resolveSecretValueInternal(companyId, secretId, version, context);
+      return await resolveSecretValueInternal(companyId, secretId, version, {
+        bindingContext: context,
+        accessContext: context,
+      });
     } catch (err) {
       markSecretResolutionFailure(err, secretResolutionErrorCode(err));
       throw err;
@@ -2810,16 +2813,32 @@ export function secretService(db: Db) {
         if (!record) {
           resolved.env = {};
         } else {
-          const configPath = context?.configPathPrefix ? `${context.configPathPrefix}.${key}` : `env.${key}`;
-          const secretResolution = await resolveRuntimeSecretResolution(
-            companyId,
-            binding.secretId,
-            binding.version,
-            context ? { ...context, configPath } : undefined,
-          );
-          env[key] = secretResolution.value;
-          manifest.push({ ...secretResolution.manifestEntry, envKey: key });
-          secretKeys.add(key);
+          const env: Record<string, string> = {};
+          for (const [key, rawBinding] of Object.entries(record)) {
+            if (!ENV_KEY_RE.test(key)) {
+              throw unprocessable(`Invalid environment variable name: ${key}`);
+            }
+            const parsed = envBindingSchema.safeParse(rawBinding);
+            if (!parsed.success) {
+              throw unprocessable(`Invalid environment binding for key: ${key}`);
+            }
+            const binding = canonicalizeBinding(parsed.data as EnvBinding);
+            if (binding.type === "plain") {
+              env[key] = binding.value;
+            } else {
+              const configPath = context?.configPathPrefix ? `${context.configPathPrefix}.${key}` : `env.${key}`;
+              const secretResolution = await resolveRuntimeSecretResolution(
+                companyId,
+                binding.secretId,
+                binding.version,
+                context ? { ...context, configPath } : undefined,
+              );
+              env[key] = secretResolution.value;
+              manifest.push({ ...secretResolution.manifestEntry, envKey: key });
+              secretKeys.add(key);
+            }
+          }
+          resolved.env = env;
         }
       }
       const secretFieldKeys = await listAdapterSchemaSecretFieldKeys(opts?.adapterType);

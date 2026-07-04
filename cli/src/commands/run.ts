@@ -183,16 +183,17 @@ async function importServerEntry(): Promise<StartedServer> {
   }
 
   // Production mode: import the published @paperclipai/server package
+  const serverPackageSpecifier = "@paperclipai/server";
   try {
-    const mod = await import("@paperclipai/server");
-    return await startServerFromModule(mod, "@paperclipai/server");
+    const mod = await import(serverPackageSpecifier);
+    return await startServerFromModule(mod, serverPackageSpecifier);
   } catch (err) {
     const missingSpecifier = getMissingModuleSpecifier(err);
-    const missingServerEntrypoint = !missingSpecifier || missingSpecifier === "@paperclipai/server";
+    const missingServerEntrypoint = !missingSpecifier || missingSpecifier === serverPackageSpecifier;
     if (isModuleNotFoundError(err) && missingServerEntrypoint) {
       throw new Error(
         `Could not locate a Paperclip server entrypoint.\n` +
-          `Tried: ${devEntry}, @paperclipai/server\n` +
+          `Tried: ${devEntry}, ${serverPackageSpecifier}\n` +
           `${formatError(err)}`,
       );
     }

@@ -72,6 +72,7 @@ fi
 HOST="${PAPERCLIP_DB_HOST:-127.0.0.1}"
 PORT="${PAPERCLIP_DB_PORT:-54329}"
 DB="${PAPERCLIP_DB_NAME:-paperclipdb1}"
-USER_NAME="${PAPERCLIP_DB_USER:-${USER:-paperclipadmin}}"
+DEFAULT_DB_USER="${USER:-$(id -un 2>/dev/null || printf '%s' paperclip)}"
+USER_NAME="${PAPERCLIP_DB_USER:-$DEFAULT_DB_USER}"
 
 psql -h "$HOST" -p "$PORT" -U "$USER_NAME" -d "$DB" -P pager=off -c "$QUERY"

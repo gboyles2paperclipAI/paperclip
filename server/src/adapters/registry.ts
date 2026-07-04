@@ -347,8 +347,7 @@ const grokLocalAdapter: ServerAdapterModule = {
 };
 
 const hermesGatewayAdapter = createHermesGatewayServerAdapter();
-
-const hermesBaseLocalAdapter = createHermesLocalServerAdapter();
+const hermesLocalBaseAdapter = createHermesLocalServerAdapter();
 
 const openclawGatewayAdapter: ServerAdapterModule = {
   type: "openclaw_gateway",
@@ -402,14 +401,15 @@ const piLocalAdapter: ServerAdapterModule = {
 
 // hermes-paperclip-adapter v0.2.0 predates the authToken field; cast is
 // intentional until hermes ships a matching AdapterExecutionContext type.
-const executeHermesLocal = hermesBaseLocalAdapter.execute as unknown as ServerAdapterModule["execute"];
+const executeHermesLocal = hermesLocalBaseAdapter.execute as unknown as ServerAdapterModule["execute"];
 
 const hermesLocalAdapter: ServerAdapterModule = {
-  ...hermesBaseLocalAdapter,
+  ...hermesLocalBaseAdapter,
   execute: async (ctx) => {
-    if (!ctx.authToken) return executeHermesLocal(ctx);
+    const normalizedCtx = ctx;
+    if (!normalizedCtx.authToken) return executeHermesLocal(normalizedCtx);
 
-    const existingConfig = (ctx.agent.adapterConfig ?? {}) as Record<string, unknown>;
+    const existingConfig = (normalizedCtx.agent.adapterConfig ?? {}) as Record<string, unknown>;
     const existingEnv =
       typeof existingConfig.env === "object" && existingConfig.env !== null && !Array.isArray(existingConfig.env)
         ? (existingConfig.env as Record<string, string>)
@@ -432,8 +432,8 @@ const hermesLocalAdapter: ServerAdapterModule = {
       ...existingConfig,
       env: {
         ...existingEnv,
-        ...(!explicitApiKey ? { PAPERCLIP_API_KEY: ctx.authToken } : {}),
-        PAPERCLIP_RUN_ID: ctx.runId,
+        ...(!explicitApiKey ? { PAPERCLIP_API_KEY: normalizedCtx.authToken } : {}),
+        PAPERCLIP_RUN_ID: normalizedCtx.runId,
       },
     };
 

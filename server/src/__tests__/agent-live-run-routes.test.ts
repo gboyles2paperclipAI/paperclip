@@ -9,6 +9,7 @@ const mockAgentService = vi.hoisted(() => ({
 const mockHeartbeatService = vi.hoisted(() => ({
   buildRunOutputSilence: vi.fn(),
   decorateActiveRunStatus: vi.fn(),
+  getRun: vi.fn(),
   getRunIssueSummary: vi.fn(),
   getActiveRunIssueSummaryForAgent: vi.fn(),
   getRunLogAccess: vi.fn(),
@@ -332,6 +333,19 @@ describe("agent live run routes", () => {
       currentStatusMessage: "Syncing workspace to sandbox",
       currentStatusUpdatedAt: "2026-04-10T09:30:05.000Z",
     });
+  });
+
+  it("returns a clean 404 for the unsupported unscoped live runs alias", async () => {
+    const res = await requestApp(
+      await createApp(),
+      (baseUrl) => request(baseUrl).get("/api/heartbeat-runs/live"),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(res.body).toEqual({
+      error: "Use /api/companies/{companyId}/heartbeat-runs for company-scoped heartbeat runs",
+    });
+    expect(mockHeartbeatService.getRun).not.toHaveBeenCalled();
   });
 
   it("uses narrow run log metadata lookups for log polling", async () => {

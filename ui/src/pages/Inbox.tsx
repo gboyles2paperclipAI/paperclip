@@ -1,7 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { INBOX_MINE_ISSUE_STATUS_FILTER } from "@paperclipai/shared";
 import { approvalsApi } from "../api/approvals";
 import { accessApi } from "../api/access";
 import { authApi } from "../api/auth";
@@ -156,11 +155,12 @@ import {
 } from "../lib/inbox";
 import { useDismissedInboxAlerts, useInboxDismissals, useReadInboxItems } from "../hooks/useInboxBadge";
 
-const INBOX_HEARTBEAT_RUN_LIMIT = 200;
+const INBOX_HEARTBEAT_RUN_LIMIT = 50;
 const INBOX_ISSUE_LIST_LIMIT = 500;
 const INBOX_ALL_ISSUES_PAGE_SIZE = 500;
 const INBOX_ALL_ISSUE_STATUS_FILTER = "backlog,todo,in_progress,in_review,blocked";
 const INBOX_HOT_PATH_STALE_MS = 30_000;
+const INBOX_ACTIVE_ISSUE_STATUS_FILTER = "backlog,todo,in_progress,in_review,blocked";
 
 export { InboxIssueMetaLeading, InboxIssueTrailingColumns } from "../components/IssueColumns";
 export { IssueGroupHeader as InboxGroupHeader } from "../components/IssueGroupHeader";
@@ -823,7 +823,7 @@ export function Inbox() {
   const { data: issues, isLoading: isIssuesLoading } = useQuery({
     queryKey: [...queryKeys.issues.list(selectedCompanyId!), "with-routine-executions"],
     queryFn: () => listAllInboxIssues(selectedCompanyId!),
-    enabled: !!selectedCompanyId,
+    enabled: !!selectedCompanyId && tab === "all",
     refetchOnWindowFocus: false,
     staleTime: INBOX_HOT_PATH_STALE_MS,
   });
@@ -836,7 +836,7 @@ export function Inbox() {
       issuesApi.list(selectedCompanyId!, {
         touchedByUserId: "me",
         inboxArchivedByUserId: "me",
-        status: INBOX_MINE_ISSUE_STATUS_FILTER,
+        status: INBOX_ACTIVE_ISSUE_STATUS_FILTER,
         includeRoutineExecutions: true,
         limit: INBOX_ISSUE_LIST_LIMIT,
       }),
@@ -852,7 +852,7 @@ export function Inbox() {
     queryFn: () =>
       issuesApi.list(selectedCompanyId!, {
         touchedByUserId: "me",
-        status: INBOX_MINE_ISSUE_STATUS_FILTER,
+        status: INBOX_ACTIVE_ISSUE_STATUS_FILTER,
         includeRoutineExecutions: true,
         limit: INBOX_ISSUE_LIST_LIMIT,
       }),

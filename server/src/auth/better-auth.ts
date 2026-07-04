@@ -1,6 +1,6 @@
 import type { Request, RequestHandler } from "express";
 import type { IncomingHttpHeaders } from "node:http";
-import { betterAuth } from "better-auth";
+import { betterAuth, type Auth } from "better-auth";
 import type { BetterAuthOptions } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { toNodeHandler } from "better-auth/node";

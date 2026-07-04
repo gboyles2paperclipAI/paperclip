@@ -30,6 +30,11 @@ const PRODUCTIVE_SUCCESS_LIVENESS_STATES = new Set<RunLivenessState>([
   "needs_followup",
 ]);
 
+const COMMENT_DRIVEN_WAKE_REASONS = new Set([
+  "issue_commented",
+  "issue_comment_mentioned",
+]);
+
 const IDEMPOTENT_HANDOFF_WAKE_STATUSES = [
   "queued",
   "deferred_issue_execution",
@@ -301,6 +306,16 @@ function isIssueMonitorMaintenanceRun(run: HeartbeatRunRow) {
   const wakeReason = readString(context.wakeReason);
   const source = readString(context.source);
   return Boolean(wakeReason?.startsWith("issue_monitor") || source?.startsWith("issue.monitor"));
+}
+
+function isCommentDrivenWake(run: HeartbeatRunRow) {
+  const context = readRecord(run.contextSnapshot);
+  const wakeReason = readString(context.wakeReason);
+  const hasCommentContext =
+    Boolean(readString(context.wakeCommentId)) ||
+    Boolean(readString(context.commentId)) ||
+    (Array.isArray(context.wakeCommentIds) && context.wakeCommentIds.some((id) => readString(id)));
+  return Boolean(wakeReason && COMMENT_DRIVEN_WAKE_REASONS.has(wakeReason) && hasCommentContext);
 }
 
 function isPermanentWatcherIssue(issue: IssueRow) {

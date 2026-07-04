@@ -1164,6 +1164,7 @@ export function issueRoutes(
     searchRateLimiter?: CompanySearchRateLimiter;
     pluginWorkerManager?: PluginWorkerManager;
     deploymentMode?: "local_trusted" | "authenticated";
+    taskWatchdogEnqueueWakeup?: TaskWatchdogServiceDeps["enqueueWakeup"] | null;
   } = {},
 ) {
   const router = Router();
@@ -3138,6 +3139,29 @@ export function issueRoutes(
     return rawId;
   }
 
+  async function resolveOptionalParentIssueListFilter(
+    rawParentId: unknown,
+    companyId: string,
+  ): Promise<string | undefined | null> {
+    if (rawParentId === undefined) return undefined;
+    if (typeof rawParentId !== "string") {
+      throw unprocessable("parentId must be a UUID or issue identifier");
+    }
+
+    const trimmed = rawParentId.trim();
+    if (trimmed.length === 0) return undefined;
+    if (isUuidLike(trimmed)) return trimmed;
+
+    const identifier = normalizeIssueReferenceIdentifier(trimmed);
+    if (!identifier) {
+      throw unprocessable("parentId must be a UUID or issue identifier");
+    }
+
+    const parent = await svc.getByIdentifier(identifier);
+    if (!parent || parent.companyId !== companyId) return null;
+    return parent.id;
+  }
+
   async function resolveIssueProjectAndGoal(issue: {
     companyId: string;
     projectId: string | null;
@@ -3321,6 +3345,12 @@ export function issueRoutes(
       }
     }
     const offset = parsedOffset ?? 0;
+    const parentId = await resolveOptionalParentIssueListFilter(req.query.parentId, companyId);
+
+    if (parentId === null) {
+      res.json([]);
+      return;
+    }
 
     const rawResult = await svc.list(companyId, {
       attention: attention === "blocked" ? "blocked" : undefined,
@@ -3334,7 +3364,7 @@ export function issueRoutes(
       projectId: req.query.projectId as string | undefined,
       workspaceId: req.query.workspaceId as string | undefined,
       executionWorkspaceId: req.query.executionWorkspaceId as string | undefined,
-      parentId: req.query.parentId as string | undefined,
+      parentId,
       descendantOf: req.query.descendantOf as string | undefined,
       labelId: req.query.labelId as string | undefined,
       originKind: req.query.originKind as string | undefined,
@@ -3412,6 +3442,12 @@ export function issueRoutes(
       res.status(400).json({ error: "hasPlanDocument must be true or false when provided" });
       return;
     }
+    const parentId = await resolveOptionalParentIssueListFilter(req.query.parentId, companyId);
+
+    if (parentId === null) {
+      res.json({ count: 0 });
+      return;
+    }
 
     const blockedCountFilters = {
       attention: "blocked",
@@ -3422,7 +3458,7 @@ export function issueRoutes(
       projectId: req.query.projectId as string | undefined,
       workspaceId: req.query.workspaceId as string | undefined,
       executionWorkspaceId: req.query.executionWorkspaceId as string | undefined,
-      parentId: req.query.parentId as string | undefined,
+      parentId,
       descendantOf: req.query.descendantOf as string | undefined,
       labelId: req.query.labelId as string | undefined,
       originKind: req.query.originKind as string | undefined,
@@ -7499,7 +7535,7 @@ export function issueRoutes(
       userId: actor.actorType === "user" ? actor.actorId : null,
     });
     const interactionPayload = typeof interaction.payload === "object" && interaction.payload !== null
-      ? interaction.payload as Record<string, unknown>
+      ? interaction.payload as unknown as Record<string, unknown>
       : {};
 
     await logActivity(db, {
