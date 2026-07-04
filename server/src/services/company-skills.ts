@@ -4299,6 +4299,62 @@ export function companySkillService(db: Db) {
     return out;
   }
 
+  function upsertImportedSkillNeedsUpdate(
+    existing: CompanySkill,
+    next: {
+      slug: string;
+      name: string;
+      description: string | null | undefined;
+      markdown: string;
+      sourceType: string;
+      sourceLocator: string | null | undefined;
+      sourceRef: string | null | undefined;
+      trustLevel: string;
+      compatibility: string;
+      fileInventory: Array<Record<string, unknown>>;
+      iconUrl: string | null | undefined;
+      color: string | null | undefined;
+      tagline: string | null | undefined;
+      authorName: string | null | undefined;
+      homepageUrl: string | null | undefined;
+      categories: string[];
+      sharingScope: string;
+      installCount: number;
+      metadata: Record<string, unknown>;
+    },
+  ): boolean {
+    if (existing.slug !== next.slug) return true;
+    if (existing.name !== next.name) return true;
+    if ((existing.description ?? null) !== (next.description ?? null)) return true;
+    if (existing.markdown !== next.markdown) return true;
+    if (existing.sourceType !== next.sourceType) return true;
+    if ((existing.sourceLocator ?? null) !== (next.sourceLocator ?? null)) return true;
+    if ((existing.sourceRef ?? null) !== (next.sourceRef ?? null)) return true;
+    if (existing.trustLevel !== next.trustLevel) return true;
+    if (existing.compatibility !== next.compatibility) return true;
+    if ((existing.iconUrl ?? null) !== (next.iconUrl ?? null)) return true;
+    if ((existing.color ?? null) !== (next.color ?? null)) return true;
+    if ((existing.tagline ?? null) !== (next.tagline ?? null)) return true;
+    if ((existing.authorName ?? null) !== (next.authorName ?? null)) return true;
+    if ((existing.homepageUrl ?? null) !== (next.homepageUrl ?? null)) return true;
+    if (existing.sharingScope !== next.sharingScope) return true;
+    if ((existing.installCount ?? 0) !== (next.installCount ?? 0)) return true;
+    // Compare arrays and JSONB with stable serialization so key/element order
+    // differences from Postgres JSONB round-trips do not cause spurious updates.
+    const stableStr = (value: unknown): string => {
+      if (Array.isArray(value)) return `[${[...value].map(stableStr).sort().join(",")}]`;
+      if (value !== null && typeof value === "object") {
+        const keys = Object.keys(value as Record<string, unknown>).sort();
+        return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStr((value as Record<string, unknown>)[k])}`).join(",")}}`;
+      }
+      return JSON.stringify(value) ?? "null";
+    };
+    if (stableStr(existing.categories) !== stableStr(next.categories)) return true;
+    if (stableStr(existing.fileInventory) !== stableStr(next.fileInventory)) return true;
+    if (stableStr(existing.metadata ?? {}) !== stableStr(next.metadata ?? {})) return true;
+    return false;
+  }
+
   async function upsertImportedSkills(companyId: string, imported: ImportedSkill[]): Promise<CompanySkill[]> {
     const out: CompanySkill[] = [];
     for (const skill of imported) {
@@ -4351,6 +4407,14 @@ export function companySkillService(db: Db) {
         metadata,
         updatedAt: new Date(),
       };
+      // Skip the UPDATE when all mutable fields are already identical to the stored row.
+      // Without this guard, every ensureBundledSkills() call (triggered by every list
+      // request) issued an unconditional UPDATE for each bundled skill — the sole driver
+      // of the 1.86 M no-op writes observed against this 128-row table.
+      if (existing && !upsertImportedSkillNeedsUpdate(existing, values)) {
+        out.push(existing);
+        continue;
+      }
       const row = existing
         ? await db
           .update(companySkills)
