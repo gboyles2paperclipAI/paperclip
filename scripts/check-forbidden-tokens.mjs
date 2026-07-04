@@ -14,7 +14,7 @@
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 function uniqueNonEmpty(values) {
@@ -42,6 +42,15 @@ export function readForbiddenTokensFile(tokensFile) {
     .filter((line) => line && !line.startsWith("#"));
 }
 
+export function readPathExcludesFile(excludesFile) {
+  if (!existsSync(excludesFile)) return [];
+
+  return readFileSync(excludesFile, "utf8")
+    .split("\n")
+    .map((line) => line.split("#")[0]?.trim() ?? "")
+    .filter(Boolean);
+}
+
 export function resolveForbiddenTokens(tokensFile, env = process.env, osModule = os) {
   return uniqueNonEmpty([
     ...resolveDynamicForbiddenTokens(env, osModule),
@@ -49,9 +58,14 @@ export function resolveForbiddenTokens(tokensFile, env = process.env, osModule =
   ]);
 }
 
+export function resolvePathExcludes(repoRoot) {
+  return readPathExcludesFile(join(repoRoot, "scripts/forbidden-tokens-path-excludes.txt"));
+}
+
 export function runForbiddenTokenCheck({
   repoRoot,
   tokens,
+  pathExcludes = [],
   exec = execSync,
   log = console.log,
   error = console.error,
@@ -65,8 +79,11 @@ export function runForbiddenTokenCheck({
 
   for (const token of tokens) {
     try {
+      const gitGrepExcludes = [":!pnpm-lock.yaml", ":!.git", ...pathExcludes.map((entry) => `:!${entry}`)]
+        .map((entry) => `'${entry.replace(/'/g, "'\\''")}'`)
+        .join(" ");
       const result = exec(
-        `git grep -in --no-color -- ${JSON.stringify(token)} -- ':!pnpm-lock.yaml' ':!.git'`,
+        `git grep -in --no-color -- ${JSON.stringify(token)} -- ${gitGrepExcludes}`,
         { encoding: "utf8", cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] },
       );
       if (result.trim()) {
@@ -105,7 +122,8 @@ function resolveRepoPaths(exec = execSync) {
 function main() {
   const { repoRoot, tokensFile } = resolveRepoPaths();
   const tokens = resolveForbiddenTokens(tokensFile);
-  process.exit(runForbiddenTokenCheck({ repoRoot, tokens }));
+  const pathExcludes = resolvePathExcludes(repoRoot);
+  process.exit(runForbiddenTokenCheck({ repoRoot, tokens, pathExcludes }));
 }
 
 const isMainModule = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);

@@ -20,6 +20,9 @@ esac
 if [ "$should_reuse_existing_ui_dist" = true ] && [ -f "$UI_DIST/index.html" ]; then
   echo "  -> Reusing existing @paperclipai/ui dist output"
 else
+  echo "  -> Building @paperclipai/ui workspace dependencies..."
+  pnpm --dir "$REPO_ROOT" --filter "@paperclipai/ui^..." build
+
   echo "  -> Building @paperclipai/ui..."
   pnpm --dir "$REPO_ROOT" --filter @paperclipai/ui build
 fi

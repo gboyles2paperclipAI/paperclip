@@ -18,6 +18,7 @@ import type { Issue } from "@paperclipai/shared";
 const WORKSPACE_FILTER_ISSUE_LIMIT = 1000;
 const ISSUES_PAGE_SIZE = 500;
 const FILTER_DEBOUNCE_MS = 500;
+const ACTIVE_ISSUE_STATUS_FILTER = "backlog,todo,in_progress,in_review,blocked";
 
 export function getNextIssuesPageOffset(
   loadedPageSize: number,
@@ -154,6 +155,7 @@ export function Issues() {
     queryFn: ({ pageParam }) => issuesApi.list(selectedCompanyId!, {
       participantAgentId,
       workspaceId: workspaceIdFilter,
+      status: ACTIVE_ISSUE_STATUS_FILTER,
       includeRoutineExecutions: true,
       limit: issuePageSize,
       offset: pageParam,

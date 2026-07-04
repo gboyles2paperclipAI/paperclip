@@ -1164,6 +1164,7 @@ export function issueRoutes(
     searchRateLimiter?: CompanySearchRateLimiter;
     pluginWorkerManager?: PluginWorkerManager;
     deploymentMode?: "local_trusted" | "authenticated";
+    taskWatchdogEnqueueWakeup?: TaskWatchdogServiceDeps["enqueueWakeup"] | null;
   } = {},
 ) {
   const router = Router();
