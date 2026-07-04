@@ -144,6 +144,12 @@ vi.mock("../services/index.js", () => ({
   })),
   feedbackService: feedbackServiceFactoryMock,
   bootstrapExecutionPolicyFromEnv: vi.fn(async () => null),
+  environmentCustomImageService: vi.fn(() => ({
+    deleteCustomImage: vi.fn(),
+    getCustomImage: vi.fn(),
+    listCustomImages: vi.fn(),
+    upsertCustomImage: vi.fn(),
+  })),
   heartbeatService: vi.fn(() => ({
     reapOrphanedRuns: vi.fn(async () => undefined),
     promoteDueScheduledRetries: vi.fn(async () => ({ promoted: 0, runIds: [] })),

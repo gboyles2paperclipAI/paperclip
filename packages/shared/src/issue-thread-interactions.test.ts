@@ -38,6 +38,49 @@ describe("issue thread interaction schemas", () => {
     });
   });
 
+  it("normalizes legacy request_confirmation inputs from agent tools", () => {
+    const parsed = createIssueThreadInteractionSchema.parse({
+      kind: "request_confirmation",
+      idempotencyKey: "confirmation:stripe-preview-smoke-test:v1",
+      title: "Stripe preview smoke test",
+      summary: "Confirm checkout works in preview.",
+      continuationPolicy: "wake_assignee",
+      payload: {
+        detailsMarkdown: "Open the preview checkout page and confirm it loads.",
+        supersedeOnUserComment: true,
+      },
+    });
+
+    expect(parsed).toMatchObject({
+      kind: "request_confirmation",
+      continuationPolicy: "wake_assignee",
+      payload: {
+        version: 1,
+        prompt: "Stripe preview smoke test",
+        detailsMarkdown: "Open the preview checkout page and confirm it loads.",
+        supersedeOnUserComment: true,
+      },
+    });
+  });
+
+  it("normalizes legacy request_confirmation inputs without a payload object", () => {
+    const parsed = createIssueThreadInteractionSchema.parse({
+      kind: "request_confirmation",
+      idempotencyKey: "confirmation:stripe-smoke-v1",
+      title: "Confirm Stripe preview smoke test",
+      summary: "Manual browser validation is required.",
+      continuationPolicy: "wake_assignee",
+    });
+
+    expect(parsed).toMatchObject({
+      kind: "request_confirmation",
+      payload: {
+        version: 1,
+        prompt: "Confirm Stripe preview smoke test",
+      },
+    });
+  });
+
   it("accepts issue document targets for request_confirmation interactions", () => {
     const parsed = createIssueThreadInteractionSchema.parse({
       kind: "request_confirmation",
@@ -139,6 +182,62 @@ describe("issue thread interaction schemas", () => {
     })).toMatchObject({
       expirationReason: "superseded_by_comment",
       commentId: "11111111-1111-4111-8111-111111111111",
+    });
+  });
+
+  it("normalizes legacy ask_user_questions inputs from agent tools", () => {
+    const parsed = createIssueThreadInteractionSchema.parse({
+      kind: "ask_user_questions",
+      idempotencyKey: "ask:FUL-14806:stripe-smoke-test:v1",
+      title: "Stripe Preview Smoke Test",
+      summary: "Manual confirmation needed.",
+      continuationPolicy: "wake_assignee",
+      payload: {
+        version: 1,
+        prompt: "Please test checkout.",
+        questions: [
+          {
+            id: "smoke_result",
+            label: "Smoke test result",
+            type: "select",
+            options: [
+              { value: "pass", label: "PASS - checkout worked" },
+              { value: "fail", label: "FAIL - error encountered" },
+            ],
+            required: true,
+          },
+          {
+            id: "error_details",
+            label: "Error details",
+            type: "text",
+            required: false,
+          },
+        ],
+      },
+    });
+
+    expect(parsed).toMatchObject({
+      kind: "ask_user_questions",
+      continuationPolicy: "wake_assignee",
+      payload: {
+        questions: [
+          {
+            id: "smoke_result",
+            prompt: "Smoke test result",
+            selectionMode: "single",
+            options: [
+              { id: "pass", label: "PASS - checkout worked" },
+              { id: "fail", label: "FAIL - error encountered" },
+            ],
+          },
+          {
+            id: "error_details",
+            prompt: "Error details",
+            selectionMode: "single",
+            options: [{ id: "response", label: "Provide response" }],
+          },
+        ],
+      },
     });
   });
 

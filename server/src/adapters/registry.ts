@@ -445,9 +445,9 @@ const hermesLocalAdapter: ServerAdapterModule = {
     }
 
     const patchedCtx = {
-      ...normalizedCtx,
+      ...ctx,
       agent: {
-        ...normalizedCtx.agent,
+        ...ctx.agent,
         adapterConfig: patchedConfig,
       },
     };

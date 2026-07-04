@@ -9,12 +9,16 @@ Paperclip can post operational notifications to Slack and let board operators re
 
 Slack notifications are sent for:
 
-- ticket creation
 - blocked-agent alerts
 - escalation alerts
 - approval requests
+- issue-thread confirmation cards
 
 Approval request messages include `Approve`, `Reject`, `Needs changes`, and `Open in Paperclip` actions. Button payloads contain only the approval identifier and requested action.
+
+Issue-thread `request_confirmation` and `request_checkbox_confirmation` cards are sent only to the approvals channel so the board sees ordinary issue-scoped decisions without mixing them into operational alerts. These cards link back to the issue in Paperclip, where the board accepts or rejects the interaction. They are not formal `/approvals` records and do not use the Slack approval-button resolver.
+
+Operational helpers such as `notify-grant-slack` post to the alerts channel and must not be used for approval requests. Approval and confirmation cards should come from Paperclip's approval or issue-interaction notification paths.
 
 Slack messages must not include raw screenshots, uploaded images, passwords, MFA codes, recovery keys, payment card data, API tokens, or other credential-shaped values. Paperclip redacts and filters these fields before posting.
 
@@ -42,7 +46,6 @@ Store these as Paperclip company secrets or environment variables:
 | `SLACK_SIGNING_SECRET` | Verifies HTTP interaction requests if an HTTP endpoint is used |
 | `SLACK_APPROVALS_CHANNEL_ID` | Channel for approval cards |
 | `SLACK_ALERTS_CHANNEL_ID` | Channel for blocker and escalation alerts |
-| `SLACK_TICKETS_CHANNEL_ID` | Channel for ticket-created notifications |
 | `SLACK_USER_MAP_JSON` | JSON object mapping Slack user IDs to Paperclip board user IDs |
 
 Example `SLACK_USER_MAP_JSON`:
@@ -68,6 +71,8 @@ The approval path is:
 
 If any verification step fails, the Slack action is rejected and the Paperclip approval is not resolved.
 
+For issue-thread confirmation cards, the trust boundary is simpler: Slack is a notification surface only. The board must open Paperclip and resolve the `request_confirmation` or `request_checkbox_confirmation` card there. The issue interaction remains pending until Paperclip records the decision.
+
 ## Smoke Tests
 
 From the repository root, verify Slack channel delivery and Socket Mode:
@@ -81,7 +86,6 @@ Expected result:
 ```text
 approvals: ok
 alerts: ok
-tickets: ok
 socket_mode: ok
 ```
 
@@ -98,5 +102,6 @@ Click one of the Slack approval buttons and verify the approval changes state in
 
 - Keep `PAPERCLIP_API_URL` accurate so the `Open in Paperclip` button points to the right board URL.
 - Keep Slack channel IDs stable. Channel names can change; IDs are the configuration source.
+- Do not route routine ticket creation to Slack by default. Use issue queues and support workflows for ticket intake; reserve Slack for approvals, blockers, and escalations.
 - If a Slack token, app token, signing secret, or former notification webhook is exposed, rotate it.
 - Zapier or similar tools may be used later for outbound low-risk notification fan-out, but they must not become approval authority.

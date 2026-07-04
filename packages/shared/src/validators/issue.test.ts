@@ -158,6 +158,14 @@ describe("issue validators", () => {
     expect(parsed.body).toBe("Progress update\n\nNext action.");
   });
 
+  it("accepts legacy comment field for issue comment bodies", () => {
+    const parsed = addIssueCommentSchema.parse({
+      comment: "Legacy automation update.",
+    });
+
+    expect(parsed.body).toBe("Legacy automation update.");
+  });
+
   it("accepts structured issue comment presentation and metadata", () => {
     const parsed = addIssueCommentSchema.parse({
       body: "Paperclip needs a disposition before this issue can continue.",

@@ -295,6 +295,112 @@ describe("Inbox toolbar", () => {
     });
   });
 
+  it("limits the All tab issue query to active inbox statuses", async () => {
+    routerMock.location.pathname = "/inbox/all";
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 0, gcTime: 0 } },
+    });
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Inbox />
+        </QueryClientProvider>,
+      );
+    });
+
+    await vi.waitFor(() => {
+      expect(apiMocks.issuesList).toHaveBeenCalledWith(
+        "company-1",
+        expect.objectContaining({
+          includeRoutineExecutions: true,
+          status: "backlog,todo,in_progress,in_review,blocked",
+          limit: 500,
+          offset: 0,
+        }),
+      );
+    });
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("shows only matching issues on the All tab when issue filters are active", async () => {
+    routerMock.location.pathname = "/inbox/all";
+    localStorage.setItem(
+      "paperclip:inbox:filters:company-1",
+      JSON.stringify({
+        allCategoryFilter: "everything",
+        allApprovalFilter: "all",
+        issueFilters: {
+          statuses: ["in_progress"],
+          priorities: [],
+          assignees: [],
+          creators: [],
+          labels: [],
+          projects: [],
+          workspaces: [],
+          liveOnly: false,
+          externalObjectStatuses: [],
+          hideRoutineExecutions: false,
+        },
+      }),
+    );
+    apiMocks.issuesList.mockResolvedValue([
+      createIssue({
+        id: "issue-in-progress",
+        identifier: "FUL-1",
+        title: "Visible in progress task",
+        status: "in_progress",
+      }),
+      createIssue({
+        id: "issue-backlog",
+        identifier: "FUL-2",
+        title: "Hidden backlog task",
+        status: "backlog",
+      }),
+    ]);
+    apiMocks.approvalsList.mockResolvedValue([
+      {
+        id: "approval-1",
+        companyId: "company-1",
+        type: "request_board_approval",
+        status: "approved",
+        payload: { title: "Hidden approval row" },
+        requestedByAgentId: null,
+        requestedByUserId: null,
+        decidedByUserId: null,
+        createdAt: new Date("2026-03-11T00:00:00.000Z"),
+        updatedAt: new Date("2026-03-11T00:00:00.000Z"),
+      },
+    ]);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 0, gcTime: 0 } },
+    });
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Inbox />
+        </QueryClientProvider>,
+      );
+    });
+
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain("Visible in progress task");
+    });
+    expect(container.textContent).not.toContain("Hidden backlog task");
+    expect(container.textContent).not.toContain("Hidden approval row");
+
+    act(() => {
+      root.unmount();
+    });
+    localStorage.removeItem("paperclip:inbox:filters:company-1");
+  });
+
   it("hides workspace grouping when isolated workspaces are disabled", async () => {
     routerMock.location.pathname = "/inbox/mine";
     apiMocks.experimentalSettings.mockResolvedValue({ enableIsolatedWorkspaces: false });

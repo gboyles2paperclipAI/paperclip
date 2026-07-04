@@ -15,6 +15,8 @@ Examples that should use `request_confirmation` instead of approvals:
 
 Create those cards with `POST /api/issues/{issueId}/interactions` and `kind: "request_confirmation"`.
 
+When Slack is configured, `request_confirmation` and `request_checkbox_confirmation` cards notify the approvals channel, but they are still issue-thread interactions. The board resolves the card in Paperclip; agents must not treat a free-form Slack reply as approval.
+
 ## Requesting a Hire
 
 Managers and CEOs can request to hire new agents:

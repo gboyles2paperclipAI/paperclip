@@ -9,6 +9,15 @@ import { listAdapterModels, listServerAdapters, refreshAdapterModels } from "../
 import { resetCodexModelsCacheForTests } from "../adapters/codex-models.js";
 import { resetCursorModelsCacheForTests, setCursorModelsRunnerForTests } from "../adapters/cursor-models.js";
 
+function dedupeModels(models: { id: string; label: string }[]) {
+  const seen = new Set<string>();
+  return models.filter((model) => {
+    if (seen.has(model.id)) return false;
+    seen.add(model.id);
+    return true;
+  });
+}
+
 vi.mock("acpx/runtime", () => ({
   createAcpRuntime: vi.fn(),
   createAgentRegistry: vi.fn(),
@@ -48,7 +57,7 @@ describe("adapter model listing", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     const models = await listAdapterModels("codex_local");
 
-    expect(models).toEqual(codexFallbackModels);
+    expect(models).toEqual(dedupeModels(codexFallbackModels));
     expect(models.some((model) => model.id === "gpt-5.5")).toBe(true);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -177,7 +186,7 @@ describe("adapter model listing", () => {
     } as Response);
 
     const models = await listAdapterModels("codex_local");
-    expect(models).toEqual(codexFallbackModels);
+    expect(models).toEqual(dedupeModels(codexFallbackModels));
   });
 
 
@@ -277,7 +286,7 @@ describe("adapter model listing", () => {
         opencode_local: [{ id: "model-a" }],
       });
       const models = await listAdapterModels("codex_local");
-      expect(models).toEqual(codexFallbackModels);
+      expect(models).toEqual(dedupeModels(codexFallbackModels));
     });
   });
 });

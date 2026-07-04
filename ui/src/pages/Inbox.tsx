@@ -158,6 +158,7 @@ import { useDismissedInboxAlerts, useInboxDismissals, useReadInboxItems } from "
 const INBOX_HEARTBEAT_RUN_LIMIT = 50;
 const INBOX_ISSUE_LIST_LIMIT = 500;
 const INBOX_ALL_ISSUES_PAGE_SIZE = 500;
+const INBOX_ALL_ISSUE_STATUS_FILTER = "backlog,todo,in_progress,in_review,blocked";
 const INBOX_HOT_PATH_STALE_MS = 30_000;
 const INBOX_ACTIVE_ISSUE_STATUS_FILTER = "backlog,todo,in_progress,in_review,blocked";
 
@@ -215,6 +216,7 @@ async function listAllInboxIssues(companyId: string): Promise<Issue[]> {
   while (true) {
     const page = await issuesApi.list(companyId, {
       includeRoutineExecutions: true,
+      status: INBOX_ALL_ISSUE_STATUS_FILTER,
       limit: INBOX_ALL_ISSUES_PAGE_SIZE,
       offset,
     });
@@ -1110,6 +1112,9 @@ export function Inbox() {
       ),
     [heartbeatRuns, dismissedAtByKey],
   );
+  const activeIssueFilterCount = countActiveIssueFilters(issueFilters, true);
+  const constrainAllTabToIssues =
+    tab === "all" && allCategoryFilter === "everything" && activeIssueFilterCount > 0;
   const approvalsToRender = useMemo(() => {
     let filtered = getApprovalsForTab(approvals ?? [], tab, allApprovalFilter, currentUserId);
     if (tab === "mine") {
@@ -1120,14 +1125,15 @@ export function Inbox() {
     return filtered;
   }, [approvals, tab, allApprovalFilter, currentUserId, dismissedAtByKey]);
   const showJoinRequestsCategory =
-    allCategoryFilter === "everything" || allCategoryFilter === "join_requests";
+    (!constrainAllTabToIssues && allCategoryFilter === "everything") || allCategoryFilter === "join_requests";
   const showTouchedCategory =
     allCategoryFilter === "everything" || allCategoryFilter === "issues_i_touched";
   const showApprovalsCategory =
-    allCategoryFilter === "everything" || allCategoryFilter === "approvals";
+    (!constrainAllTabToIssues && allCategoryFilter === "everything") || allCategoryFilter === "approvals";
   const showFailedRunsCategory =
-    allCategoryFilter === "everything" || allCategoryFilter === "failed_runs";
-  const showAlertsCategory = allCategoryFilter === "everything" || allCategoryFilter === "alerts";
+    (!constrainAllTabToIssues && allCategoryFilter === "everything") || allCategoryFilter === "failed_runs";
+  const showAlertsCategory =
+    (!constrainAllTabToIssues && allCategoryFilter === "everything") || allCategoryFilter === "alerts";
   const failedRunsForTab = useMemo(() => {
     if (tab === "all" && !showFailedRunsCategory) return [];
     return failedRuns;
@@ -1998,7 +2004,6 @@ export function Inbox() {
   const unreadIssueIds = markAllReadIssues
     .map((issue) => issue.id);
   const canMarkAllRead = unreadIssueIds.length > 0;
-  const activeIssueFilterCount = countActiveIssueFilters(issueFilters, true);
   const showGeneralIssueToolbarControls = tab !== "blocked";
   return (
     <div className="space-y-6">

@@ -1540,31 +1540,31 @@ export function issueThreadInteractionService(db: Db) {
 
       const rowById = new Map(rows.map((row) => [row.id, row] as const));
       for (const { comment, rowIds } of supersededByComment.values()) {
-        const updatedRows = await db
-          .update(issueThreadInteractions)
-          .set({
-            status: "expired",
-            result: {
-              version: 1,
-              outcome: "superseded_by_comment",
-              commentId: comment.id,
-            },
-            resolvedByAgentId: null,
-            resolvedByUserId: comment.authorUserId,
-            resolutionAudit: buildResolutionAudit({
-              method: "ui_click",
-              requestId: null,
+        for (const rowId of rowIds) {
+          const row = rowById.get(rowId);
+          if (!row) continue;
+          const updatedRows = await db
+            .update(issueThreadInteractions)
+            .set({
+              status: "expired",
+              result: buildSupersededByCommentResult(row, comment.id),
+              resolvedByAgentId: null,
+              resolvedByUserId: comment.authorUserId,
+              resolutionAudit: buildResolutionAudit({
+                method: "ui_click",
+                requestId: null,
+                resolvedAt: now,
+              }),
               resolvedAt: now,
-            }),
-            resolvedAt: now,
-            updatedAt: now,
-          })
-          .where(and(
-            inArray(issueThreadInteractions.id, rowIds),
-            eq(issueThreadInteractions.status, "pending"),
-          ))
-          .returning();
-        expired.push(...updatedRows.map(hydrateInteraction));
+              updatedAt: now,
+            })
+            .where(and(
+              eq(issueThreadInteractions.id, row.id),
+              eq(issueThreadInteractions.status, "pending"),
+            ))
+            .returning();
+          expired.push(...updatedRows.map(hydrateInteraction));
+        }
       }
 
       if (expired.length > 0) {

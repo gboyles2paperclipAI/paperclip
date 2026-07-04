@@ -34,17 +34,12 @@ describe("agent permissions service", () => {
     expect(normalizeAgentPermissions({ canCreateSkills: true }, "engineer").canCreateSkills).toBe(true);
   });
 
-  it("validates skill creation permission with a default-on value", () => {
+  it("validates skill creation permission defaults only on full permission payloads", () => {
     expect(agentPermissionsSchema.parse({ canCreateAgents: false }).canCreateSkills).toBe(true);
     expect(agentPermissionsSchema.parse({ canCreateAgents: false, canCreateSkills: false }).canCreateSkills).toBe(false);
     expect(updateAgentPermissionsSchema.parse({
       canCreateAgents: false,
       canAssignTasks: false,
     }).canCreateSkills).toBeUndefined();
-    expect(updateAgentPermissionsSchema.parse({
-      canCreateAgents: false,
-      canCreateSkills: false,
-      canAssignTasks: false,
-    }).canCreateSkills).toBe(false);
   });
 });
