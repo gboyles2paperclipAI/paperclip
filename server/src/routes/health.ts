@@ -100,7 +100,7 @@ export function healthRoutes(
     if (!db) {
       res.json(
         exposeFullDetails
-          ? { status: "ok", version: serverVersion, ...buildMetadata }
+          ? { status: "ok", version: serverVersion, ...buildMetadata, serverInfo }
           : { status: "ok", deploymentMode: opts.deploymentMode },
       );
       return;
@@ -114,7 +114,8 @@ export function healthRoutes(
         status: "unhealthy",
         version: serverVersion,
         ...buildMetadata,
-        error: "database_unreachable"
+        serverInfo,
+        error: "database_unreachable",
       });
       return;
     }

@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, desc, eq, gte, inArray, isNotNull, lte } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, lte, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -1419,10 +1419,10 @@ export function issueThreadInteractionService(db: Db) {
 
     expireRequestConfirmationsSupersededByComment: async (
       issue: { id: string; companyId: string },
-      comment: { id: string; createdAt: Date | string; authorUserId?: string | null },
+      comment: { id: string; createdAt: Date | string; authorAgentId?: string | null; authorUserId?: string | null },
       actor: InteractionActor,
     ) => {
-      if (!comment.authorUserId) return [];
+      if (!comment.authorUserId && !comment.authorAgentId) return [];
 
       const rows = await db
         .select()
@@ -1500,7 +1500,10 @@ export function issueThreadInteractionService(db: Db) {
           .where(and(
             eq(issueComments.companyId, issue.companyId),
             eq(issueComments.issueId, issue.id),
-            isNotNull(issueComments.authorUserId),
+            or(
+              isNotNull(issueComments.authorUserId),
+              isNotNull(issueComments.authorAgentId),
+            ),
           ))
           .orderBy(asc(issueComments.createdAt)),
       ]);
@@ -1548,8 +1551,8 @@ export function issueThreadInteractionService(db: Db) {
             .set({
               status: "expired",
               result: buildSupersededByCommentResult(row, comment.id),
-              resolvedByAgentId: null,
-              resolvedByUserId: comment.authorUserId,
+              resolvedByAgentId: comment.authorAgentId ?? null,
+              resolvedByUserId: comment.authorUserId ?? null,
               resolutionAudit: buildResolutionAudit({
                 method: "ui_click",
                 requestId: null,

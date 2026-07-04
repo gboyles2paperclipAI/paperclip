@@ -2041,6 +2041,7 @@ export function issueRoutes(
       status: string;
       assigneeAgentId: string | null;
       assigneeUserId: string | null;
+      labels?: Array<{ name?: string | null }> | null;
     },
   ) {
     if (req.actor.type !== "agent") return true;
@@ -2063,6 +2064,32 @@ export function issueRoutes(
         return false;
       }
       return assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue);
+    }
+    const hasAwaitingBoardLabel = (issue.labels ?? []).some((label) => label?.name === "awaiting-board");
+    if (issue.assigneeUserId || hasAwaitingBoardLabel) {
+      res.status(403).json({
+        error: "Agent cannot comment on board-owned or board-hold issues",
+        details: {
+          issueId: issue.id,
+          assigneeUserId: issue.assigneeUserId ?? null,
+          hasAwaitingBoardLabel,
+          actorAgentId,
+        },
+      });
+      return false;
+    }
+    if (issue.status === "in_review") {
+      const interactions = await issueThreadInteractionsSvc.listForIssue(issue.id);
+      if (interactions.some((interaction) => interaction.status === "pending")) {
+        res.status(403).json({
+          error: "Agent cannot comment on in_review issues with pending interactions",
+          details: {
+            issueId: issue.id,
+            actorAgentId,
+          },
+        });
+        return false;
+      }
     }
     const boundaryDecision = await decideIssueAccess(req, issue, "issue:comment");
     if (!boundaryDecision.allowed) {
@@ -2281,6 +2308,22 @@ export function issueRoutes(
         });
         return false;
       }
+    }
+    const watchdogScope = await resolveTaskWatchdogMutationScope(db, req.actor);
+    if (watchdogScope.kind !== "none") {
+      const scopeResult = await taskWatchdogScopeAllowsIssueMutation(db, watchdogScope, issue);
+      if (scopeResult.kind === "invalid") {
+        res.status(403).json({
+          error: scopeResult.detail,
+          details: {
+            issueId: issue.id,
+            securityPrinciples: ["Least Privilege", "Complete Mediation", "Fail Securely"],
+          },
+        });
+        return false;
+      }
+      if (!(await assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue))) return false;
+      return true;
     }
     const boundaryDecision = await decideIssueAccess(req, {
       ...issue,
@@ -5444,6 +5487,21 @@ export function issueRoutes(
     const createBody = {
       ...rawCreateBody,
       parentId: effectiveParentId,
+      ...(watchdogProductBugFollowUp
+        ? {
+          description: appendWatchdogDiscoveryContext({
+            description: rawCreateBody.description as string | null | undefined,
+            discovery: watchdogProductBugFollowUp.discovery,
+            sourceIssue: watchdogProductBugFollowUp.sourceIssue,
+            watchdogIssue: watchdogProductBugFollowUp.watchdogIssue,
+            stopFingerprint: watchdogProductBugFollowUp.scope.stopFingerprint,
+            runId: actor.runId,
+          }),
+          originKind: "task_watchdog_product_bug",
+          originId: watchdogProductBugFollowUp.sourceIssue.id,
+          originRunId: actor.runId,
+        }
+        : {}),
       ...(normalizedAssigneeAgentId !== undefined ? { assigneeAgentId: normalizedAssigneeAgentId } : {}),
       ...(runWorkspaceInheritanceSourceIssueId
         ? { inheritExecutionWorkspaceFromIssueId: runWorkspaceInheritanceSourceIssueId }
@@ -6322,6 +6380,23 @@ export function issueRoutes(
       actorType: req.actor.type,
     });
 
+    if (updateFields.status === "done" && existing.status !== "done") {
+      const interactions = await issueThreadInteractionService(db).listForIssue(existing.id);
+      const pendingInteraction = interactions.find((interaction) => interaction.status === "pending");
+      if (pendingInteraction) {
+        res.status(422).json({
+          error: "Cannot mark issue done while an issue-thread interaction is pending",
+          details: {
+            code: "pending_issue_thread_interaction",
+            interactionId: pendingInteraction.id,
+            interactionKind: pendingInteraction.kind,
+            fix: "Resolve, reject, cancel, dismiss, or supersede the pending interaction before closing the issue.",
+          },
+        });
+        return;
+      }
+    }
+
     const nextAssigneeAgentId =
       updateFields.assigneeAgentId === undefined ? existing.assigneeAgentId : (updateFields.assigneeAgentId as string | null);
     const nextAssigneeUserId =
@@ -6339,7 +6414,13 @@ export function issueRoutes(
 
     if (assigneeWillChange && !transition.workflowControlledAssignment) {
       if (!isAgentReturningIssueToCreator && !triageAuthorityPatch.skipOwnership) {
-        await assertCanAssignTasks(req, existing.companyId);
+        await assertCanAssignTasks(req, existing.companyId, {
+          issueId: existing.id,
+          projectId: existing.projectId ?? null,
+          parentIssueId: existing.parentId ?? null,
+          assigneeAgentId: nextAssigneeAgentId,
+          assigneeUserId: nextAssigneeUserId,
+        });
       }
     }
 

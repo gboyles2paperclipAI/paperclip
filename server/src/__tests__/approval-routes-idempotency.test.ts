@@ -26,10 +26,17 @@ const mockIssueApprovalService = vi.hoisted(() => ({
 const mockSecretService = vi.hoisted(() => ({
   normalizeHireApprovalPayloadForPersistence: vi.fn(),
 }));
+const mockSlackIntegrationService = vi.hoisted(() => ({
+  postApprovalRequested: vi.fn(async () => undefined),
+}));
 
 const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockAccessService = vi.hoisted(() => ({
   decide: vi.fn(),
+}));
+
+vi.mock("../services/slack-integration.js", () => ({
+  slackIntegrationService: () => mockSlackIntegrationService,
 }));
 
 function registerModuleMocks() {
