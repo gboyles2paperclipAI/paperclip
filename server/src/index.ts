@@ -789,6 +789,7 @@ export async function startServer(): Promise<StartedServer> {
   if (config.heartbeatSchedulerEnabled) {
     const heartbeat = heartbeatService(db as any, { pluginWorkerManager, providerCooldownService });
     const routines = routineService(db as any, { pluginWorkerManager, providerCooldownService });
+    const customImages = environmentCustomImageService(db as any, { pluginWorkerManager });
   
     // Reap orphaned running runs at startup while in-memory execution state is empty,
     // then resume any persisted queued runs that were waiting on the previous process.
@@ -870,7 +871,7 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "routine scheduler tick failed");
         });
 
-      void environmentCustomImages
+      void customImages
         .cleanupExpiredSetupSessions()
         .then((result) => {
           if (result.timedOut > 0 || result.failed > 0) {

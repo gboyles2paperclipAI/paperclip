@@ -10,8 +10,13 @@ import {
   principalPermissionGrants,
   projects,
 } from "@paperclipai/db";
-import type { PermissionKey, PrincipalType } from "@paperclipai/shared";
-import { LOW_TRUST_REVIEW_PRESET, isUuidLike, type LowTrustBoundary } from "@paperclipai/shared";
+import type { AgentApiKeyScope, PermissionKey, PrincipalType, TaskBridgeAgentKeyScope } from "@paperclipai/shared";
+import {
+  LOW_TRUST_REVIEW_PRESET,
+  extractAgentMentionIds,
+  isUuidLike,
+  type LowTrustBoundary,
+} from "@paperclipai/shared";
 import {
   LOW_TRUST_ISSUE_ANCESTRY_MAX_DEPTH,
   isIssueWithinLowTrustBoundary,
@@ -52,6 +57,7 @@ export type AuthorizationAction =
   | "issue:comment"
   | "issue:mutate"
   | "issue:read"
+  | "pipelines:write"
   | "project:read"
   | "runtime:manage"
   | "secrets:read";
@@ -127,6 +133,7 @@ function permissionForAction(action: AuthorizationAction): PermissionKey | null 
     return null;
   }
   if (action === "issue:comment" || action === "issue:mutate") return null;
+  if (action === "pipelines:write") return null;
   return action;
 }
 

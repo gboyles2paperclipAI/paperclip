@@ -29,7 +29,7 @@ type BetterAuthGetSessionApi = {
   getSession?: (input: { headers: Headers }) => Promise<unknown>;
 };
 
-type BetterAuthHandlerTarget = Extract<Parameters<typeof toNodeHandler>[0], { handler: Auth["handler"] }>;
+type BetterAuthHandlerTarget = Parameters<typeof toNodeHandler>[0];
 
 type BetterAuthSessionResolver = {
   api?: BetterAuthGetSessionApi;

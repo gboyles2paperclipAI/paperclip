@@ -43,6 +43,19 @@ export function isIdempotentFinishSuccessfulRunHandoffWakeStatus(status: string)
 }
 
 type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;
+
+function isCommentDrivenWake(run: HeartbeatRunRow) {
+  const context =
+    typeof run.contextSnapshot === "object" && run.contextSnapshot !== null && !Array.isArray(run.contextSnapshot)
+      ? run.contextSnapshot as Record<string, unknown>
+      : {};
+  const wakeReason = typeof context.wakeReason === "string" ? context.wakeReason : null;
+  return wakeReason === "issue_commented" ||
+    wakeReason === "issue_comment_mentioned" ||
+    typeof context.commentId === "string" ||
+    Array.isArray(context.wakeCommentIds);
+}
+
 type IssueRow = Pick<
   typeof issues.$inferSelect,
   | "id"

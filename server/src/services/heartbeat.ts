@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
-import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -85,6 +85,7 @@ import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import {
   secretService,
   getSecretResolutionFailureCode,
+  type MissingRuntimeBinding,
   type RuntimeSecretManifestEntry,
 } from "./secrets.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
@@ -6351,6 +6352,47 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return updated;
   }
 
+  async function setRunStatusIfRunning(
+    runId: string,
+    status: string,
+    patch?: Partial<typeof heartbeatRuns.$inferInsert>,
+  ): Promise<
+    | { updated: true; run: typeof heartbeatRuns.$inferSelect }
+    | { updated: false; run: typeof heartbeatRuns.$inferSelect | null }
+  > {
+    const updated = await db
+      .update(heartbeatRuns)
+      .set({ status, ...patch, updatedAt: new Date() })
+      .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.status, "running")))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+
+    if (updated) {
+      if (isHeartbeatRunTerminalStatus(updated.status)) {
+        clearHeartbeatRunRuntimeStatus(updated.id);
+      }
+      publishLiveEvent({
+        companyId: updated.companyId,
+        type: "heartbeat.run.status",
+        payload: {
+          runId: updated.id,
+          agentId: updated.agentId,
+          status: updated.status,
+          invocationSource: updated.invocationSource,
+          triggerDetail: updated.triggerDetail,
+          error: updated.error ?? null,
+          errorCode: updated.errorCode ?? null,
+          startedAt: updated.startedAt ? new Date(updated.startedAt).toISOString() : null,
+          finishedAt: updated.finishedAt ? new Date(updated.finishedAt).toISOString() : null,
+        },
+      });
+      publishRunLifecyclePluginEvent(updated);
+      return { updated: true, run: updated };
+    }
+
+    return { updated: false, run: await getRun(runId) };
+  }
+
   function normalizeTelemetryCount(...values: Array<unknown>) {
     let normalized = 0;
     for (const value of values) {
@@ -10376,6 +10418,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
       selectedEnvironmentId = kubernetesEnvironment.id;
     }
+    const selectedEnvironmentForConfig = await envOrchestrator.resolveEnvironment({
+      companyId: agent.companyId,
+      selectedEnvironmentId,
+      localEnvironmentId: localEnvironment.id,
+    });
     const workspaceManagedConfig = buildExecutionWorkspaceAdapterConfig({
       agentConfig: config,
       projectPolicy: projectExecutionWorkspacePolicy,
@@ -10429,6 +10476,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     let resolvedConfig: Record<string, unknown> = {};
     let secretKeys: Set<string> = new Set<string>();
     let secretManifest: RuntimeSecretManifestEntry[] = [];
+    const runScopedMentionedSkillKeys = extractSkillMentionIds(
+      [
+        issueRef?.description ?? "",
+        safeWakeCommentContext?.body ?? "",
+      ].join("\n"),
+    );
+    const pushCapabilityPreflightRequired = requiresPushCapabilityPreflight({
+      adapterType: agent.adapterType,
+      issueId,
+      explicitRunScopedSkillKeys: runScopedMentionedSkillKeys,
+    });
 
     // G2 — Run preflight (FUL-6364 / FUL-6386 / FUL-6404 / ADR FUL-6348).
     // Evaluate deterministic, locally-knowable failure conditions BEFORE the
@@ -11827,7 +11885,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       );
 
       const finishedAt = new Date();
-      const persistedRunWrite = await setRunStatus(run.id, status, {
+      const persistedRunWrite = await setRunStatusIfRunning(run.id, status, {
         finishedAt,
         error: runErrorMessage,
         errorCode: runErrorCode,

@@ -1163,6 +1163,7 @@ export function issueRoutes(
     searchService?: CompanySearchService;
     searchRateLimiter?: CompanySearchRateLimiter;
     pluginWorkerManager?: PluginWorkerManager;
+    taskWatchdogEnqueueWakeup?: TaskWatchdogServiceDeps["enqueueWakeup"] | null;
     deploymentMode?: "local_trusted" | "authenticated";
   } = {},
 ) {
@@ -7499,7 +7500,7 @@ export function issueRoutes(
       userId: actor.actorType === "user" ? actor.actorId : null,
     });
     const interactionPayload = typeof interaction.payload === "object" && interaction.payload !== null
-      ? interaction.payload as Record<string, unknown>
+      ? interaction.payload as unknown as Record<string, unknown>
       : {};
 
     await logActivity(db, {
