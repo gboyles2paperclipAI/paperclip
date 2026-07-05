@@ -72,6 +72,17 @@ describe("git workspace sync", () => {
     });
   });
 
+  it("does not treat a plain nested directory inside a parent repo as a git workspace", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-sync-nested-"));
+    cleanupDirs.push(rootDir);
+    const repo = await createRepo(rootDir);
+    const nestedWorkspace = path.join(repo, "tmp", "local-workspace");
+    await mkdir(nestedWorkspace, { recursive: true });
+    await writeFile(path.join(nestedWorkspace, "README.md"), "plain workspace\n", "utf8");
+
+    await expect(readGitWorkspaceSnapshot(nestedWorkspace)).resolves.toBeNull();
+  });
+
   it("builds thin git delta bundles relative to the imported base", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-delta-"));
     cleanupDirs.push(rootDir);

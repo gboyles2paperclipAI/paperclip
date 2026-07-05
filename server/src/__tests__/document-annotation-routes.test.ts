@@ -35,6 +35,15 @@ const mockIssueReferenceService = vi.hoisted(() => ({
   syncDocument: vi.fn(async () => undefined),
   syncIssue: vi.fn(async () => undefined),
 }));
+const mockExternalObjectService = vi.hoisted(() => ({
+  getIssueSummaries: vi.fn(async () => new Map()),
+  getIssueSummary: vi.fn(async () => ({ objectCount: 0, liveness: "none" })),
+  listForIssue: vi.fn(async () => []),
+  refreshIssueObjects: vi.fn(async () => []),
+  syncCommentSafely: vi.fn(async () => undefined),
+  syncDocumentSafely: vi.fn(async () => undefined),
+  syncIssueSafely: vi.fn(async () => undefined),
+}));
 const mockHeartbeatService = vi.hoisted(() => ({
   wakeup: vi.fn(async () => undefined),
   reportRunActivity: vi.fn(async () => undefined),
@@ -108,6 +117,9 @@ const annotationComment = {
 };
 
 function registerModuleMocks() {
+  vi.doMock("../services/external-objects.js", () => ({
+    externalObjectService: () => mockExternalObjectService,
+  }));
   vi.doMock("../services/index.js", () => ({
     accessService: () => ({
       canUser: vi.fn(),

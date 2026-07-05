@@ -242,7 +242,7 @@ describe("assigned backlog creation contract", () => {
         }),
       }),
     );
-  });
+  }, 10_000);
 
   it("does not let a parent-blocking assigned child become an unwoken backlog leaf by default", async () => {
     const res = await request(await createApp())

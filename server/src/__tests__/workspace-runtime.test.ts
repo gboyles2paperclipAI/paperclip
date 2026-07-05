@@ -236,6 +236,7 @@ afterEach(async () => {
   delete process.env.PAPERCLIP_HOME;
   delete process.env.PAPERCLIP_INSTANCE_ID;
   delete process.env.PAPERCLIP_WORKTREES_DIR;
+  delete process.env.PAPERCLIP_WORKTREE_INIT_SKIP_HOST_CLI;
   delete process.env.DATABASE_URL;
   await resetRuntimeServicesForTests();
 });
@@ -1149,6 +1150,7 @@ describe("realizeExecutionWorkspace", () => {
     process.env.PAPERCLIP_HOME = paperclipHome;
     process.env.PAPERCLIP_INSTANCE_ID = instanceId;
     process.env.PAPERCLIP_WORKTREES_DIR = isolatedWorktreeHome;
+    process.env.PAPERCLIP_WORKTREE_INIT_SKIP_HOST_CLI = "1";
     // Keep this server-side fixture on provision-worktree.sh's config writer path;
     // CLI/database seeding is covered by the CLI worktree tests.
     await fs.symlink(process.execPath, path.join(isolatedBin, "node"));
@@ -1326,6 +1328,7 @@ describe("realizeExecutionWorkspace", () => {
   it(
     "provisions worktree-local pnpm node_modules instead of reusing base-repo links",
     async () => {
+    process.env.PAPERCLIP_WORKTREE_INIT_SKIP_HOST_CLI = "1";
     const repoRoot = await createTempRepo();
     await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
     await fs.mkdir(path.join(repoRoot, "packages", "shared"), { recursive: true });
@@ -1428,6 +1431,7 @@ describe("realizeExecutionWorkspace", () => {
   );
 
   it("provisions successfully when install is needed but there are no symlinked node_modules to move", async () => {
+    process.env.PAPERCLIP_WORKTREE_INIT_SKIP_HOST_CLI = "1";
     const repoRoot = await createTempRepo();
     await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
     await fs.writeFile(
@@ -1707,6 +1711,7 @@ describe("realizeExecutionWorkspace", () => {
         env: {
           ...process.env,
           PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          PAPERCLIP_WORKTREE_INIT_SKIP_HOST_CLI: "1",
           PAPERCLIP_WORKSPACE_BASE_CWD: baseRoot,
           PAPERCLIP_WORKSPACE_CWD: worktreeRoot,
         },
@@ -1725,6 +1730,7 @@ describe("realizeExecutionWorkspace", () => {
   it(
     "provisions worktree-local pnpm node_modules instead of reusing base-repo links",
     async () => {
+    process.env.PAPERCLIP_WORKTREE_INIT_SKIP_HOST_CLI = "1";
     const repoRoot = await createTempRepo();
     await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
     await fs.mkdir(path.join(repoRoot, "packages", "shared"), { recursive: true });

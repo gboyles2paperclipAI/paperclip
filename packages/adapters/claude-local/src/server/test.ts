@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import type {
   AdapterEnvironmentCheck,
   AdapterEnvironmentTestContext,
@@ -36,6 +38,8 @@ import { isBedrockModelId } from "./models.js";
 import { buildClaudeProbePermissionArgs } from "./permissions.js";
 import { materializeRemoteClaudeConfig, prepareClaudeConfigSeed } from "./claude-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
+
+const execFileAsync = promisify(execFile);
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -83,6 +87,15 @@ function summarizeProbeDetail(stdout: string, stderr: string): string | null {
   const clean = raw.replace(/\s+/g, " ").trim();
   const max = 240;
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+async function initializeProbeWorkspace(workspaceDir: string): Promise<void> {
+  await execFileAsync("git", ["init"], { cwd: workspaceDir });
+  await execFileAsync("git", ["config", "user.email", "paperclip@example.com"], { cwd: workspaceDir });
+  await execFileAsync("git", ["config", "user.name", "Paperclip Probe"], { cwd: workspaceDir });
+  await fs.writeFile(path.join(workspaceDir, "README.md"), "Claude sandbox probe workspace\n", "utf8");
+  await execFileAsync("git", ["add", "README.md"], { cwd: workspaceDir });
+  await execFileAsync("git", ["commit", "-m", "Initialize Claude sandbox probe workspace"], { cwd: workspaceDir });
 }
 
 export async function testEnvironment(
@@ -150,6 +163,7 @@ export async function testEnvironment(
       const seedDir = await prepareClaudeConfigSeed(process.env, async () => {}, ctx.companyId);
       const managedRemoteCwd = target?.kind === "remote" ? target.remoteCwd : cwd;
       tempWorkspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-envtest-workspace-"));
+      await initializeProbeWorkspace(tempWorkspaceDir);
       preparedRuntime = await prepareAdapterExecutionTargetRuntime({
         runId,
         target,

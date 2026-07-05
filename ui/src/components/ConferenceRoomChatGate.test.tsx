@@ -21,12 +21,6 @@ vi.mock("@/lib/router", () => ({
   Outlet: () => <div data-testid="outlet">gated content</div>,
 }));
 
-const mockEnv = vi.hoisted(() => ({
-  VITE_CHAT_DISABLED: "false",
-}));
-
-vi.stubGlobal("import.meta.env", mockEnv);
-
 async function flushReact() {
   for (let index = 0; index < 5; index += 1) {
     await Promise.resolve();
@@ -55,6 +49,7 @@ describe("ConferenceRoomChatGate (PAP-137)", () => {
   }
 
   beforeEach(() => {
+    vi.stubEnv("VITE_CHAT_DISABLED", "false");
     container = document.createElement("div");
     document.body.appendChild(container);
   });
@@ -66,6 +61,7 @@ describe("ConferenceRoomChatGate (PAP-137)", () => {
     root = null;
     container.remove();
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it("redirects to the company home when the flag is off", async () => {
@@ -95,7 +91,7 @@ describe("ConferenceRoomChatGate (PAP-137)", () => {
   });
 
   it("shows fallback UI when VITE_CHAT_DISABLED is true", async () => {
-    mockEnv.VITE_CHAT_DISABLED = "true";
+    vi.stubEnv("VITE_CHAT_DISABLED", "true");
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
     await renderGate();
 
@@ -106,7 +102,7 @@ describe("ConferenceRoomChatGate (PAP-137)", () => {
   });
 
   it("renders gated content when VITE_CHAT_DISABLED is false and flag is on", async () => {
-    mockEnv.VITE_CHAT_DISABLED = "false";
+    vi.stubEnv("VITE_CHAT_DISABLED", "false");
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableConferenceRoomChat: true });
     await renderGate();
 

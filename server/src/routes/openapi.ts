@@ -18,6 +18,7 @@ import {
   createIssueSchema,
   updateIssueSchema,
   createIssueLabelSchema,
+  addIssueMarkerSchema,
   addIssueCommentSchema,
   checkoutIssueSchema,
   linkIssueApprovalSchema,
@@ -567,6 +568,7 @@ const PUBLIC_OPERATIONS = new Set([
   "GET /api/invites/{token}/skills/index",
   "GET /api/invites/{token}/skills/{skillName}",
   "GET /api/invites/{token}/test-resolution",
+  "POST /api/integrations/slack/interactions",
   "POST /api/invites/{token}/accept",
   "POST /api/join-requests/{requestId}/claim-api-key",
 ]);
@@ -622,6 +624,9 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/issues/{issueId}/file-resources/content",
   "GET /api/issues/{issueId}/file-resources/list",
   "GET /api/issues/{issueId}/file-resources/resolve",
+  "GET /api/companies/{companyId}/execution-summary",
+  "POST /api/issues/{id}/admin/force-release",
+  "POST /api/issues/{id}/admin/repair-recovery-action",
   "POST /api/issues/{id}/interactions/{interactionId}/accept",
   "POST /api/issues/{id}/interactions/{interactionId}/reject",
   "POST /api/issues/{id}/interactions/{interactionId}/respond",
@@ -3110,6 +3115,15 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/admin/repair-recovery-action",
+  tags: ["issues"],
+  summary: "Repair a stale issue recovery action (admin)",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: { description: "Issue is not terminal" } },
+});
+
+registry.registerPath({
   method: "get",
   path: "/api/issues/{id}/tree-control/state",
   tags: ["issues"],
@@ -4376,6 +4390,23 @@ registerCurrentRoute({
 });
 
 registerCurrentRoute({
+  method: "get",
+  path: "/api/admin/heartbeat/storage-report",
+  tags: ["runs"],
+  summary: "Get heartbeat run storage report",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/admin/recovery-actions/repair",
+  tags: ["issues"],
+  summary: "Repair stale issue recovery actions",
+  body: z.object({ companyId: z.string().min(1) }),
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
   method: "post",
   path: "/api/bootstrap/claim",
   tags: ["access"],
@@ -4411,6 +4442,7 @@ for (const route of [
   ["get", "/api/companies/import/jobs/{jobId}", "Get company import job status"],
   ["get", "/api/companies/{companyId}/search", "Search company data"],
   ["get", "/api/companies/{companyId}/issues/count", "Count issues in a company"],
+  ["get", "/api/companies/{companyId}/execution-summary", "Get company execution cap summary"],
 ] as const) {
   registerCurrentRoute({
     method: route[0],
@@ -4422,9 +4454,46 @@ for (const route of [
 
 registerCurrentRoute({
   method: "get",
+  path: "/api/companies/{companyId}/interactions",
+  tags: ["issues"],
+  summary: "List resolved issue thread interactions",
+  query: z.object({
+    resolvedAfter: z.string().optional(),
+    resolvedBefore: z.string().optional(),
+    method: z.enum(["ui_click", "api_explicit", "api_automated", "unknown"]).optional(),
+  }),
+});
+
+registerCurrentRoute({
+  method: "get",
   path: "/api/issues/{id}/cost-summary",
   tags: ["costs"],
   summary: "Get issue cost summary",
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/heartbeat-runs/live",
+  tags: ["runs"],
+  summary: "Deprecated unscoped live heartbeat runs endpoint",
+  responses: { 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/issues/{id}/markers",
+  tags: ["issues"],
+  summary: "Add an issue marker",
+  body: addIssueMarkerSchema,
+  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/integrations/slack/interactions",
+  tags: ["integrations"],
+  summary: "Handle a Slack interaction callback",
+  responses: { 200: r.ok(), 400: r.badRequest },
 });
 
 for (const route of [

@@ -8831,6 +8831,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return null;
     }
 
+    const dailyCapBlock = await getHeartbeatDailyCapBlock(agent, parseHeartbeatPolicy(agent), {
+      excludeRunId: run.id,
+    });
+    if (dailyCapBlock) {
+      await cancelQueuedRunForHeartbeatDailyCap(run, dailyCapBlock);
+      return null;
+    }
+
     // Defer (not cancel) if adapter route is cooling down from a quota event.
     if (providerCooldownService?.isCoolingDown(agent.adapterType ?? "")) {
       logger.info(
@@ -12722,7 +12730,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const shouldReopenDeferredCommentWake =
           hasDeferredCommentSignal &&
           (issue.status === "done" || issue.status === "cancelled") &&
-          hasExplicitTerminalReopenIntent;
+          hasExplicitTerminalReopenIntent &&
+          !deferredCommentWakeIsSelfAuthored;
         const shouldSkipTerminalDeferredCommentWake =
           hasDeferredCommentSignal &&
           (issue.status === "done" || issue.status === "cancelled") &&

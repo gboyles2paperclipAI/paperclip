@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -108,6 +109,15 @@ type CapturePayload = {
   prompt: string;
   paperclipEnvKeys: string[];
 };
+
+async function initializeGitWorkspace(workspace: string): Promise<void> {
+  await execFile("git", ["init"], { cwd: workspace });
+  await execFile("git", ["config", "user.email", "paperclip@example.com"], { cwd: workspace });
+  await execFile("git", ["config", "user.name", "Paperclip Test"], { cwd: workspace });
+  await fs.writeFile(path.join(workspace, "README.md"), "sandbox workspace\n", "utf8");
+  await execFile("git", ["add", "README.md"], { cwd: workspace });
+  await execFile("git", ["commit", "-m", "Initial sandbox workspace"], { cwd: workspace });
+}
 
 async function createSkillDir(root: string, name: string) {
   const skillDir = path.join(root, name);
@@ -330,6 +340,7 @@ describe("cursor execute", () => {
     const cursorAgentPath = path.join(homeDir, ".local", "bin", "cursor-agent");
     await fs.mkdir(workspace, { recursive: true });
     await fs.mkdir(remoteWorkspace, { recursive: true });
+    await initializeGitWorkspace(workspace);
     await writeFakeSandboxCursorAgent(cursorAgentPath, capturePath);
 
     const previousHome = process.env.HOME;
@@ -395,6 +406,7 @@ describe("cursor execute", () => {
     const customCommandPath = path.join(root, "bin", "custom-cursor");
     await fs.mkdir(workspace, { recursive: true });
     await fs.mkdir(remoteWorkspace, { recursive: true });
+    await initializeGitWorkspace(workspace);
     await writeFakeSandboxCursorAgent(cursorAgentPath, path.join(root, "unused.json"));
     await writeFakeSandboxCursorAgent(customCommandPath, capturePath);
 

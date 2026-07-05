@@ -63,6 +63,18 @@ export async function readGitWorkspaceSnapshot(localDir: string): Promise<GitWor
       return null;
     }
 
+    const topLevelResult = await runLocalGit(localDir, ["rev-parse", "--show-toplevel"], {
+      timeout: 10_000,
+      maxBuffer: 16 * 1024,
+    });
+    const [workspaceRoot, gitRoot] = await Promise.all([
+      fs.realpath(localDir),
+      fs.realpath(topLevelResult.stdout.trim()),
+    ]);
+    if (workspaceRoot !== gitRoot) {
+      return null;
+    }
+
     const [headCommitResult, branchResult, overlayDiffResult, untrackedResult, deletedResult, ignoredResult] = await Promise.all([
       runLocalGit(localDir, ["rev-parse", "HEAD"], {
         timeout: 10_000,
