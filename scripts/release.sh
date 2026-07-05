@@ -224,6 +224,7 @@ for pkg_dir in server packages/adapters/claude-local packages/adapters/codex-loc
   rm -rf "$REPO_ROOT/$pkg_dir/skills"
   cp -r "$REPO_ROOT/skills" "$REPO_ROOT/$pkg_dir/skills"
 done
+"$REPO_ROOT/scripts/verify-package-integrity.sh" "$REPO_ROOT/server/dist"
 release_info "  ✓ Workspace build complete"
 
 release_info ""
