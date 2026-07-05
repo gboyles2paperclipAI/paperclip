@@ -227,6 +227,71 @@ describe("issue update comment wakeups", () => {
     mockIssueService.getCurrentScheduledRetry.mockResolvedValue(null);
   });
 
+  it("accepts body as the canonical POST issue comment payload field", async () => {
+    const existing = makeIssue();
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-body-field",
+      issueId: existing.id,
+      companyId: existing.companyId,
+      body: "Canonical body comment",
+    });
+
+    const res = await request(await createApp())
+      .post(`/api/issues/${existing.id}/comments`)
+      .send({ body: "Canonical body comment" });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      existing.id,
+      "Canonical body comment",
+      expect.any(Object),
+      expect.any(Object),
+    );
+  });
+
+  it("accepts comment as an alias when body is absent on POST issue comments", async () => {
+    const existing = makeIssue();
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.addComment.mockResolvedValue({
+      id: "comment-alias-field",
+      issueId: existing.id,
+      companyId: existing.companyId,
+      body: "Alias comment payload",
+    });
+
+    const res = await request(await createApp())
+      .post(`/api/issues/${existing.id}/comments`)
+      .send({ comment: "Alias comment payload" });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      existing.id,
+      "Alias comment payload",
+      expect.any(Object),
+      expect.any(Object),
+    );
+  });
+
+  it("rejects POST issue comments with neither body nor comment", async () => {
+    const res = await request(await createApp())
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/comments")
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Validation error");
+    expect(res.body.details).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: ["body"],
+          message: expect.stringMatching(/required|expected/i),
+        }),
+      ]),
+    );
+    expect(mockIssueService.getById).not.toHaveBeenCalled();
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+  });
+
   it("includes the new comment in assignment wakes from issue updates", async () => {
     const existing = makeIssue();
     const updated = makeIssue({
