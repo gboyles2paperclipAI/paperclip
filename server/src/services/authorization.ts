@@ -116,13 +116,13 @@ function companyIdForResource(resource: AuthorizationResource) {
 
 function permissionForAction(action: AuthorizationAction): PermissionKey | null {
   if (action === "agent_config:read" || action === "agent_config:update") return "agents:create";
+  if (action === "pipelines:write") return "pipelines:write";
   if (
     action === "agent:read" ||
     action === "agent:wake" ||
     action === "company_scope:read" ||
     action === "issue:read" ||
     action === "project:read" ||
-    action === "pipelines:write" ||
     action === "runtime:manage" ||
     action === "secrets:read"
   ) {

@@ -106,6 +106,25 @@ async function waitForRunSettled(
   }
 }
 
+async function waitForHeartbeatIdle(
+  db: ReturnType<typeof createDb>,
+  timeoutMs = 8_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const [activeRunRow] = await db
+      .select({ total: sql<number>`count(*)::integer` })
+      .from(heartbeatRuns)
+      .where(sql`${heartbeatRuns.status} in ('queued', 'running')`);
+    const [activeLeaseRow] = await db
+      .select({ total: sql<number>`count(*)::integer` })
+      .from(environmentLeases)
+      .where(eq(environmentLeases.status, "active"));
+    if (Number(activeRunRow?.total ?? 0) === 0 && Number(activeLeaseRow?.total ?? 0) === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)", () => {
   let db!: ReturnType<typeof createDb>;
   let heartbeat!: ReturnType<typeof heartbeatService>;
@@ -128,8 +147,9 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
       provider: "test",
       model: "test-model",
     });
-    // TRUNCATE ... CASCADE avoids FK-ordering races against any background
-    // run post-processing that is still settling at teardown time.
+    // executeRun starts follow-up work asynchronously; wait for it to leave the
+    // run/lease tables idle before taking AccessExclusive locks for cleanup.
+    await waitForHeartbeatIdle(db);
     await db.execute(sql.raw('TRUNCATE TABLE "companies" CASCADE'));
   });
 
@@ -240,8 +260,8 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
 
-    // The adapter child must never be spawned: the run is blocked at preflight,
-    // upstream of any adapter.execute() call.
+    // The adapter child must never be spawned: the run is blocked during
+    // pre-dispatch configuration resolution, upstream of adapter.execute().
     expect(adapterExecute).not.toHaveBeenCalled();
 
     const failedRun = await db
@@ -249,7 +269,7 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, finished!.id))
       .then((rows) => rows[0] ?? null);
-    expect(failedRun?.errorCode).toBe("preflight_secret_unbound");
+    expect(failedRun?.errorCode).toBe("configuration_incomplete");
 
     expect(issueStatus).toBe("blocked");
 

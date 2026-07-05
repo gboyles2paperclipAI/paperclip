@@ -1166,15 +1166,21 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     if (fallback) {
       const shouldReopen = isTerminalIssueStatus(fallback.status) || fallback.status === "backlog";
       const watchdogIssue = shouldReopen
-        ? await issuesSvc.update(fallback.id, {
-          status: "todo",
-          assigneeAgentId: input.watchdog.watchdogAgentId,
-          parentId: input.sourceIssue.id,
-          projectId: input.sourceIssue.projectId,
-          goalId: input.sourceIssue.goalId,
-          billingCode: input.sourceIssue.billingCode,
-          originFingerprint: input.classification.stopFingerprint,
-        }) ?? fallback
+        ? await db
+          .update(issues)
+          .set({
+            status: "todo",
+            assigneeAgentId: input.watchdog.watchdogAgentId,
+            parentId: input.sourceIssue.id,
+            projectId: input.sourceIssue.projectId,
+            goalId: input.sourceIssue.goalId,
+            billingCode: input.sourceIssue.billingCode,
+            originFingerprint: input.classification.stopFingerprint,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(issues.companyId, input.watchdog.companyId), eq(issues.id, fallback.id)))
+          .returning()
+          .then((rows) => rows[0] ?? fallback)
         : fallback;
       if (!shouldReopen && watchdogIssue.originFingerprint !== input.classification.stopFingerprint) {
         await db

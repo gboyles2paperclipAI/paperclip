@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -217,6 +218,7 @@ describe("codex execute", () => {
 
     const previousHome = process.env.HOME;
     process.env.HOME = root;
+    await seedSharedCodexAuth(root);
 
     try {
       const logs: LogEntry[] = [];
@@ -408,6 +410,12 @@ describe("codex execute", () => {
     await fs.mkdir(localWorkspace, { recursive: true });
     await fs.mkdir(remoteWorkspace, { recursive: true });
     await fs.mkdir(binDir, { recursive: true });
+    await execFile("git", ["init"], { cwd: localWorkspace });
+    await execFile("git", ["config", "user.email", "paperclip@example.com"], { cwd: localWorkspace });
+    await execFile("git", ["config", "user.name", "Paperclip Test"], { cwd: localWorkspace });
+    await fs.writeFile(path.join(localWorkspace, "README.md"), "sandbox workspace\n", "utf8");
+    await execFile("git", ["add", "README.md"], { cwd: localWorkspace });
+    await execFile("git", ["commit", "-m", "Initial sandbox workspace"], { cwd: localWorkspace });
     await writeFakeCodexCommand(commandPath);
 
     process.env.HOME = root;

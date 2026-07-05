@@ -62,6 +62,10 @@ const serializedServerVitestArgs = [
   "--no-file-parallelism",
   "--maxWorkers=1",
 ];
+const continueOnFailure =
+  process.env.PAPERCLIP_VITEST_CONTINUE_ON_FAILURE === "1" ||
+  process.env.PAPERCLIP_VITEST_CONTINUE_ON_FAILURE === "true";
+const failures = [];
 
 function walk(dir) {
   const entries = readdirSync(dir);
@@ -248,7 +252,7 @@ function selectSerializedSuites(routeTests, shardIndex, shardCount) {
 function runVitest(args, label) {
   console.log(`\n[test:run] ${label}`);
   invocationIndex += 1;
-  const tempRootParent = process.platform === "win32" ? os.tmpdir() : "/tmp";
+  const tempRootParent = process.env.TMPDIR || (process.platform === "win32" ? os.tmpdir() : "/tmp");
   const testRoot = mkdtempSync(path.join(tempRootParent, `pcvt-${process.pid}-${invocationIndex}-`));
   // Keep per-run paths compact so Unix socket fixtures stay under macOS path limits.
   const env = {
@@ -267,11 +271,29 @@ function runVitest(args, label) {
   });
   if (result.error) {
     console.error(`[test:run] Failed to start Vitest: ${result.error.message}`);
+    if (continueOnFailure) {
+      failures.push({ label, status: 1 });
+      return;
+    }
     process.exit(1);
   }
   if (result.status !== 0) {
+    if (continueOnFailure) {
+      failures.push({ label, status: result.status ?? 1 });
+      return;
+    }
     process.exit(result.status ?? 1);
   }
+}
+
+function exitWithFailureSummary() {
+  if (failures.length === 0) return;
+
+  console.error("\n[test:run] Failing suites:");
+  for (const failure of failures) {
+    console.error(`[test:run] - ${failure.label} (exit ${failure.status})`);
+  }
+  process.exit(1);
 }
 
 function runGeneralSuites(routeTests) {
@@ -420,3 +442,5 @@ if (options.mode === generalModeName || options.mode === allModeName) {
 if (options.mode === serializedModeName || options.mode === allModeName) {
   runSerializedSuites(routeTests, options.shardIndex ?? 0, options.shardCount ?? 1);
 }
+
+exitWithFailureSummary();

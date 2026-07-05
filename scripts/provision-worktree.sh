@@ -9,6 +9,12 @@ paperclip_dir="$worktree_cwd/.paperclip"
 worktree_config_path="$paperclip_dir/config.json"
 worktree_env_path="$paperclip_dir/.env"
 worktree_name="${PAPERCLIP_WORKSPACE_BRANCH:-$(basename "$worktree_cwd")}"
+skip_host_cli_discovery=false
+case "${PAPERCLIP_WORKTREE_INIT_SKIP_HOST_CLI:-}" in
+  1|true|TRUE|yes|YES)
+    skip_host_cli_discovery=true
+    ;;
+esac
 
 if [[ ! -d "$base_cwd" ]]; then
   echo "Base workspace does not exist: $base_cwd" >&2
@@ -63,6 +69,10 @@ run_isolated_worktree_init() {
 }
 
 paperclipai_command_available() {
+  if [[ "$skip_host_cli_discovery" == true ]]; then
+    return 1
+  fi
+
   if command -v pnpm >/dev/null 2>&1 && pnpm paperclipai --help >/dev/null 2>&1; then
     return 0
   fi

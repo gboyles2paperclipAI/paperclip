@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -176,6 +177,15 @@ afterEach(() => {
   resetClaudeCliCapabilitiesCacheForTests();
 });
 
+async function initializeGitWorkspace(workspace: string): Promise<void> {
+  await execFile("git", ["init"], { cwd: workspace });
+  await execFile("git", ["config", "user.email", "paperclip@example.com"], { cwd: workspace });
+  await execFile("git", ["config", "user.name", "Paperclip Test"], { cwd: workspace });
+  await fs.writeFile(path.join(workspace, "README.md"), "sandbox workspace\n", "utf8");
+  await execFile("git", ["add", "README.md"], { cwd: workspace });
+  await execFile("git", ["commit", "-m", "Initial sandbox workspace"], { cwd: workspace });
+}
+
 async function writePoisonedMessageIdClaudeCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -294,6 +304,7 @@ async function setupExecuteEnv(
   const statePath = path.join(root, "state.txt");
   await fs.mkdir(workspace, { recursive: true });
   await fs.mkdir(binDir, { recursive: true });
+  await initializeGitWorkspace(workspace);
   await (options?.commandWriter ?? writeFakeClaudeCommand)(commandPath);
   const previousHome = process.env.HOME;
   const previousPath = process.env.PATH;
@@ -741,6 +752,7 @@ describe("claude execute", () => {
     await fs.mkdir(remoteWorkspace, { recursive: true });
     await fs.mkdir(binDir, { recursive: true });
     await fs.mkdir(claudeRoot, { recursive: true });
+    await initializeGitWorkspace(localWorkspace);
     await fs.writeFile(path.join(claudeRoot, "settings.json"), JSON.stringify({ theme: "test" }), "utf8");
     await writeFakeClaudeCommand(commandPath);
 
