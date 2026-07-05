@@ -106,29 +106,6 @@ import { listInvalidOrgChainDescendantIds } from "../services/agent-invokability
 
 const RUN_LOG_DEFAULT_LIMIT_BYTES = 256_000;
 const RUN_LOG_MAX_LIMIT_BYTES = 1024 * 1024;
-const LIVE_RUNS_CACHE_TTL_MS = 5_000;
-const LIVE_RUNS_CACHE_MAX_ENTRIES = 500;
-
-type LiveRunsCacheEntry = {
-  expiresAt: number;
-  value: unknown;
-};
-
-const liveRunsCache = new Map<string, LiveRunsCacheEntry>();
-
-function sweepLiveRunsCache(now: number) {
-  for (const [key, entry] of liveRunsCache) {
-    if (entry.expiresAt <= now) liveRunsCache.delete(key);
-  }
-  if (liveRunsCache.size <= LIVE_RUNS_CACHE_MAX_ENTRIES) return;
-  const excess = liveRunsCache.size - LIVE_RUNS_CACHE_MAX_ENTRIES;
-  let removed = 0;
-  for (const key of liveRunsCache.keys()) {
-    liveRunsCache.delete(key);
-    removed += 1;
-    if (removed >= excess) break;
-  }
-}
 
 function readRunLogLimitBytes(value: unknown) {
   const parsed = Number(value ?? RUN_LOG_DEFAULT_LIMIT_BYTES);
@@ -3568,15 +3545,6 @@ export function agentRoutes(
     // padded in and renders bogus "live" counts.
     const minCount = readLiveRunsQueryInt(req.query.minCount, 50, 0);
     const limit = readLiveRunsQueryInt(req.query.limit, 50, 50);
-    const cacheKey = `${companyId}:${minCount}:${limit}`;
-    const now = Date.now();
-    const cached = liveRunsCache.get(cacheKey);
-    if (cached && cached.expiresAt > now) {
-      res.json(cached.value);
-      return;
-    }
-    if (cached) liveRunsCache.delete(cacheKey);
-    sweepLiveRunsCache(now);
 
     const columns = {
       id: heartbeatRuns.id,
@@ -3642,8 +3610,6 @@ export function agentRoutes(
         ...run,
         outputSilence: await heartbeat.buildRunOutputSilence(run),
       })));
-      liveRunsCache.set(cacheKey, { expiresAt: now + LIVE_RUNS_CACHE_TTL_MS, value: payload });
-      sweepLiveRunsCache(now);
       res.json(payload);
       return;
     }
@@ -3652,8 +3618,6 @@ export function agentRoutes(
       ...run,
       outputSilence: await heartbeat.buildRunOutputSilence(run),
     })));
-    liveRunsCache.set(cacheKey, { expiresAt: now + LIVE_RUNS_CACHE_TTL_MS, value: payload });
-    sweepLiveRunsCache(now);
     res.json(payload);
   });
 

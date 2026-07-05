@@ -126,6 +126,34 @@ function createLiveRunsDbStub(rows: Array<Record<string, unknown>>) {
   };
 }
 
+function liveRunRow(id: string) {
+  return {
+    id,
+    companyId: "company-1",
+    status: "running",
+    invocationSource: "on_demand",
+    triggerDetail: "manual",
+    startedAt: new Date("2026-04-10T09:30:00.000Z"),
+    finishedAt: null,
+    createdAt: new Date("2026-04-10T09:30:00.000Z"),
+    agentId: "agent-1",
+    agentName: "Builder",
+    adapterType: "codex_local",
+    logBytes: 0,
+    livenessState: "healthy",
+    livenessReason: null,
+    continuationAttempt: 0,
+    lastUsefulActionAt: null,
+    nextAction: null,
+    lastOutputAt: null,
+    lastOutputSeq: null,
+    lastOutputStream: null,
+    lastOutputBytes: 0,
+    processStartedAt: null,
+    issueId: "issue-1",
+  };
+}
+
 async function requestApp(
   app: express.Express,
   buildRequest: (baseUrl: string) => request.Test,
@@ -397,6 +425,43 @@ describe("agent live run routes", () => {
     expect(limit).toHaveBeenCalledWith(50);
     expect(res.body).toHaveLength(50);
     expect(mockHeartbeatService.buildRunOutputSilence).toHaveBeenCalledTimes(50);
+  });
+
+  it("does not retain a route-level live-runs payload cache", async () => {
+    let selectCallCount = 0;
+    const db = {
+      select: vi.fn().mockImplementation(() => {
+        selectCallCount += 1;
+        const rows = [liveRunRow(`run-${selectCallCount}`)];
+        const orderedQuery = {
+          limit: vi.fn(async () => rows),
+          then: (resolve: (value: typeof rows) => unknown) =>
+            Promise.resolve(rows).then(resolve),
+        };
+        return {
+          from: vi.fn().mockReturnThis(),
+          innerJoin: vi.fn().mockReturnThis(),
+          where: vi.fn().mockReturnThis(),
+          orderBy: vi.fn().mockReturnValue(orderedQuery),
+        };
+      }),
+    };
+    const app = await createApp(db);
+
+    const first = await requestApp(
+      app,
+      (baseUrl) => request(baseUrl).get("/api/companies/company-1/live-runs"),
+    );
+    const second = await requestApp(
+      app,
+      (baseUrl) => request(baseUrl).get("/api/companies/company-1/live-runs"),
+    );
+
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+    expect(first.body[0].id).toBe("run-1");
+    expect(second.body[0].id).toBe("run-2");
+    expect(db.select).toHaveBeenCalledTimes(2);
   });
 
   it("treats explicit zero or invalid live run limit as the capped default", async () => {

@@ -8,6 +8,8 @@ const BACKPRESSURE_RETRY_AFTER_SECONDS = 5;
 const POLLING_RATE_LIMIT_PER_MINUTE = 30;
 const POLLING_RATE_LIMIT_WINDOW_MS = 60_000;
 const LIVE_RUNS_COALESCE_WINDOW_MS = 1_000;
+const LIVE_RUNS_COALESCE_MAX_ENTRIES = 200;
+const LIVE_RUNS_COALESCE_MAX_PAYLOAD_BYTES = 512_000;
 const POLLING_CACHE_CONTROL_HEADER = "private, max-age=1, must-revalidate";
 
 type RouteFamily = "live_runs" | "dashboard" | "agent_runs" | "issue_live_runs" | "heartbeat_logs" | "issues";
@@ -112,11 +114,15 @@ export function createPollingRateLimitAndCoalescingMiddleware(opts?: {
   requestsPerMinute?: number;
   windowMs?: number;
   liveRunsCoalesceWindowMs?: number;
+  liveRunsCoalesceMaxEntries?: number;
+  liveRunsCoalesceMaxPayloadBytes?: number;
   cacheControlHeader?: string;
 }): RequestHandler {
   const requestsPerMinute = Math.max(1, opts?.requestsPerMinute ?? POLLING_RATE_LIMIT_PER_MINUTE);
   const windowMs = Math.max(1_000, opts?.windowMs ?? POLLING_RATE_LIMIT_WINDOW_MS);
   const liveRunsCoalesceWindowMs = Math.max(100, opts?.liveRunsCoalesceWindowMs ?? LIVE_RUNS_COALESCE_WINDOW_MS);
+  const liveRunsCoalesceMaxEntries = Math.max(1, opts?.liveRunsCoalesceMaxEntries ?? LIVE_RUNS_COALESCE_MAX_ENTRIES);
+  const liveRunsCoalesceMaxPayloadBytes = Math.max(1, opts?.liveRunsCoalesceMaxPayloadBytes ?? LIVE_RUNS_COALESCE_MAX_PAYLOAD_BYTES);
   const cacheControlHeader = opts?.cacheControlHeader ?? POLLING_CACHE_CONTROL_HEADER;
 
   const requestWindowState = new Map<string, { windowStartMs: number; count: number }>();
@@ -159,23 +165,75 @@ export function createPollingRateLimitAndCoalescingMiddleware(opts?: {
     }
 
     const cacheKey = `${familyMatch.family}:${familyMatch.companyId}:${clientId}:${pathname}`;
+    sweepLiveRunsResponseCache(liveRunsResponseCache, now, liveRunsCoalesceMaxEntries);
     const cached = liveRunsResponseCache.get(cacheKey);
     if (cached && cached.expiresAtMs > now) {
       res.json(cached.payload);
       return;
     }
+    if (cached) liveRunsResponseCache.delete(cacheKey);
 
     const originalJson = res.json.bind(res);
     res.json = (payload: unknown) => {
-      liveRunsResponseCache.set(cacheKey, {
-        payload,
-        expiresAtMs: Date.now() + liveRunsCoalesceWindowMs,
-      });
+      if (estimatePayloadBytes(payload, liveRunsCoalesceMaxPayloadBytes) <= liveRunsCoalesceMaxPayloadBytes) {
+        const cacheNow = Date.now();
+        sweepLiveRunsResponseCache(liveRunsResponseCache, cacheNow, liveRunsCoalesceMaxEntries - 1);
+        liveRunsResponseCache.set(cacheKey, {
+          payload,
+          expiresAtMs: cacheNow + liveRunsCoalesceWindowMs,
+        });
+      }
       return originalJson(payload);
     };
 
     next();
   };
+}
+
+function sweepLiveRunsResponseCache(
+  cache: Map<string, { expiresAtMs: number; payload: unknown }>,
+  now: number,
+  maxEntries: number,
+) {
+  for (const [key, entry] of cache) {
+    if (entry.expiresAtMs <= now) cache.delete(key);
+  }
+  while (cache.size > maxEntries) {
+    const oldestKey = cache.keys().next().value as string | undefined;
+    if (!oldestKey) return;
+    cache.delete(oldestKey);
+  }
+}
+
+function estimatePayloadBytes(value: unknown, maxBytes: number): number {
+  const seen = new WeakSet<object>();
+
+  function walk(input: unknown, depth: number): number {
+    if (input == null) return 4;
+    if (typeof input === "string") return Buffer.byteLength(input, "utf8");
+    if (typeof input === "number" || typeof input === "boolean") return 8;
+    if (typeof input !== "object") return 16;
+    if (seen.has(input)) return 0;
+    seen.add(input);
+    if (depth > 8) return 64;
+
+    let total = Array.isArray(input) ? 2 : 8;
+    if (Array.isArray(input)) {
+      for (let index = 0; index < input.length; index += 1) {
+        total += Buffer.byteLength(String(index), "utf8") + walk(input[index], depth + 1) + 2;
+        if (total > maxBytes) return total;
+      }
+      return total;
+    }
+
+    for (const [key, nested] of Object.entries(input as Record<string, unknown>)) {
+      total += Buffer.byteLength(key, "utf8") + walk(nested, depth + 1) + 2;
+      if (total > maxBytes) return total;
+    }
+    return total;
+  }
+
+  return walk(value, 0);
 }
 
 function normalizePath(path: string | undefined): string {

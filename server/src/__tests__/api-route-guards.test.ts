@@ -133,6 +133,62 @@ describe("api route guards", () => {
     expect(liveRunsCalls).toBe(1);
   });
 
+  it("does not coalesce oversized live-runs payloads", async () => {
+    const app = express();
+    let liveRunsCalls = 0;
+    app.use((req, _res, next) => {
+      (req as any).actor = { type: "agent", companyId: "company-1", agentId: "agent-1" };
+      next();
+    });
+    app.use(
+      "/api",
+      createPollingRateLimitAndCoalescingMiddleware({
+        requestsPerMinute: 100,
+        liveRunsCoalesceWindowMs: 1_000,
+        liveRunsCoalesceMaxPayloadBytes: 64,
+      }),
+    );
+    app.get("/api/companies/company-1/live-runs", (_req, res) => {
+      liveRunsCalls += 1;
+      res.json({ calls: liveRunsCalls, payload: "x".repeat(128) });
+    });
+
+    const first = await request(app).get("/api/companies/company-1/live-runs");
+    const second = await request(app).get("/api/companies/company-1/live-runs");
+
+    expect(first.body.calls).toBe(1);
+    expect(second.body.calls).toBe(2);
+    expect(liveRunsCalls).toBe(2);
+  });
+
+  it("bounds live-runs coalescing cache entries", async () => {
+    const app = express();
+    let liveRunsCalls = 0;
+    app.use((req, _res, next) => {
+      (req as any).actor = { type: "board", companyIds: ["company-1"] };
+      next();
+    });
+    app.use(
+      "/api",
+      createPollingRateLimitAndCoalescingMiddleware({
+        requestsPerMinute: 100,
+        liveRunsCoalesceWindowMs: 1_000,
+        liveRunsCoalesceMaxEntries: 1,
+      }),
+    );
+    app.get("/api/companies/company-1/live-runs", (_req, res) => {
+      liveRunsCalls += 1;
+      res.json({ calls: liveRunsCalls });
+    });
+
+    await request(app).get("/api/companies/company-1/live-runs").set("x-forwarded-for", "10.0.0.1");
+    await request(app).get("/api/companies/company-1/live-runs").set("x-forwarded-for", "10.0.0.2");
+    const third = await request(app).get("/api/companies/company-1/live-runs").set("x-forwarded-for", "10.0.0.1");
+
+    expect(third.body).toEqual({ calls: 3 });
+    expect(liveRunsCalls).toBe(3);
+  });
+
   it("adds cache-control headers to protected polling endpoints", async () => {
     const app = express();
     app.use((req, _res, next) => {
