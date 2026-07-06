@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { HttpError } from "../errors.js";
 import { errorHandler } from "../middleware/error-handler.js";
 
@@ -60,6 +61,45 @@ describe("errorHandler", () => {
       message: "portable file references missing upload id",
     });
     expect(res.err).toBe(err);
+  });
+
+  it("maps ZodError to a 400 validation response", () => {
+    const req = makeReq();
+    const res = makeRes() as any;
+    const next = vi.fn() as unknown as NextFunction;
+    const result = z.object({ name: z.string() }).safeParse({});
+    expect(result.success).toBe(false);
+    if (result.success) return;
+
+    errorHandler(result.error, req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      error: "Validation error",
+      details: result.error.issues,
+    });
+    expect(res.err).toBeUndefined();
+  });
+
+  it("maps a ZodError thrown by another zod copy to 400, not 500", () => {
+    const req = makeReq();
+    const res = makeRes() as any;
+    const next = vi.fn() as unknown as NextFunction;
+    const foreign = new Error("validation failed");
+    foreign.name = "ZodError";
+    const issues = [
+      { code: "invalid_type", path: ["payload", "prompt"], message: "Required" },
+    ];
+    (foreign as unknown as { issues: unknown[] }).issues = issues;
+
+    errorHandler(foreign, req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      error: "Validation error",
+      details: issues,
+    });
+    expect(res.err).toBeUndefined();
   });
 
   it("attaches HttpError instances for 500 responses", () => {
