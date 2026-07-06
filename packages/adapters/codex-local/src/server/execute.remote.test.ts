@@ -262,6 +262,8 @@ describe("codex remote execution", () => {
     expect(call?.[2]).toEqual([
       "exec",
       "--json",
+      "-c",
+      "sandbox_workspace_write.network_access=true",
       "-",
     ]);
   });
@@ -333,6 +335,8 @@ describe("codex remote execution", () => {
     expect(call?.[2]).toEqual([
       "exec",
       "--json",
+      "-c",
+      "sandbox_workspace_write.network_access=true",
       "resume",
       "session-123",
       "-",
@@ -412,6 +416,8 @@ describe("codex remote execution", () => {
     expect(call?.[2]).toEqual([
       "exec",
       "--json",
+      "-c",
+      "sandbox_workspace_write.network_access=true",
       "resume",
       "session-123",
       "-",
