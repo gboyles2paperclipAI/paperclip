@@ -3753,6 +3753,8 @@ export function issueRoutes(
         originKind: issue.originKind,
         originId: issue.originId,
         updatedAt: issue.updatedAt,
+        executionPolicy: issue.executionPolicy,
+        executionState: issue.executionState,
       },
       ancestors: ancestors.map((ancestor) => ({
         id: ancestor.id,

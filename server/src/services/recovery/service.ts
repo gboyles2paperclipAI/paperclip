@@ -3122,6 +3122,48 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup; o
         continue;
       }
 
+      if (issue.status === "in_review") {
+        const executionState = parseObject(issue.executionState);
+        const hasReviewParticipant = Boolean(readNonEmptyString(executionState.currentParticipant));
+        if (hasReviewParticipant) {
+          result.skipped += 1;
+          continue;
+        }
+
+        if (issue.assigneeUserId) {
+          result.skipped += 1;
+          continue;
+        }
+
+        if (issue.monitorNextCheckAt && issue.monitorNextCheckAt.getTime() > Date.now()) {
+          result.skipped += 1;
+          continue;
+        }
+
+        const hasPendingInteraction = await db
+          .select({ id: issueThreadInteractions.id })
+          .from(issueThreadInteractions)
+          .where(
+            and(
+              eq(issueThreadInteractions.companyId, issue.companyId),
+              eq(issueThreadInteractions.issueId, issue.id),
+              eq(issueThreadInteractions.status, "pending"),
+            ),
+          )
+          .limit(1)
+          .then((rows) => Boolean(rows[0]));
+        if (hasPendingInteraction) {
+          result.skipped += 1;
+          continue;
+        }
+      }
+
+      // Suppress continuation wakes when a future scheduled monitor is the valid liveness path.
+      if (issue.status === "in_progress" && issue.monitorNextCheckAt && issue.monitorNextCheckAt.getTime() > Date.now()) {
+        result.skipped += 1;
+        continue;
+      }
+
       if (await hasActiveExecutionPath(
         issue.companyId,
         issue.id,

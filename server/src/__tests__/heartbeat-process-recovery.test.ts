@@ -4521,4 +4521,33 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
     expect(issue?.status).toBe("blocked");
   });
+
+  // FUL-15274 regression: suppress issue_continuation_needed for in_progress issues with a future monitor
+  it("skips in_progress issue with a future monitorNextCheckAt and enqueues no continuation wake", async () => {
+    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "failed",
+    });
+
+    // Set monitorNextCheckAt 7 days in the future
+    const futureMonitor = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await db.update(issues).set({ monitorNextCheckAt: futureMonitor }).where(eq(issues.id, issueId));
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    expect(result.continuationRequeued).toBe(0);
+
+    const wakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.agentId, agentId),
+          eq(agentWakeupRequests.reason, "issue_continuation_needed"),
+        ),
+      );
+    expect(wakeups).toHaveLength(0);
+  });
 });

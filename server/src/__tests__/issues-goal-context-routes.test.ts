@@ -390,4 +390,22 @@ describe.sequential("issue goal context routes", () => {
       ],
     }));
   });
+
+  // FUL-15274 regression: executionPolicy and executionState must be included in heartbeat-context
+  it("includes executionPolicy and executionState in GET /issues/:id/heartbeat-context", async () => {
+    const monitor = { nextCheckAt: "2026-07-12T00:00:00.000Z" };
+    mockIssueService.getById.mockResolvedValue({
+      ...legacyProjectLinkedIssue,
+      executionPolicy: { monitor },
+      executionState: { status: "idle" },
+    });
+
+    const res = await request(createApp()).get(
+      "/api/issues/11111111-1111-4111-8111-111111111111/heartbeat-context",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.issue.executionPolicy).toEqual(expect.objectContaining({ monitor }));
+    expect(res.body.issue.executionState).toEqual(expect.objectContaining({ status: "idle" }));
+  });
 });
