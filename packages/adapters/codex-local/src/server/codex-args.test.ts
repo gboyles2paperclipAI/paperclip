@@ -126,4 +126,39 @@ describe("buildCodexExecArgs", () => {
       "-",
     ]);
   });
+
+  it("enables workspace-write network access when requested", () => {
+    const result = buildCodexExecArgs(
+      {
+        model: "gpt-5.5",
+      },
+      { enableNetworkAccess: true },
+    );
+
+    expect(result.args).toEqual([
+      "exec",
+      "--json",
+      "-c",
+      "sandbox_workspace_write.network_access=true",
+      "--model",
+      "gpt-5.5",
+      "-",
+    ]);
+  });
+
+  it("does not add workspace-write network access when bypassing the sandbox", () => {
+    const result = buildCodexExecArgs(
+      {
+        dangerouslyBypassSandbox: true,
+      },
+      { enableNetworkAccess: true },
+    );
+
+    expect(result.args).toEqual([
+      "exec",
+      "--json",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "-",
+    ]);
+  });
 });
