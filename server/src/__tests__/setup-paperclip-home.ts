@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { afterAll } from "vitest";
 
 // Server tests exercise heartbeat workspace provisioning, which creates
 // per-agent-id directories under the Paperclip instance root
@@ -14,13 +15,15 @@ if (!process.env.PAPERCLIP_HOME?.trim()) {
   try {
     const testHome = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-server-tests-"));
     process.env.PAPERCLIP_HOME = testHome;
-    process.once("exit", () => {
+    const cleanup = () => {
       try {
         fs.rmSync(testHome, { recursive: true, force: true });
       } catch {
         // Best-effort cleanup; the OS temp dir is reaped eventually anyway.
       }
-    });
+    };
+    afterAll(cleanup);
+    process.once("exit", cleanup);
   } catch (err) {
     // If the temp dir cannot be created (e.g. tmpfs over quota), fall back to
     // the previous behavior instead of failing every test at setup.
