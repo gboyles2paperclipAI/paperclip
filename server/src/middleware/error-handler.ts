@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
-import { ZodError } from "zod";
 import { HttpError } from "../errors.js";
+import { isZodValidationError } from "./validate.js";
 import { trackErrorHandlerCrash } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { COMPANY_IMPORT_API_PATH } from "../routes/company-import-paths.js";
@@ -61,8 +61,8 @@ export function errorHandler(
     return;
   }
 
-  if (err instanceof ZodError) {
-    res.status(400).json({ error: "Validation error", details: err.errors });
+  if (isZodValidationError(err)) {
+    res.status(400).json({ error: "Validation error", details: err.issues });
     return;
   }
 
