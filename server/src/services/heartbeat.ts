@@ -4718,6 +4718,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .then((rows) => rows[0] ?? null);
   }
 
+  async function hasRun(runId: string) {
+    return db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows.length > 0);
+  }
+
   async function recordCurrentHeartbeatRunRuntimeProgress(
     run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId" | "agentId" | "status" | "contextSnapshot">,
     update: RuntimeStatusUpdate,
@@ -7092,6 +7100,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const issueId = readNonEmptyString(contextSnapshot.issueId);
     if (!issueId) return null;
     try {
+      const [runStillExists, agentStillExists] = await Promise.all([
+        hasRun(run.id),
+        getAgent(agent.id).then((row) => row !== null),
+      ]);
+      if (!runStillExists || !agentStillExists) {
+        logger.info(
+          { runId: run.id, issueId, agentId: agent.id, runStillExists, agentStillExists },
+          "skipping issue continuation summary refresh because the owning run or agent was removed",
+        );
+        return null;
+      }
       return await refreshIssueContinuationSummary({
         db,
         issueId,
@@ -9809,7 +9828,26 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     session: { legacySessionId: string | null },
     normalizedUsage?: UsageTotals | null,
   ) {
-    await ensureRuntimeState(agent);
+    const currentAgent = await getAgent(agent.id);
+    if (!currentAgent) {
+      logger.info(
+        { agentId: agent.id, runId: run.id },
+        "skipping runtime state update because the agent was removed",
+      );
+      return;
+    }
+    try {
+      await ensureRuntimeState(currentAgent);
+    } catch (err) {
+      if (!await getAgent(agent.id)) {
+        logger.info(
+          { agentId: agent.id, runId: run.id },
+          "skipping runtime state update because the agent was removed during runtime state creation",
+        );
+        return;
+      }
+      throw err;
+    }
     const usage = normalizedUsage ?? normalizeUsageTotals(result.usage);
     const inputTokens = usage?.inputTokens ?? 0;
     const outputTokens = usage?.outputTokens ?? 0;

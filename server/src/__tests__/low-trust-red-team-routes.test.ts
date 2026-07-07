@@ -998,6 +998,14 @@ describeEmbeddedPostgres("low-trust red-team HTTP route regression suite", () =>
           .then((rows) => rows[0]?.status ?? null);
         return status === "succeeded" || status === "failed" || status === "cancelled";
       }, 30_000);
+      await waitFor(async () => {
+        const state = await db
+          .select({ lastRunId: agentRuntimeState.lastRunId })
+          .from(agentRuntimeState)
+          .where(eq(agentRuntimeState.agentId, fixture.agents.standard.id))
+          .then((rows) => rows[0] ?? null);
+        return state?.lastRunId === run!.id;
+      }, 30_000);
     } finally {
       gateway.releaseFirstWait();
       await gateway.close();

@@ -675,6 +675,36 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     expect(stored?.createdByRunId).toBeNull();
   });
 
+  it("stores null createdByRunId for stale UUID comment run ids", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Stale comment run id guard",
+      status: "todo",
+    });
+
+    const comment = await svc.addComment(issueId, "stale uuid run id", {
+      userId: "local-board",
+      runId: randomUUID(),
+    });
+
+    const [stored] = await db
+      .select({ createdByRunId: issueComments.createdByRunId })
+      .from(issueComments)
+      .where(eq(issueComments.id, comment.id));
+    expect(stored?.createdByRunId).toBeNull();
+  });
+
   it("combines participation filtering with search", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
