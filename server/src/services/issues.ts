@@ -41,6 +41,7 @@ import type {
   IssueCommentDerivedAuthorSource,
   IssueCommentMetadata,
   IssueCommentPresentation,
+  IssueThreadInteractionResult,
   IssueBlockerAttention,
   IssueBlockedInboxAttention,
   IssueBlockedInboxIssueRef,
@@ -154,6 +155,187 @@ function applyStatusSideEffects(
     patch.cancelledAt = new Date();
   }
   return patch;
+}
+
+function isTerminalIssueStatus(status: string | null | undefined): status is "done" | "cancelled" {
+  return status === "done" || status === "cancelled";
+}
+
+function buildTerminalPromptClosureReason(issue: Pick<typeof issues.$inferSelect, "id" | "identifier">, status: "done" | "cancelled") {
+  const issueLabel = issue.identifier ?? issue.id;
+  return `Linked issue ${issueLabel} was marked ${status}.`;
+}
+
+function buildTerminalInteractionResult(
+  interaction: Pick<typeof issueThreadInteractions.$inferSelect, "kind">,
+  reason: string,
+): IssueThreadInteractionResult {
+  switch (interaction.kind) {
+    case "ask_user_questions":
+      return {
+        version: 1,
+        answers: [],
+        cancelled: true,
+        cancellationReason: reason,
+        summaryMarkdown: null,
+      };
+    case "suggest_tasks":
+      return {
+        version: 1,
+        rejectionReason: reason,
+      };
+    case "request_confirmation":
+    case "request_checkbox_confirmation":
+    default:
+      return {
+        version: 1,
+        outcome: "rejected",
+        reason,
+      };
+  }
+}
+
+async function closePendingPromptsForTerminalIssue(
+  tx: any,
+  existing: typeof issues.$inferSelect,
+  updated: typeof issues.$inferSelect,
+  terminalStatus: "done" | "cancelled",
+) {
+  const now = new Date();
+  const reason = buildTerminalPromptClosureReason(updated, terminalStatus);
+
+  const pendingInteractions = await tx
+    .select({
+      id: issueThreadInteractions.id,
+      kind: issueThreadInteractions.kind,
+    })
+    .from(issueThreadInteractions)
+    .where(and(
+      eq(issueThreadInteractions.companyId, updated.companyId),
+      eq(issueThreadInteractions.issueId, updated.id),
+      eq(issueThreadInteractions.status, "pending"),
+    ));
+
+  for (const interaction of pendingInteractions) {
+    await tx
+      .update(issueThreadInteractions)
+      .set({
+        status: "cancelled",
+        result: buildTerminalInteractionResult(interaction, reason),
+        resolvedByAgentId: null,
+        resolvedByUserId: null,
+        resolutionAudit: {
+          method: "api_automated",
+          requestId: null,
+          resolvedAt: now,
+        },
+        resolvedAt: now,
+        updatedAt: now,
+      })
+      .where(and(
+        eq(issueThreadInteractions.id, interaction.id),
+        eq(issueThreadInteractions.status, "pending"),
+      ));
+  }
+
+  const pendingApprovalLinks: Array<{ approvalId: string }> = await tx
+    .select({
+      approvalId: approvals.id,
+    })
+    .from(issueApprovals)
+    .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+    .where(and(
+      eq(issueApprovals.companyId, updated.companyId),
+      eq(issueApprovals.issueId, updated.id),
+      eq(approvals.status, "pending"),
+    ));
+  const pendingApprovalIds = [...new Set(pendingApprovalLinks.map((row) => row.approvalId))];
+  if (pendingApprovalIds.length === 0) return;
+
+  const linkedIssuesByApprovalId = new Map<string, Array<{
+    issueId: string;
+    identifier: string | null;
+    status: string;
+  }>>();
+  const linkedIssueRows: Array<{
+    approvalId: string;
+    issueId: string;
+    identifier: string | null;
+    status: string;
+  }> = await tx
+    .select({
+      approvalId: issueApprovals.approvalId,
+      issueId: issues.id,
+      identifier: issues.identifier,
+      status: issues.status,
+    })
+    .from(issueApprovals)
+    .innerJoin(issues, eq(issueApprovals.issueId, issues.id))
+    .where(and(
+      eq(issueApprovals.companyId, updated.companyId),
+      inArray(issueApprovals.approvalId, pendingApprovalIds),
+    ));
+
+  for (const row of linkedIssueRows) {
+    const list = linkedIssuesByApprovalId.get(row.approvalId) ?? [];
+    list.push({
+      issueId: row.issueId,
+      identifier: row.issueId === updated.id ? updated.identifier : row.identifier,
+      status: row.issueId === updated.id ? terminalStatus : row.status,
+    });
+    linkedIssuesByApprovalId.set(row.approvalId, list);
+  }
+
+  const cancellableApprovalIds = pendingApprovalIds.filter((approvalId) => {
+    const linkedIssues = linkedIssuesByApprovalId.get(approvalId) ?? [];
+    return linkedIssues.length > 0 && linkedIssues.every((issue) => isTerminalIssueStatus(issue.status));
+  });
+  if (cancellableApprovalIds.length === 0) return;
+
+  const cancelledApprovals = await tx
+    .update(approvals)
+    .set({
+      status: "cancelled",
+      decidedByUserId: null,
+      decidedAt: now,
+      decisionNote: `${reason} Auto-cancelled because every linked issue is terminal.`,
+      updatedAt: now,
+    })
+    .where(and(
+      inArray(approvals.id, cancellableApprovalIds),
+      eq(approvals.status, "pending"),
+    ))
+    .returning({
+      id: approvals.id,
+      type: approvals.type,
+    });
+
+  if (cancelledApprovals.length === 0) return;
+
+  await tx.insert(activityLog).values(cancelledApprovals.map((approval: { id: string; type: string }) => {
+    const linkedIssues = linkedIssuesByApprovalId.get(approval.id) ?? [];
+    return {
+      companyId: updated.companyId,
+      actorType: "system",
+      actorId: "system",
+      action: "approval.cancelled",
+      entityType: "approval",
+      entityId: approval.id,
+      details: {
+        type: approval.type,
+        reason: "linked_issue_terminal",
+        issueId: updated.id,
+        issueIdentifier: updated.identifier,
+        previousIssueStatus: existing.status,
+        issueStatus: terminalStatus,
+        linkedIssues: linkedIssues.map((issue) => ({
+          id: issue.issueId,
+          identifier: issue.identifier,
+          status: issue.status,
+        })),
+      },
+    };
+  }));
 }
 
 function readStringFromRecord(record: unknown, key: string) {
@@ -5733,6 +5915,9 @@ export function issueService(db: Db) {
           }
         }
         const [enriched] = await withIssueLabels(tx, [updated]);
+        if (isTerminalIssueStatus(issueData.status)) {
+          await closePendingPromptsForTerminalIssue(tx, existing, updated, issueData.status);
+        }
         if (
           (issueData.status === "done" || issueData.status === "cancelled") &&
           existing.status !== issueData.status
