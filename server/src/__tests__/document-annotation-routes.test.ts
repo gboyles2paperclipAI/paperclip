@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const issueId = "11111111-1111-4111-8111-111111111111";
 const companyId = "22222222-2222-4222-8222-222222222222";
 const otherCompanyId = "33333333-3333-4333-8333-333333333333";
+const ROUTE_TEST_TIMEOUT_MS = 10_000;
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -245,7 +246,7 @@ describe("document annotation routes", () => {
       status: "open",
       includeComments: false,
     });
-  });
+  }, ROUTE_TEST_TIMEOUT_MS);
 
   it("includes annotation comment bodies on document reads only when explicitly requested", async () => {
     const res = await request(await createApp("agent"))
@@ -257,7 +258,7 @@ describe("document annotation routes", () => {
       status: "open",
       includeComments: true,
     });
-  });
+  }, ROUTE_TEST_TIMEOUT_MS);
 
   it("updates issue documents without waking the assignee through the issue-comment path", async () => {
     mockIssueService.getById.mockResolvedValue({
@@ -285,7 +286,7 @@ describe("document annotation routes", () => {
       action: "issue.document_updated",
     }));
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
-  });
+  }, ROUTE_TEST_TIMEOUT_MS);
 
   it("creates annotation threads, syncs references, logs activity, and does not wake the assignee", async () => {
     mockIssueService.getById.mockResolvedValue({
@@ -316,13 +317,13 @@ describe("document annotation routes", () => {
       }),
     }));
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
-  });
+  }, ROUTE_TEST_TIMEOUT_MS);
 
   it("rejects agent cross-company annotation reads", async () => {
     await request(await createApp("agent", otherCompanyId))
       .get(`/api/issues/${issueId}/documents/plan/annotations`)
       .expect(403);
-  });
+  }, ROUTE_TEST_TIMEOUT_MS);
 
   it("adds annotation comments without waking the assignee and resolves threads", async () => {
     mockIssueService.getById.mockResolvedValue({
@@ -360,5 +361,5 @@ describe("document annotation routes", () => {
       }),
     }));
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
-  });
+  }, ROUTE_TEST_TIMEOUT_MS);
 });

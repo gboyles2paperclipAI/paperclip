@@ -48,6 +48,17 @@ describe("issue validators", () => {
     expect(parsed.comment).toBe("Done\n\n- Verified the route");
   });
 
+  it("accepts object-shaped issue update comments from generated clients", () => {
+    const parsed = updateIssueSchema.parse({
+      status: "done",
+      comment: {
+        body: "Done\\n\\n- Verified the route",
+      },
+    });
+
+    expect(parsed.comment).toBe("Done\n\n- Verified the route");
+  });
+
   it("allows false-positive recovery resolutions to atomically restore the source issue status", () => {
     expect(
       resolveIssueRecoveryActionSchema.parse({

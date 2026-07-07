@@ -495,6 +495,21 @@ function normalizeHeartbeatRunId(runId: string | null | undefined) {
   return isUuidLike(trimmed) ? trimmed : null;
 }
 
+async function resolveExistingHeartbeatRunId(
+  dbOrTx: any,
+  companyId: string,
+  runId: string | null | undefined,
+) {
+  const normalizedRunId = normalizeHeartbeatRunId(runId);
+  if (!normalizedRunId) return null;
+  const existing = await dbOrTx
+    .select({ id: heartbeatRuns.id })
+    .from(heartbeatRuns)
+    .where(and(eq(heartbeatRuns.id, normalizedRunId), eq(heartbeatRuns.companyId, companyId)))
+    .then((rows: Array<{ id: string }>) => rows[0] ?? null);
+  return existing?.id ?? null;
+}
+
 export const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
 const ISSUE_LIST_DESCRIPTION_MAX_CHARS = 1200;
 const ISSUE_LIST_DESCRIPTION_MAX_BYTES = ISSUE_LIST_DESCRIPTION_MAX_CHARS * 4;
@@ -6557,6 +6572,7 @@ export function issueService(db: Db) {
       const presentation = issueCommentPresentationSchema.nullable().parse(options?.presentation ?? null);
       const metadata = issueCommentMetadataSchema.nullable().parse(options?.metadata ?? null);
       const createdAt = options?.createdAt ? new Date(options.createdAt) : null;
+      const createdByRunId = await resolveExistingHeartbeatRunId(dbOrTx, issue.companyId, actor.runId);
       const [comment] = await dbOrTx
         .insert(issueComments)
         .values({
@@ -6565,7 +6581,7 @@ export function issueService(db: Db) {
           authorAgentId: actor.agentId ?? null,
           authorUserId: actor.userId ?? null,
           authorType,
-          createdByRunId: normalizeHeartbeatRunId(actor.runId),
+          createdByRunId,
           body: redactedBody,
           presentation,
           metadata,

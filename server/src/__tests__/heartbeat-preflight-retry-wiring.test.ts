@@ -125,6 +125,37 @@ async function waitForHeartbeatIdle(
   }
 }
 
+function getPostgresErrorCode(err: unknown): string | null {
+  if (!err || typeof err !== "object") return null;
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === "string") return code;
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause && typeof cause === "object") {
+    const causeCode = (cause as { code?: unknown }).code;
+    if (typeof causeCode === "string") return causeCode;
+  }
+  return null;
+}
+
+async function truncateCompaniesWithDeadlockRetry(
+  db: ReturnType<typeof createDb>,
+  maxAttempts = 4,
+) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await db.execute(sql.raw('TRUNCATE TABLE "companies" CASCADE'));
+      return;
+    } catch (err) {
+      lastError = err;
+      if (getPostgresErrorCode(err) !== "40P01" || attempt === maxAttempts) break;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 100));
+      await waitForHeartbeatIdle(db);
+    }
+  }
+  throw lastError;
+}
+
 describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)", () => {
   let db!: ReturnType<typeof createDb>;
   let heartbeat!: ReturnType<typeof heartbeatService>;
@@ -150,7 +181,7 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
     // executeRun starts follow-up work asynchronously; wait for it to leave the
     // run/lease tables idle before taking AccessExclusive locks for cleanup.
     await waitForHeartbeatIdle(db);
-    await db.execute(sql.raw('TRUNCATE TABLE "companies" CASCADE'));
+    await truncateCompaniesWithDeadlockRetry(db);
   });
 
   afterAll(async () => {

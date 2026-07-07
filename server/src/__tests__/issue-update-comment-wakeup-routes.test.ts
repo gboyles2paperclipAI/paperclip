@@ -292,7 +292,7 @@ describe("issue update comment wakeups", () => {
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
   });
 
-  it("includes the new comment in assignment wakes from issue updates", async () => {
+  it("includes object-shaped update comments in assignment wakes", async () => {
     const existing = makeIssue();
     const updated = makeIssue({
       assigneeAgentId: ASSIGNEE_AGENT_ID,
@@ -312,10 +312,17 @@ describe("issue update comment wakeups", () => {
       .send({
         assigneeAgentId: ASSIGNEE_AGENT_ID,
         assigneeUserId: null,
-        comment: "write the whole thing",
+        comment: { body: "write the whole thing" },
       });
 
     expect(res.status).toBe(200);
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      existing.id,
+      "write the whole thing",
+      expect.objectContaining({ userId: "local-board" }),
+      undefined,
+      expect.any(Object),
+    );
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       ASSIGNEE_AGENT_ID,

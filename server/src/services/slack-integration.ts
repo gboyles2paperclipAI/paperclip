@@ -812,13 +812,13 @@ export function slackIntegrationService(
     handleInteraction: async (interaction: SlackInteractionContext, requestHash: string) => {
       const existing = await approvals.getById(interaction.approvalId);
       if (!existing) throw unprocessable("Approval not found");
-      if (!["pending", "revision_requested"].includes(existing.status)) {
-        throw unprocessable("Approval is not pending");
-      }
       const paperclipUserId = await mapSlackUserToPaperclipUser(interaction.userId, db, existing.companyId);
       if (!paperclipUserId) throw forbidden("Slack user is not mapped to a Paperclip board user");
       await assertAuthorizedUser(existing.companyId, paperclipUserId);
       await assertNotReplay(existing.companyId, existing.id, requestHash);
+      if (!["pending", "revision_requested"].includes(existing.status)) {
+        throw unprocessable("Approval is not pending");
+      }
 
       const decisionNote = `Slack decision by ${interaction.userId}`;
       const result = interaction.action === "approve"
