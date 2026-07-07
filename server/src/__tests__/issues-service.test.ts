@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 import {
   activityLog,
   agents,
+  approvals,
   companies,
   createDb,
   documentRevisions,
@@ -14,6 +15,7 @@ import {
   goals,
   heartbeatRuns,
   instanceSettings,
+  issueApprovals,
   issueComments,
   issueInboxArchives,
   issueDocuments,
@@ -50,6 +52,164 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+describeEmbeddedPostgres("issueService terminal prompt cleanup", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  let issueCounter = 0;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-terminal-prompts-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(issueApprovals);
+    await db.delete(issueThreadInteractions);
+    await db.delete(activityLog);
+    await db.delete(approvals);
+    await db.delete(issues);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function seedCompany() {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Terminal Prompt Co",
+      issuePrefix: "FUL",
+      requireBoardApprovalForNewAgents: false,
+    });
+    return companyId;
+  }
+
+  async function seedIssue(companyId: string, title: string, status = "todo") {
+    const issueId = randomUUID();
+    issueCounter += 1;
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title,
+      status,
+      priority: "medium",
+      identifier: `FUL-${issueCounter}`,
+      issueNumber: issueCounter,
+    });
+    return issueId;
+  }
+
+  it("cancels pending board approvals and confirmation prompts when an issue is marked done", async () => {
+    const companyId = await seedCompany();
+    const issueId = await seedIssue(companyId, "Close stale prompts");
+    const [approval] = await db.insert(approvals).values({
+      companyId,
+      type: "request_board_approval",
+      status: "pending",
+      payload: {
+        title: "Approve one-off action",
+        summary: "Approval should be cancelled when the linked task closes.",
+      },
+    }).returning();
+    await db.insert(issueApprovals).values({
+      companyId,
+      issueId,
+      approvalId: approval.id,
+    });
+    const [interaction] = await db.insert(issueThreadInteractions).values({
+      companyId,
+      issueId,
+      kind: "request_confirmation",
+      status: "pending",
+      continuationPolicy: "wake_assignee",
+      title: "Approve action",
+      payload: {
+        version: 1,
+        prompt: "Approve action?",
+      },
+    }).returning();
+
+    await svc.update(issueId, { status: "done" });
+
+    const updatedApproval = await db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.id, approval.id))
+      .then((rows) => rows[0]);
+    expect(updatedApproval?.status).toBe("cancelled");
+    expect(updatedApproval?.decisionNote).toContain("was marked done");
+    expect(updatedApproval?.decidedByUserId).toBeNull();
+    expect(updatedApproval?.decidedAt).toBeInstanceOf(Date);
+
+    const updatedInteraction = await db
+      .select()
+      .from(issueThreadInteractions)
+      .where(eq(issueThreadInteractions.id, interaction.id))
+      .then((rows) => rows[0]);
+    expect(updatedInteraction?.status).toBe("cancelled");
+    expect(updatedInteraction?.result).toEqual({
+      version: 1,
+      outcome: "rejected",
+      reason: expect.stringContaining("was marked done"),
+    });
+    expect(updatedInteraction?.resolvedByAgentId).toBeNull();
+    expect(updatedInteraction?.resolvedByUserId).toBeNull();
+    expect(updatedInteraction?.resolutionAudit).toMatchObject({ method: "api_automated", requestId: null });
+    expect(updatedInteraction?.resolvedAt).toBeInstanceOf(Date);
+
+    const activity = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.entityId, approval.id));
+    expect(activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "approval.cancelled",
+        actorType: "system",
+        actorId: "system",
+      }),
+    ]));
+  });
+
+  it("waits to cancel multi-issue approvals until all linked issues are terminal", async () => {
+    const companyId = await seedCompany();
+    const firstIssueId = await seedIssue(companyId, "First linked issue");
+    const secondIssueId = await seedIssue(companyId, "Second linked issue");
+    const [approval] = await db.insert(approvals).values({
+      companyId,
+      type: "request_board_approval",
+      status: "pending",
+      payload: { title: "Approve multi-issue action" },
+    }).returning();
+    await db.insert(issueApprovals).values([
+      { companyId, issueId: firstIssueId, approvalId: approval.id },
+      { companyId, issueId: secondIssueId, approvalId: approval.id },
+    ]);
+
+    await svc.update(firstIssueId, { status: "done" });
+
+    const stillPending = await db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.id, approval.id))
+      .then((rows) => rows[0]);
+    expect(stillPending?.status).toBe("pending");
+
+    await svc.update(secondIssueId, { status: "cancelled" });
+
+    const cancelled = await db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.id, approval.id))
+      .then((rows) => rows[0]);
+    expect(cancelled?.status).toBe("cancelled");
+    expect(cancelled?.decisionNote).toContain("was marked cancelled");
+  });
+});
 
 describe("issue list limit helpers", () => {
   it("clamps untrusted issue-list limits to the server maximum", () => {
