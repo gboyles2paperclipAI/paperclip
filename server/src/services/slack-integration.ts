@@ -11,6 +11,7 @@ import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 
 const SLACK_VERSION = "v0";
 const MAX_SLACK_SKEW_SECONDS = 60 * 5;
+const BLOCKED_ACTIVITY_NOTIFICATION_DEDUPE_MS = 30 * 60 * 1000;
 const APPROVAL_ACTIONS = new Set(["approve", "reject", "needs_changes"]);
 const SECRET_TEXT_RE =
   /\b(?:password|passcode|mfa|2fa|otp|recovery key|api key|secret|token|authorization|bearer|credit card|card number|cvv|ssn)\b/i;
@@ -30,6 +31,7 @@ const NOISE_PAYLOAD_KEYS = new Set([
   "upload",
   "uploads",
 ]);
+const blockedActivityNotificationSeenAt = new Map<string, number>();
 
 export type SlackApprovalAction = "approve" | "reject" | "needs_changes";
 
@@ -336,6 +338,47 @@ function compactAgent(value: unknown): string | null {
   return raw.length > 12 ? `agent ${compactId(raw)}` : raw;
 }
 
+function actionRequiredLine(required: boolean, reason: string): string {
+  return `Action required: ${required ? "yes" : "no"} - ${reason}`;
+}
+
+function blockedActivityDedupeKey(input: {
+  companyId?: string | null;
+  entityId: string;
+  details: Record<string, unknown>;
+  summary: string;
+}): string {
+  const reason =
+    stringValue(input.details.blocker)
+    ?? stringValue(input.details.reason)
+    ?? stringValue(input.details.summary)
+    ?? stringValue(input.details.title)
+    ?? input.summary;
+  return [
+    input.companyId ?? "global",
+    input.entityId,
+    reason.toLowerCase().replace(/\s+/g, " ").slice(0, 240),
+  ].join(":");
+}
+
+function hasRecentBlockedActivityNotification(key: string, nowMs: number): boolean {
+  const previous = blockedActivityNotificationSeenAt.get(key);
+  if (previous !== undefined && nowMs - previous < BLOCKED_ACTIVITY_NOTIFICATION_DEDUPE_MS) {
+    return true;
+  }
+  blockedActivityNotificationSeenAt.set(key, nowMs);
+  for (const [seenKey, seenAt] of blockedActivityNotificationSeenAt) {
+    if (nowMs - seenAt >= BLOCKED_ACTIVITY_NOTIFICATION_DEDUPE_MS) {
+      blockedActivityNotificationSeenAt.delete(seenKey);
+    }
+  }
+  return false;
+}
+
+export function resetSlackActivityNotificationDedupeForTests() {
+  blockedActivityNotificationSeenAt.clear();
+}
+
 function buildPayloadFields(payload: Record<string, unknown>): Array<Record<string, unknown>> {
   const redacted = redactEventPayload(payload) ?? {};
   const preferredKeys = [
@@ -392,6 +435,14 @@ export function buildSlackApprovalBlocks(input: {
   const fields = [
     {
       type: "mrkdwn",
+      text: `*Action required*\nyes - approve, reject, or request changes`,
+    },
+    {
+      type: "mrkdwn",
+      text: `*Owner*\nBoard/operator`,
+    },
+    {
+      type: "mrkdwn",
       text: `*Approval ID*\n\`${input.approvalId}\``,
     },
     {
@@ -436,7 +487,7 @@ export function buildSlackApprovalBlocks(input: {
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `*Approval needed*\n${truncateSlackText(title, 240) ?? "Open Paperclip for details."}`,
+        text: `*[ACTION REQUIRED] Approval needed*\n${actionRequiredLine(true, "approve, reject, or request changes")}\n${truncateSlackText(title, 240) ?? "Open Paperclip for details."}`,
       },
     },
     {
@@ -456,7 +507,7 @@ export function buildSlackApprovalBlocks(input: {
       elements: [
         {
           type: "mrkdwn",
-          text: "Slack is only the approval interface. Paperclip records the decision before any agent acts.",
+          text: "Next update: Paperclip records the button decision and wakes the requester when the approval is applied.",
         },
       ],
     },
@@ -528,9 +579,15 @@ function buildActivityNotificationBlocks(input: {
   entityType: string;
   entityId: string;
   details: Record<string, unknown>;
+  actionRequired: string;
+  owner: string;
+  nextUpdate: string;
 }) {
   const fields: Array<Record<string, unknown>> = [
+    { type: "mrkdwn", text: `*Action required*\n${input.actionRequired.replace(/^Action required:\s*/i, "")}` },
+    { type: "mrkdwn", text: `*Owner*\n${input.owner}` },
     { type: "mrkdwn", text: `*Entity*\n${humanizeKey(input.entityType)} ${compactId(input.entityId)}` },
+    { type: "mrkdwn", text: `*Next update*\n${input.nextUpdate}` },
   ];
   for (const [key, value] of Object.entries(redactEventPayload(input.details) ?? {})) {
     if (fields.length >= 7) break;
@@ -541,7 +598,7 @@ function buildActivityNotificationBlocks(input: {
   return [
     {
       type: "section",
-      text: { type: "mrkdwn", text: `*${input.title}*\n${input.summary}` },
+      text: { type: "mrkdwn", text: `*${input.title}*\n${input.actionRequired}\n${input.summary}` },
     },
     {
       type: "section",
@@ -568,6 +625,14 @@ function buildIssueInteractionNotificationBlocks(input: {
   const fields: Array<Record<string, unknown>> = [
     {
       type: "mrkdwn",
+      text: `*Action required*\nyes - review the decision card`,
+    },
+    {
+      type: "mrkdwn",
+      text: `*Owner*\nBoard/operator`,
+    },
+    {
+      type: "mrkdwn",
       text: `*Issue*\n${issueIdentifier ? `${issueIdentifier}${issueTitle ? ` - ${issueTitle}` : ""}` : compactId(input.entityId)}`,
     },
     {
@@ -584,7 +649,10 @@ function buildIssueInteractionNotificationBlocks(input: {
   const blocks: Array<Record<string, unknown>> = [
     {
       type: "section",
-      text: { type: "mrkdwn", text: `*${input.title}*\n${cardTitle ?? "Open Paperclip to review this request."}` },
+      text: {
+        type: "mrkdwn",
+        text: `*[ACTION REQUIRED] ${input.title}*\n${actionRequiredLine(true, "review the Paperclip decision card")}\n${cardTitle ?? "Open Paperclip to review this request."}`,
+      },
     },
     {
       type: "section",
@@ -620,6 +688,7 @@ export function maybeNotifySlackForActivity(input: {
   entityType: string;
   entityId: string;
   details: Record<string, unknown> | null;
+  nowMs?: number;
 }) {
   const details = input.details ?? {};
   const textForAction = (): {
@@ -641,7 +710,7 @@ export function maybeNotifySlackForActivity(input: {
       return {
         channel: process.env.SLACK_APPROVALS_CHANNEL_ID,
         channelKey: "SLACK_APPROVALS_CHANNEL_ID",
-        text: `${title}: ${summary}`,
+        text: `[ACTION REQUIRED] ${title}: ${summary}`,
         blocks: buildIssueInteractionNotificationBlocks({
           title,
           summary,
@@ -652,8 +721,15 @@ export function maybeNotifySlackForActivity(input: {
       };
     }
     if (input.action === "issue.updated" && details.status === "blocked") {
-      const title = "Agent blocked";
+      const title = "[ACTION REQUIRED] Agent blocked";
       const summary = payloadText(details, ["title", "summary", "blocker", "reason"]) ?? `Issue ${compactId(input.entityId)} is blocked.`;
+      const dedupeKey = blockedActivityDedupeKey({
+        companyId: input.companyId,
+        entityId: input.entityId,
+        details,
+        summary,
+      });
+      if (hasRecentBlockedActivityNotification(dedupeKey, input.nowMs ?? Date.now())) return null;
       return {
         channel: process.env.SLACK_ALERTS_CHANNEL_ID,
         channelKey: "SLACK_ALERTS_CHANNEL_ID",
@@ -664,11 +740,14 @@ export function maybeNotifySlackForActivity(input: {
           entityType: input.entityType,
           entityId: input.entityId,
           details,
+          actionRequired: actionRequiredLine(true, "clear the blocker or assign the next owner"),
+          owner: "Current assignee/manager",
+          nextUpdate: "When the issue leaves blocked or the blocker reason changes",
         }),
       };
     }
     if (input.action.includes("escalation") || String(details.type ?? "").includes("escalation")) {
-      const title = String(details.type ?? "").includes("security") ? "Security escalation" : "Escalation requested";
+      const title = String(details.type ?? "").includes("security") ? "[ACTION REQUIRED] Security escalation" : "[ACTION REQUIRED] Escalation requested";
       const summary = payloadText(details, ["title", "summary", "reason", "scope"]) ?? `${humanizeKey(input.entityType)} ${compactId(input.entityId)} needs attention.`;
       return {
         channel: process.env.SLACK_ALERTS_CHANNEL_ID,
@@ -680,6 +759,9 @@ export function maybeNotifySlackForActivity(input: {
           entityType: input.entityType,
           entityId: input.entityId,
           details,
+          actionRequired: actionRequiredLine(true, "triage the escalation and choose the next owner"),
+          owner: "Board/operator",
+          nextUpdate: "When the escalation is accepted, reassigned, or closed",
         }),
       };
     }
@@ -799,7 +881,7 @@ export function slackIntegrationService(
         companyId: approval.companyId,
         channel: process.env.SLACK_APPROVALS_CHANNEL_ID,
         channelKey: "SLACK_APPROVALS_CHANNEL_ID",
-        text: `Paperclip approval requested: ${approval.id}`,
+        text: `[ACTION REQUIRED] Paperclip approval requested: ${approval.id}`,
         blocks: buildSlackApprovalBlocks({
           approvalId: approval.id,
           type: approval.type,
@@ -888,13 +970,13 @@ export function slackIntegrationService(
 
       await updateSlackInteractionMessage({
         responseUrl: interaction.responseUrl,
-        text: `Paperclip approval ${result.approval.status}: ${result.approval.id}`,
+        text: `[FYI - no action] Paperclip approval ${result.approval.status}: ${result.approval.id}`,
         blocks: [
           {
             type: "section",
             text: {
               type: "mrkdwn",
-              text: `*Paperclip approval ${result.approval.status}*\nApproval ID: \`${result.approval.id}\`\nDecision recorded in Paperclip.`,
+              text: `*[FYI - no action] Paperclip approval ${result.approval.status}*\n${actionRequiredLine(false, "decision recorded in Paperclip")}\nApproval ID: \`${result.approval.id}\``,
             },
           },
         ],

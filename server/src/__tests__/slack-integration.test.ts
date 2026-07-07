@@ -26,6 +26,7 @@ import {
   postSlackMessage,
   maybeNotifySlackForActivity,
   redactSlackText,
+  resetSlackActivityNotificationDedupeForTests,
   verifySlackRequestSignature,
 } from "../services/slack-integration.js";
 import { slackIntegrationRoutes } from "../routes/slack-integrations.js";
@@ -88,6 +89,16 @@ function createApp(db: ReturnType<typeof createDb>) {
 }
 
 describe("Slack integration utilities", () => {
+  afterEach(() => {
+    resetSlackActivityNotificationDedupeForTests();
+    vi.restoreAllMocks();
+    delete process.env.PAPERCLIP_PUBLIC_URL;
+    delete process.env.SLACK_ALERTS_CHANNEL_ID;
+    delete process.env.SLACK_APPROVALS_CHANNEL_ID;
+    delete process.env.SLACK_BOT_TOKEN;
+    delete process.env.SLACK_TICKETS_CHANNEL_ID;
+  });
+
   it("verifies Slack signatures over the exact raw body", () => {
     const secret = "slack-signing-secret";
     const body = "payload=%7B%22type%22%3A%22block_actions%22%7D";
@@ -152,6 +163,9 @@ describe("Slack integration utilities", () => {
 
     expect(encoded).toContain("appr-1");
     expect(encoded).toContain("Remote access request");
+    expect(encoded).toContain("[ACTION REQUIRED] Approval needed");
+    expect(encoded).toContain("Action required: yes - approve, reject, or request changes");
+    expect(encoded).toContain("Board/operator");
     expect(encoded).not.toContain("do-not-post");
     expect(encoded).not.toContain("untrusted image text");
     expect(encoded).not.toContain("1234-5678");
@@ -233,9 +247,11 @@ describe("Slack integration utilities", () => {
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"));
     expect(body.channel).toBe("CAPPROVE");
     expect(body.channel).not.toBe("CALERTS");
-    expect(body.text).toContain("Approval needed");
+    expect(body.text).toContain("[ACTION REQUIRED] Approval needed");
     const encodedBlocks = JSON.stringify(body.blocks);
     expect(encodedBlocks).toContain("FUL-14840");
+    expect(encodedBlocks).toContain("Action required: yes - review the Paperclip decision card");
+    expect(encodedBlocks).toContain("Board/operator");
     expect(encodedBlocks).toContain("Approve rollback dry run + merge PR #419");
     expect(encodedBlocks).toContain("agent adb59117...396e");
     expect(encodedBlocks).toContain("Open in Paperclip");
@@ -267,6 +283,56 @@ describe("Slack integration utilities", () => {
 
     delete process.env.SLACK_BOT_TOKEN;
     delete process.env.SLACK_APPROVALS_CHANNEL_ID;
+  });
+
+  it("dedupes repeated blocked-agent Slack notifications for the same issue and reason", async () => {
+    process.env.SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.SLACK_ALERTS_CHANNEL_ID = "CALERTS";
+    const fetchMock = vi.fn(async () => ({
+      json: async () => ({ ok: true }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const details = {
+      status: "blocked",
+      title: "Waiting for credentials",
+      reason: "Help Scout credentials missing",
+    };
+
+    maybeNotifySlackForActivity({
+      companyId: "company-1",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: "iss-1",
+      details,
+      nowMs: 1_000,
+    });
+    maybeNotifySlackForActivity({
+      companyId: "company-1",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: "iss-1",
+      details,
+      nowMs: 10_000,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"));
+    expect(body.channel).toBe("CALERTS");
+    expect(body.text).toContain("[ACTION REQUIRED] Agent blocked");
+    expect(JSON.stringify(body.blocks)).toContain("Action required: yes - clear the blocker or assign the next owner");
+
+    maybeNotifySlackForActivity({
+      companyId: "company-1",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: "iss-1",
+      details,
+      nowMs: 31 * 60 * 1_000,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("parses and identifies Slack Socket Mode interactive envelopes", () => {
