@@ -31,6 +31,11 @@ const NOISE_PAYLOAD_KEYS = new Set([
   "upload",
   "uploads",
 ]);
+
+// Process-local blocked notification dedupe is intentional for the current
+// single-process/systemd deployment. A future multi-node deployment may need
+// DB, Redis, or outbox-backed dedupe, but do not migrate this Map to storage
+// until the deployment model requires cross-process suppression.
 const blockedActivityNotificationSeenAt = new Map<string, number>();
 
 export type SlackApprovalAction = "approve" | "reject" | "needs_changes";
