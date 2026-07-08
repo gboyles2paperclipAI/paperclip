@@ -1203,6 +1203,49 @@ describe("agent issue mutation checkout ownership", () => {
     );
   });
 
+  it("does not block issue creation on task watchdog reconciliation", async () => {
+    const app = await createApp(ownerActor());
+    let releaseWatchdogReconciliation!: () => void;
+    const pendingReconciliation = new Promise<{
+      checked: number;
+      triggered: number;
+      skipped: number;
+      watchdogIssueIds: string[];
+    }>((resolve) => {
+      releaseWatchdogReconciliation = () =>
+        resolve({
+          checked: 0,
+          triggered: 0,
+          skipped: 0,
+          watchdogIssueIds: [],
+        });
+    });
+    mockTaskWatchdogService.reconcileForIssueAndAncestors.mockReturnValueOnce(pendingReconciliation);
+
+    const requestPromise = request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({ title: "Quick follow-up" });
+    const raced = await Promise.race([
+      requestPromise.then((res) => ({ kind: "response" as const, res })),
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        setTimeout(() => resolve({ kind: "timeout" }), 200);
+      }),
+    ]);
+
+    releaseWatchdogReconciliation();
+    if (raced.kind === "timeout") {
+      await requestPromise;
+    }
+
+    expect(raced.kind).toBe("response");
+    if (raced.kind === "response") {
+      expect(raced.res.status, JSON.stringify(raced.res.body)).toBe(201);
+    }
+    expect(mockTaskWatchdogService.reconcileForIssueAndAncestors).toHaveBeenCalledWith(companyId, expect.any(String), {
+      runId: ownerRunId,
+    });
+  });
+
   it("preserves explicit workspace choices on agent-created root issues", async () => {
     const app = await createApp(
       ownerActor(),
