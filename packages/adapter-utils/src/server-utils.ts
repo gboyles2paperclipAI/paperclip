@@ -1819,16 +1819,65 @@ export function refreshPaperclipWorkspaceEnvForExecution(input: {
   return shapedWorkspaceEnv;
 }
 
-export function sanitizeInheritedPaperclipEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...baseEnv };
-  for (const key of Object.keys(env)) {
-    if (!key.startsWith("PAPERCLIP_")) continue;
-    if (key === "PAPERCLIP_RUNTIME_API_URL") continue;
-    if (key === "PAPERCLIP_LISTEN_HOST") continue;
-    if (key === "PAPERCLIP_LISTEN_PORT") continue;
-    delete env[key];
+const SAFE_INHERITED_PROCESS_ENV_KEYS = new Set([
+  "CI",
+  "COLORTERM",
+  "COMSPEC",
+  "FORCE_COLOR",
+  "HOME",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "LANG",
+  "LOGNAME",
+  "NO_COLOR",
+  "NVM_DIR",
+  "PATH",
+  "PATHEXT",
+  "PWD",
+  "SHELL",
+  "SYSTEMROOT",
+  "TEMP",
+  "TERM",
+  "TMP",
+  "TMPDIR",
+  "USER",
+  "USERPROFILE",
+  "WINDIR",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_RUNTIME_DIR",
+  "XDG_STATE_HOME",
+]);
+
+const SAFE_INHERITED_PAPERCLIP_ENV_KEYS = new Set([
+  "PAPERCLIP_LISTEN_HOST",
+  "PAPERCLIP_LISTEN_PORT",
+  "PAPERCLIP_RUNTIME_API_URL",
+]);
+
+function isSafeInheritedProcessEnvKey(key: string): boolean {
+  const normalizedKey = key.toUpperCase();
+  if (normalizedKey.startsWith("LC_")) return true;
+  if (normalizedKey.startsWith("PAPERCLIP_")) {
+    return SAFE_INHERITED_PAPERCLIP_ENV_KEYS.has(normalizedKey);
+  }
+  return SAFE_INHERITED_PROCESS_ENV_KEYS.has(normalizedKey);
+}
+
+export function buildSafeInheritedProcessEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (value === undefined) continue;
+    if (!isSafeInheritedProcessEnvKey(key)) continue;
+    env[key] = value;
   }
   return env;
+}
+
+/** @deprecated Use buildSafeInheritedProcessEnv for new child process launch paths. */
+export function sanitizeInheritedPaperclipEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return buildSafeInheritedProcessEnv(baseEnv);
 }
 
 export function defaultPathForPlatform() {
@@ -2767,7 +2816,7 @@ export async function runChildProcess(
   const onLogError = opts.onLogError ?? ((err, id, msg) => console.warn({ err, runId: id }, msg));
   return new Promise<RunProcessResult>((resolve, reject) => {
     const rawMerged: NodeJS.ProcessEnv = {
-      ...sanitizeInheritedPaperclipEnv(process.env),
+      ...buildSafeInheritedProcessEnv(process.env),
       ...opts.env,
     };
 
