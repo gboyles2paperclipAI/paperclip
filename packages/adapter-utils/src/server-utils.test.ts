@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyPaperclipWorkspaceEnv,
   appendWithByteCap,
+  buildSafeInheritedProcessEnv,
   buildPersistentSkillSnapshot,
   buildRuntimeMountedSkillSnapshot,
   buildInvocationEnvForLogs,
@@ -65,6 +66,32 @@ describe("buildInvocationEnvForLogs", () => {
     expect(loggedEnv.PAPERCLIP_RESOLVED_COMMAND).toBe(
       "env OPENAI_API_KEY=***REDACTED*** PAPERCLIP_API_KEY='***REDACTED***' custom-acp --paperclip-api-key=***REDACTED*** --token ***REDACTED***",
     );
+  });
+});
+
+describe("buildSafeInheritedProcessEnv", () => {
+  it("keeps only host identity/runtime keys and safe Paperclip runtime markers", () => {
+    expect(
+      buildSafeInheritedProcessEnv({
+        PATH: "/usr/bin",
+        HOME: "/home/operator",
+        LANG: "C.UTF-8",
+        LC_ALL: "C",
+        OPENAI_API_KEY: "unit-host-secret",
+        GITHUB_TOKEN: "unit-host-secret",
+        DATABASE_URL: "postgres://unit-host-secret",
+        PAPERCLIP_API_KEY: "unit-host-secret",
+        PAPERCLIP_RUNTIME_API_URL: "http://127.0.0.1:3100",
+        PAPERCLIP_LISTEN_PORT: "3100",
+      }),
+    ).toEqual({
+      PATH: "/usr/bin",
+      HOME: "/home/operator",
+      LANG: "C.UTF-8",
+      LC_ALL: "C",
+      PAPERCLIP_RUNTIME_API_URL: "http://127.0.0.1:3100",
+      PAPERCLIP_LISTEN_PORT: "3100",
+    });
   });
 });
 
@@ -386,6 +413,56 @@ describe("adapter skill snapshots", () => {
 });
 
 describe("runChildProcess", () => {
+  it("does not inherit host secret-shaped environment keys", async () => {
+    const saved = {
+      OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+      GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+      DATABASE_URL: process.env.DATABASE_URL,
+      PAPERCLIP_API_KEY: process.env.PAPERCLIP_API_KEY,
+    };
+    process.env.OPENAI_API_KEY = "unit-host-secret";
+    process.env.GITHUB_TOKEN = "unit-host-secret";
+    process.env.DATABASE_URL = "postgres://unit-host-secret";
+    process.env.PAPERCLIP_API_KEY = "unit-host-secret";
+    try {
+      const result = await runChildProcess(
+        randomUUID(),
+        process.execPath,
+        [
+          "-e",
+          [
+            "const keys = ['OPENAI_API_KEY', 'GITHUB_TOKEN', 'DATABASE_URL', 'PAPERCLIP_API_KEY', 'EXPLICIT_RUN_KEY'];",
+            "process.stdout.write(JSON.stringify(Object.fromEntries(keys.map((key) => [key, process.env[key] || null]))));",
+          ].join(" "),
+        ],
+        {
+          cwd: process.cwd(),
+          env: { EXPLICIT_RUN_KEY: "visible" },
+          timeoutSec: 5,
+          graceSec: 1,
+          onLog: async () => {},
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        OPENAI_API_KEY: null,
+        GITHUB_TOKEN: null,
+        DATABASE_URL: null,
+        PAPERCLIP_API_KEY: null,
+        EXPLICIT_RUN_KEY: "visible",
+      });
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+    }
+  });
+
   it("does not arm a timeout when timeoutSec is 0", async () => {
     const result = await runChildProcess(
       randomUUID(),
