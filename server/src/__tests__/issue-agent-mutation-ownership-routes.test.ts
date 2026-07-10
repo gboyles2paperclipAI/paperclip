@@ -1470,6 +1470,88 @@ describe("agent issue mutation checkout ownership", () => {
     );
   });
 
+  it("allows a triage-authority agent assigned to an issue to complete it with evidence", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === triageAuthorityAgentId) {
+        return makeAgent(id, {
+          permissions: {
+            canCreateAgents: false,
+            triageAuthority: true,
+            triageAuthorityFields: ["status", "assigneeAgentId", "blockedByIssueIds"],
+          },
+        });
+      }
+      return makeAgent(id);
+    });
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "in_progress",
+      assigneeAgentId: triageAuthorityAgentId,
+      lastActivityAt: new Date().toISOString(),
+    }));
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...makeIssue({ status: "in_progress", assigneeAgentId: triageAuthorityAgentId }),
+      ...patch,
+    }));
+
+    const res = await request(await createApp(triageAuthorityActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "done", comment: "Completed with evidence." });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.assertCheckoutOwner).toHaveBeenCalledWith(
+      issueId,
+      triageAuthorityAgentId,
+      "66666666-6666-4666-8666-666666666666",
+    );
+    expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({
+      status: "done",
+    }), expect.anything());
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      issueId,
+      "Completed with evidence.",
+      expect.objectContaining({
+        agentId: triageAuthorityAgentId,
+      }),
+      undefined,
+      expect.anything(),
+    );
+    expect(mockLogActivity).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "issue.triage_authority_patch" }),
+    );
+  });
+
+  it("blocks triage-authority completion comments on issues assigned to another agent", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === triageAuthorityAgentId) {
+        return makeAgent(id, {
+          permissions: {
+            canCreateAgents: false,
+            triageAuthority: true,
+            triageAuthorityFields: ["status", "assigneeAgentId", "blockedByIssueIds"],
+          },
+        });
+      }
+      return makeAgent(id);
+    });
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "in_progress",
+      assigneeAgentId: ownerAgentId,
+      lastActivityAt: new Date().toISOString(),
+    }));
+
+    const res = await request(await createApp(triageAuthorityActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "done", comment: "Trying to close someone else's issue." });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("Triage authority patches may only include triage fields");
+    expect(res.body.details?.field).toBe("comment");
+    expect(mockIssueService.assertCheckoutOwner).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+  });
+
   it("allows a triage-authority agent to patch assignee and blocked-by links on stale issues", async () => {
     mockAgentService.getById.mockImplementation(async (id: string) => {
       if (id === triageAuthorityAgentId) {

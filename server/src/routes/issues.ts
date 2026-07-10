@@ -2196,6 +2196,14 @@ export function issueRoutes(
     const triagePatchFields = patchKeys.filter((field) => triageCandidateFields.includes(field));
     if (triagePatchFields.length === 0) return { skipOwnership: false, allowed: true };
 
+    const isAssignedSelfCompletion =
+      existing.assigneeAgentId === req.actor.agentId &&
+      body.status === "done" &&
+      typeof body.comment === "string" &&
+      body.comment.trim().length > 0 &&
+      patchKeys.every((field) => field === "status" || field === "comment");
+    if (isAssignedSelfCompletion) return { skipOwnership: false, allowed: true };
+
     const nonTriagePatchField = patchKeys.find((field) => !triageCandidateFields.includes(field));
     if (nonTriagePatchField) {
       res.status(403).json({
