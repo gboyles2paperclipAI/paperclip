@@ -8,6 +8,8 @@ paperclip_instance_id="${PAPERCLIP_INSTANCE_ID:-default}"
 paperclip_dir="$worktree_cwd/.paperclip"
 worktree_config_path="$paperclip_dir/config.json"
 worktree_env_path="$paperclip_dir/.env"
+worktree_config_tmp_path="$worktree_config_path.tmp.${BASHPID:-$$}"
+worktree_env_tmp_path="$worktree_env_path.tmp.${BASHPID:-$$}"
 worktree_name="${PAPERCLIP_WORKSPACE_BRANCH:-$(basename "$worktree_cwd")}"
 skip_host_cli_discovery=false
 case "${PAPERCLIP_WORKTREE_INIT_SKIP_HOST_CLI:-}" in
@@ -36,6 +38,25 @@ fi
 source_env_path="$(dirname "$source_config_path")/.env"
 
 mkdir -p "$paperclip_dir"
+
+cleanup_fallback_tmp_files() {
+  rm -f -- "$worktree_config_tmp_path" "$worktree_env_tmp_path"
+}
+
+trap cleanup_fallback_tmp_files EXIT
+
+remove_provision_path() {
+  local target_path="$1"
+  if [[ -z "$target_path" || "$target_path" == "/" || "$target_path" == "$worktree_cwd" || "$target_path" == "$paperclip_dir" ]]; then
+    echo "Refusing to remove unsafe provision path: ${target_path:-<empty>}" >&2
+    return 1
+  fi
+  if [[ -d "$target_path" && ! -L "$target_path" ]]; then
+    rm -r -- "$target_path"
+  else
+    rm -f -- "$target_path"
+  fi
+}
 
 run_isolated_worktree_init() {
   local base_cli_runner="$base_cwd/cli/node_modules/tsx/dist/cli.mjs"
@@ -133,7 +154,12 @@ function fail(reason) {
 
 const configPath = path.resolve(process.env.WORKTREE_CONFIG_PATH);
 const envPath = path.resolve(process.env.WORKTREE_ENV_PATH);
-const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+let config;
+try {
+  config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+} catch {
+  fail(`existing worktree config is invalid JSON: ${path.basename(configPath)}`);
+}
 const env = parseEnvFile(fs.readFileSync(envPath, "utf8"));
 const envConfigPath = expandHomePrefix(env.PAPERCLIP_CONFIG);
 if (envConfigPath && path.resolve(envConfigPath) !== configPath) {
@@ -173,6 +199,8 @@ write_fallback_worktree_config() {
   BASE_CWD="$base_cwd" \
   WORKTREE_CWD="$worktree_cwd" \
   PAPERCLIP_DIR="$paperclip_dir" \
+  WORKTREE_CONFIG_TMP_PATH="$worktree_config_tmp_path" \
+  WORKTREE_ENV_TMP_PATH="$worktree_env_tmp_path" \
   SOURCE_CONFIG_PATH="$source_config_path" \
   SOURCE_ENV_PATH="$source_env_path" \
   PAPERCLIP_WORKTREES_DIR="${PAPERCLIP_WORKTREES_DIR:-}" \
@@ -293,6 +321,8 @@ async function main() {
   const instanceRoot = path.resolve(worktreeHome, "instances", instanceId);
   const configPath = path.resolve(paperclipDir, "config.json");
   const envPath = path.resolve(paperclipDir, ".env");
+  const configTmpPath = path.resolve(process.env.WORKTREE_CONFIG_TMP_PATH);
+  const envTmpPath = path.resolve(process.env.WORKTREE_ENV_TMP_PATH);
 
   let sourceConfig = null;
   if (sourceConfigPath && fs.existsSync(sourceConfigPath)) {
@@ -309,7 +339,6 @@ async function main() {
   const preferredDbPort = Number(sourceConfig?.database?.embeddedPostgresPort ?? 54329) + 1;
   const databasePort = await findAvailablePort(preferredDbPort, new Set([serverPort]));
 
-  fs.rmSync(configPath, { force: true });
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.mkdirSync(instanceRoot, { recursive: true });
 
@@ -373,8 +402,6 @@ async function main() {
     },
   };
 
-  fs.writeFileSync(configPath, `${JSON.stringify(targetConfig, null, 2)}\n`, { mode: 0o600 });
-
   const inlineMasterKey = nonEmpty(sourceEnvEntries.PAPERCLIP_SECRETS_MASTER_KEY);
   if (inlineMasterKey) {
     fs.mkdirSync(path.resolve(instanceRoot, "secrets"), { recursive: true });
@@ -410,7 +437,10 @@ async function main() {
     envLines.push("PAPERCLIP_AGENT_JWT_SECRET=" + JSON.stringify(agentJwtSecret));
   }
 
-  fs.writeFileSync(envPath, `${envLines.join("\n")}\n`, { mode: 0o600 });
+  fs.writeFileSync(configTmpPath, `${JSON.stringify(targetConfig, null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(envTmpPath, `${envLines.join("\n")}\n`, { mode: 0o600 });
+  fs.renameSync(configTmpPath, configPath);
+  fs.renameSync(envTmpPath, envPath);
 }
 
 main().catch((error) => {
@@ -467,7 +497,7 @@ if [[ -f "$worktree_cwd/package.json" && -f "$worktree_cwd/pnpm-lock.yaml" ]]; t
       target_path="$worktree_cwd/$relative_path"
       if [[ -L "$target_path" ]]; then
         backup_path="${target_path}${backup_suffix}"
-        rm -rf "$backup_path"
+        remove_provision_path "$backup_path"
         mv "$target_path" "$backup_path"
         moved_symlink_paths+=("$relative_path")
       fi
@@ -480,7 +510,7 @@ if [[ -f "$worktree_cwd/package.json" && -f "$worktree_cwd/pnpm-lock.yaml" ]]; t
         target_path="$worktree_cwd/$relative_path"
         backup_path="${target_path}${backup_suffix}"
         [[ -L "$backup_path" ]] || continue
-        rm -rf "$target_path"
+        remove_provision_path "$target_path"
         mv "$backup_path" "$target_path"
       done
     }

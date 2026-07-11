@@ -43,7 +43,6 @@ export interface SlackInteractionContext {
   action: SlackApprovalAction;
   approvalId: string;
   responseUrl: string | null;
-  rawPayload: unknown;
 }
 
 export interface SlackSignatureVerificationInput {
@@ -70,6 +69,8 @@ interface SlackSocketConnection {
 interface SlackSocketModeOptions {
   pluginWorkerManager?: PluginWorkerManager;
   reconnectDelayMs?: number;
+  openConnection?: (appToken: string) => Promise<string | null>;
+  createSocket?: (url: string) => WebSocket;
 }
 
 export function verifySlackRequestSignature(input: SlackSignatureVerificationInput): string {
@@ -173,7 +174,6 @@ export function parseSlackApprovalInteraction(payload: unknown): SlackInteractio
     action,
     approvalId,
     responseUrl: stringValue(payload.response_url),
-    rawPayload: payload,
   };
 }
 
@@ -1017,10 +1017,13 @@ export function startSlackSocketMode(
   options: SlackSocketModeOptions = {},
 ): SlackSocketConnection | null {
   const slack = slackIntegrationService(db, { pluginWorkerManager: options.pluginWorkerManager });
-  const reconnectDelayMs = options.reconnectDelayMs ?? 10_000;
+  const baseReconnectDelayMs = options.reconnectDelayMs ?? 10_000;
+  const openConnection = options.openConnection ?? openSlackSocketModeConnection;
+  const createSocket = options.createSocket ?? ((url: string) => new WebSocket(url));
   let stopped = false;
   let socket: WebSocket | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let consecutiveFailures = 0;
 
   const clearReconnectTimer = () => {
     if (reconnectTimer) {
@@ -1029,8 +1032,24 @@ export function startSlackSocketMode(
     }
   };
 
+  const disposeSocket = (target: WebSocket, close = false) => {
+    target.removeAllListeners();
+    if (socket === target) socket = null;
+    if (!close) return;
+    // A close can surface an asynchronous error even after listeners have been
+    // detached. Keep only a no-op error listener while ws releases resources.
+    target.on("error", () => {});
+    try {
+      target.close();
+    } catch {
+      // The socket may already have completed its close handshake.
+    }
+  };
+
   const scheduleReconnect = () => {
     if (stopped || reconnectTimer) return;
+    consecutiveFailures = Math.min(consecutiveFailures + 1, 6);
+    const reconnectDelayMs = baseReconnectDelayMs * 2 ** (consecutiveFailures - 1);
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       void connect();
@@ -1042,32 +1061,37 @@ export function startSlackSocketMode(
     if (stopped) return;
     const appToken = await resolveSlackSetting(db, null, "SLACK_APP_TOKEN");
     if (!appToken) return;
-    const url = await openSlackSocketModeConnection(appToken);
+    const url = await openConnection(appToken);
     if (!url || stopped) {
       scheduleReconnect();
       return;
     }
 
-    socket = new WebSocket(url);
-    socket.on("open", () => {
+    if (socket) disposeSocket(socket, true);
+    const currentSocket = createSocket(url);
+    socket = currentSocket;
+    currentSocket.on("open", () => {
       logger.info("Slack Socket Mode connected");
     });
-    socket.on("message", (data) => {
+    currentSocket.on("message", (data) => {
       let currentEnvelope: SlackSocketEnvelope | null = null;
       const sendAck = (payload?: Record<string, unknown>) => {
         const envelopeId = stringValue((currentEnvelope as SlackSocketEnvelope | null)?.envelope_id);
-        if (!envelopeId || socket?.readyState !== WebSocket.OPEN) return;
-        socket.send(JSON.stringify({ envelope_id: envelopeId, ...(payload ? { payload } : {}) }));
+        if (!envelopeId || currentSocket.readyState !== WebSocket.OPEN) return;
+        currentSocket.send(JSON.stringify({ envelope_id: envelopeId, ...(payload ? { payload } : {}) }));
       };
       try {
         currentEnvelope = parseSlackSocketEnvelope(data.toString());
         if (currentEnvelope.type === "disconnect") {
           logger.info({ reason: stringValue(currentEnvelope.reason) }, "Slack Socket Mode requested disconnect");
-          socket?.close();
+          disposeSocket(currentSocket, true);
           scheduleReconnect();
           return;
         }
-        if (currentEnvelope.type === "hello") return;
+        if (currentEnvelope.type === "hello") {
+          consecutiveFailures = 0;
+          return;
+        }
         void handleSlackSocketEnvelope({
           envelope: currentEnvelope,
           ack: sendAck,
@@ -1079,10 +1103,11 @@ export function startSlackSocketMode(
         logger.warn({ err }, "Slack Socket Mode message could not be processed");
       }
     });
-    socket.on("error", (err) => {
+    currentSocket.on("error", (err) => {
       logger.warn({ err }, "Slack Socket Mode websocket error");
     });
-    socket.on("close", () => {
+    currentSocket.on("close", () => {
+      disposeSocket(currentSocket);
       if (!stopped) scheduleReconnect();
     });
   };
@@ -1092,8 +1117,7 @@ export function startSlackSocketMode(
     close() {
       stopped = true;
       clearReconnectTimer();
-      socket?.close();
-      socket = null;
+      if (socket) disposeSocket(socket, true);
     },
   };
 }
