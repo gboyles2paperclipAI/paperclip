@@ -64,6 +64,32 @@ async function fallbackTempPaths(paperclipDir: string) {
 }
 
 describe("provision-worktree.sh fallback config writer", () => {
+  it("refuses a symlinked worktree .paperclip directory before reading or writing config", async () => {
+    const fixture = await createFixture();
+    const outsideDir = path.join(fixture.tempRoot, "outside-paperclip");
+    const outsideSentinel = path.join(outsideDir, "sentinel.txt");
+
+    try {
+      await fs.mkdir(outsideDir, { recursive: true });
+      await fs.writeFile(outsideSentinel, "outside-must-not-change\n", "utf8");
+      await fs.symlink(outsideDir, fixture.paperclipDir);
+
+      let stderr = "";
+      try {
+        await runProvision(fixture);
+      } catch (error) {
+        stderr = String((error as { stderr?: unknown }).stderr ?? error);
+      }
+
+      expect(stderr).toContain("Refusing unsafe worktree .paperclip directory");
+      await expect(fs.readFile(outsideSentinel, "utf8")).resolves.toBe("outside-must-not-change\n");
+      await expect(fs.readdir(outsideDir)).resolves.toEqual(["sentinel.txt"]);
+      expect((await fs.lstat(fixture.paperclipDir)).isSymbolicLink()).toBe(true);
+    } finally {
+      await fs.rm(fixture.tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("atomically writes final config and env files without leaving fallback temp files", async () => {
     const fixture = await createFixture();
 

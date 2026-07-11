@@ -5,9 +5,6 @@ base_cwd="${PAPERCLIP_WORKSPACE_BASE_CWD:?PAPERCLIP_WORKSPACE_BASE_CWD is requir
 worktree_cwd="${PAPERCLIP_WORKSPACE_CWD:?PAPERCLIP_WORKSPACE_CWD is required}"
 paperclip_home="${PAPERCLIP_HOME:-$HOME/.paperclip}"
 paperclip_instance_id="${PAPERCLIP_INSTANCE_ID:-default}"
-paperclip_dir="$worktree_cwd/.paperclip"
-worktree_config_path="$paperclip_dir/config.json"
-worktree_env_path="$paperclip_dir/.env"
 worktree_name="${PAPERCLIP_WORKSPACE_BRANCH:-$(basename "$worktree_cwd")}"
 skip_host_cli_discovery=false
 case "${PAPERCLIP_WORKTREE_INIT_SKIP_HOST_CLI:-}" in
@@ -26,6 +23,52 @@ if [[ ! -d "$worktree_cwd" ]]; then
   exit 1
 fi
 
+prepare_worktree_paperclip_dir() {
+  WORKTREE_CWD="$worktree_cwd" node <<'EOF'
+const fs = require("node:fs");
+const path = require("node:path");
+
+function refuse(reason) {
+  console.error(`Refusing unsafe worktree .paperclip directory: ${reason}`);
+  process.exit(1);
+}
+
+const worktreeInput = process.env.WORKTREE_CWD;
+if (!worktreeInput) refuse("missing worktree path");
+
+const worktreeReal = fs.realpathSync(worktreeInput);
+const paperclipPath = path.join(worktreeReal, ".paperclip");
+
+let entry;
+try {
+  entry = fs.lstatSync(paperclipPath);
+} catch (error) {
+  if (!error || error.code !== "ENOENT") throw error;
+  try {
+    fs.mkdirSync(paperclipPath, { mode: 0o700 });
+  } catch (mkdirError) {
+    if (!mkdirError || mkdirError.code !== "EEXIST") throw mkdirError;
+  }
+  entry = fs.lstatSync(paperclipPath);
+}
+
+if (entry.isSymbolicLink() || !entry.isDirectory()) {
+  refuse(paperclipPath);
+}
+
+const paperclipReal = fs.realpathSync(paperclipPath);
+if (paperclipReal !== paperclipPath || path.dirname(paperclipReal) !== worktreeReal) {
+  refuse(paperclipPath);
+}
+
+process.stdout.write(paperclipReal);
+EOF
+}
+
+paperclip_dir="$(prepare_worktree_paperclip_dir)"
+worktree_config_path="$paperclip_dir/config.json"
+worktree_env_path="$paperclip_dir/.env"
+
 source_config_path="${PAPERCLIP_CONFIG:-}"
 if [[ -z "$source_config_path" && ( -e "$base_cwd/.paperclip/config.json" || -L "$base_cwd/.paperclip/config.json" ) ]]; then
   source_config_path="$base_cwd/.paperclip/config.json"
@@ -34,8 +77,6 @@ if [[ -z "$source_config_path" ]]; then
   source_config_path="$paperclip_home/instances/$paperclip_instance_id/config.json"
 fi
 source_env_path="$(dirname "$source_config_path")/.env"
-
-mkdir -p "$paperclip_dir"
 
 remove_provision_path() {
   local target_path="$1"
