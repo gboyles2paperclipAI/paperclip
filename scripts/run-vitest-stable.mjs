@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -66,6 +66,94 @@ const continueOnFailure =
   process.env.PAPERCLIP_VITEST_CONTINUE_ON_FAILURE === "1" ||
   process.env.PAPERCLIP_VITEST_CONTINUE_ON_FAILURE === "true";
 const failures = [];
+const activeTestRoots = new Set();
+const sweptTempParents = new Set();
+
+function cleanupTestRoot(testRoot) {
+  if (!activeTestRoots.has(testRoot)) return;
+
+  activeTestRoots.delete(testRoot);
+  try {
+    rmSync(testRoot, { recursive: true, force: true });
+  } catch (error) {
+    console.error(`[test:run] Failed to remove temp dir ${testRoot}: ${error.message}`);
+  }
+}
+
+function cleanupActiveTestRoots() {
+  for (const testRoot of [...activeTestRoots]) {
+    cleanupTestRoot(testRoot);
+  }
+}
+
+function isLiveProcess(pid) {
+  if (process.platform === "linux") {
+    try {
+      statSync(path.join("/proc", String(pid)));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
+function sweepOrphanedPcvtTempDirs(tempRootParent) {
+  if (sweptTempParents.has(tempRootParent)) return;
+
+  sweptTempParents.add(tempRootParent);
+  let removed = 0;
+  let failed = 0;
+  const prefixPattern = /^pcvt-(\d+)-/;
+
+  let entries;
+  try {
+    entries = readdirSync(tempRootParent, { withFileTypes: true });
+  } catch (error) {
+    console.error(`[test:run] Failed to scan temp dir ${tempRootParent}: ${error.message}`);
+    return;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+
+    const match = prefixPattern.exec(entry.name);
+    if (!match) continue;
+
+    const pid = Number(match[1]);
+    if (!Number.isSafeInteger(pid) || isLiveProcess(pid)) continue;
+
+    try {
+      rmSync(path.join(tempRootParent, entry.name), { recursive: true, force: true });
+      removed += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+
+  if (removed > 0 || failed > 0) {
+    console.log(
+      `[test:run] swept ${removed} orphaned pcvt temp dirs from ${tempRootParent}` +
+        (failed > 0 ? ` (${failed} failed)` : ""),
+    );
+  }
+}
+
+process.on("exit", cleanupActiveTestRoots);
+process.on("SIGINT", () => {
+  cleanupActiveTestRoots();
+  process.exit(130);
+});
+process.on("SIGTERM", () => {
+  cleanupActiveTestRoots();
+  process.exit(143);
+});
 
 function walk(dir) {
   const entries = readdirSync(dir);
@@ -253,7 +341,10 @@ function runVitest(args, label) {
   console.log(`\n[test:run] ${label}`);
   invocationIndex += 1;
   const tempRootParent = process.env.TMPDIR || (process.platform === "win32" ? os.tmpdir() : "/tmp");
+  mkdirSync(tempRootParent, { recursive: true });
+  sweepOrphanedPcvtTempDirs(tempRootParent);
   const testRoot = mkdtempSync(path.join(tempRootParent, `pcvt-${process.pid}-${invocationIndex}-`));
+  activeTestRoots.add(testRoot);
   // Keep per-run paths compact so Unix socket fixtures stay under macOS path limits.
   const env = {
     ...process.env,
@@ -269,6 +360,7 @@ function runVitest(args, label) {
     env,
     stdio: "inherit",
   });
+  cleanupTestRoot(testRoot);
   if (result.error) {
     console.error(`[test:run] Failed to start Vitest: ${result.error.message}`);
     if (continueOnFailure) {

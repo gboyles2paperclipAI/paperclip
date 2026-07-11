@@ -4,6 +4,7 @@ import { heartbeatRuns, type Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
   createApprovalSchema,
+  isUuidLike,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
   resubmitApprovalSchema,
@@ -119,6 +120,10 @@ export function approvalRoutes(
 
   router.get("/approvals/:id", async (req, res) => {
     const id = req.params.id as string;
+    if (!isUuidLike(id)) {
+      res.status(400).json({ error: "Approval id must be a valid UUID" });
+      return;
+    }
     const approval = await svc.getById(id);
     if (!approval) {
       res.status(404).json({ error: "Approval not found" });

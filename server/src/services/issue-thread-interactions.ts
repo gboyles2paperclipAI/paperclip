@@ -23,6 +23,7 @@ import type {
   InteractionResolutionAudit,
   InteractionResolutionAuditMetadata,
   InteractionResolutionMethod,
+  IssueStatus,
   RequestCheckboxConfirmationInteraction,
   RequestConfirmationInteraction,
   RequestConfirmationTarget,
@@ -30,6 +31,7 @@ import type {
   RespondIssueThreadInteraction,
   SuggestTasksInteraction,
   SuggestTasksResultCreatedTask,
+  IssueThreadInteractionStatus,
 } from "@paperclipai/shared";
 import {
   acceptIssueThreadInteractionSchema,
@@ -993,11 +995,34 @@ export function issueThreadInteractionService(db: Db) {
       resolvedAfter?: Date | null;
       resolvedBefore?: Date | null;
       method?: InteractionResolutionMethod | null;
+      statuses?: readonly IssueThreadInteractionStatus[] | null;
+      issueStatuses?: readonly IssueStatus[] | null;
+      createdAfter?: Date | null;
+      createdBefore?: Date | null;
+      limit?: number | null;
+      offset?: number | null;
     }): Promise<InteractionResolutionAudit[]> => {
       const filters = [
         eq(issueThreadInteractions.companyId, args.companyId),
-        isNotNull(issueThreadInteractions.resolvedAt),
+        eq(issues.companyId, args.companyId),
       ];
+      const hasStatusFilter = Boolean(args.statuses?.length);
+      const statuses = args.statuses ?? [];
+      if (hasStatusFilter) {
+        filters.push(inArray(issueThreadInteractions.status, [...statuses]));
+      } else {
+        // Preserve the original company-wide audit default: resolved rows only.
+        filters.push(isNotNull(issueThreadInteractions.resolvedAt));
+      }
+      if (args.issueStatuses?.length) {
+        filters.push(inArray(issues.status, [...args.issueStatuses]));
+      }
+      if (args.createdAfter) {
+        filters.push(gte(issueThreadInteractions.createdAt, args.createdAfter));
+      }
+      if (args.createdBefore) {
+        filters.push(lte(issueThreadInteractions.createdAt, args.createdBefore));
+      }
       if (args.resolvedAfter) {
         filters.push(gte(issueThreadInteractions.resolvedAt, args.resolvedAfter));
       }
@@ -1006,13 +1031,14 @@ export function issueThreadInteractionService(db: Db) {
       }
 
       const rows = await db
-        .select()
+        .select({ interaction: issueThreadInteractions })
         .from(issueThreadInteractions)
+        .innerJoin(issues, eq(issueThreadInteractions.issueId, issues.id))
         .where(and(...filters))
         .orderBy(desc(issueThreadInteractions.resolvedAt), desc(issueThreadInteractions.createdAt));
 
       return rows
-        .map((row) => {
+        .map(({ interaction: row }) => {
           const resolutionAudit = row.resolutionAudit ?? null;
           const method = resolutionAudit?.method ?? "unknown";
           return {
@@ -1034,7 +1060,8 @@ export function issueThreadInteractionService(db: Db) {
             resolutionAudit,
           };
         })
-        .filter((row) => !args.method || row.method === args.method);
+        .filter((row) => !args.method || row.method === args.method)
+        .slice(args.offset ?? 0, args.limit ? (args.offset ?? 0) + args.limit : undefined);
     },
 
     create: async (

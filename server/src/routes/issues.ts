@@ -49,6 +49,8 @@ import {
   upsertIssueFeedbackVoteSchema,
   upsertIssueWatchdogSchema,
   linkIssueApprovalSchema,
+  ISSUE_STATUSES,
+  ISSUE_THREAD_INTERACTION_STATUSES,
   issueDocumentKeySchema,
   ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
   ISSUE_WATCHDOG_DISCOVERY_KINDS,
@@ -68,7 +70,9 @@ import {
   type CompanySearchResponse,
   type ExecutionWorkspace,
   type InteractionResolutionMethod,
+  type IssueStatus,
   type IssueRelationIssueSummary,
+  type IssueThreadInteractionStatus,
   type IssueWatchdogDiscoveryKind,
   type SourceTrustMetadata,
   type SuccessfulRunHandoffState,
@@ -1729,6 +1733,25 @@ export function issueRoutes(
     return null;
   }
 
+  function parseCommaSeparatedQuery<T extends string>(
+    value: unknown,
+    allowedValues: readonly T[],
+    field: string,
+  ): T[] | null {
+    if (value === undefined) return null;
+    const rawItems = (Array.isArray(value) ? value : [value])
+      .flatMap((item) => typeof item === "string" ? item.split(",") : [])
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (rawItems.length === 0) return null;
+    const allowed = new Set<string>(allowedValues);
+    const invalid = rawItems.filter((item) => !allowed.has(item));
+    if (invalid.length > 0) {
+      throw unprocessable(`${field} must be one of ${allowedValues.join(", ")}`);
+    }
+    return [...new Set(rawItems)] as T[];
+  }
+
   function shouldIncludeDocumentAnnotations(req: Request) {
     if (req.query.includeAnnotations === "false" || req.query.includeAnnotations === "0") return false;
     return req.actor.type === "agent" || parseBooleanQuery(req.query.includeAnnotations);
@@ -2195,6 +2218,14 @@ export function issueRoutes(
 
     const triagePatchFields = patchKeys.filter((field) => triageCandidateFields.includes(field));
     if (triagePatchFields.length === 0) return { skipOwnership: false, allowed: true };
+
+    const isAssignedSelfCompletion =
+      existing.assigneeAgentId === req.actor.agentId &&
+      body.status === "done" &&
+      typeof body.comment === "string" &&
+      body.comment.trim().length > 0 &&
+      patchKeys.every((field) => field === "status" || field === "comment");
+    if (isAssignedSelfCompletion) return { skipOwnership: false, allowed: true };
 
     const nonTriagePatchField = patchKeys.find((field) => !triageCandidateFields.includes(field));
     if (nonTriagePatchField) {
@@ -3564,7 +3595,19 @@ export function issueRoutes(
 
     const resolvedAfterRaw = typeof req.query.resolvedAfter === "string" ? req.query.resolvedAfter.trim() : null;
     const resolvedBeforeRaw = typeof req.query.resolvedBefore === "string" ? req.query.resolvedBefore.trim() : null;
+    const createdAfterRaw = typeof req.query.createdAfter === "string" ? req.query.createdAfter.trim() : null;
+    const createdBeforeRaw = typeof req.query.createdBefore === "string" ? req.query.createdBefore.trim() : null;
     const methodRaw = typeof req.query.method === "string" ? req.query.method.trim() : null;
+    const statuses = parseCommaSeparatedQuery<IssueThreadInteractionStatus>(
+      req.query.status,
+      ISSUE_THREAD_INTERACTION_STATUSES,
+      "status",
+    );
+    const issueStatuses = parseCommaSeparatedQuery<IssueStatus>(
+      req.query.issueStatus,
+      ISSUE_STATUSES,
+      "issueStatus",
+    );
 
     const resolvedAfter = resolvedAfterRaw ? new Date(resolvedAfterRaw) : null;
     if (resolvedAfterRaw && (!resolvedAfter || Number.isNaN(resolvedAfter.getTime()))) {
@@ -3574,6 +3617,16 @@ export function issueRoutes(
     const resolvedBefore = resolvedBeforeRaw ? new Date(resolvedBeforeRaw) : null;
     if (resolvedBeforeRaw && (!resolvedBefore || Number.isNaN(resolvedBefore.getTime()))) {
       throw unprocessable("resolvedBefore must be a valid ISO-8601 timestamp");
+    }
+
+    const createdAfter = createdAfterRaw ? new Date(createdAfterRaw) : null;
+    if (createdAfterRaw && (!createdAfter || Number.isNaN(createdAfter.getTime()))) {
+      throw unprocessable("createdAfter must be a valid ISO-8601 timestamp");
+    }
+
+    const createdBefore = createdBeforeRaw ? new Date(createdBeforeRaw) : null;
+    if (createdBeforeRaw && (!createdBefore || Number.isNaN(createdBefore.getTime()))) {
+      throw unprocessable("createdBefore must be a valid ISO-8601 timestamp");
     }
 
     const allowedMethods: Set<InteractionResolutionMethod> =
@@ -3587,11 +3640,34 @@ export function issueRoutes(
       throw unprocessable("method must be one of ui_click, api_explicit, api_automated, unknown");
     }
 
+    const rawLimit = req.query.limit as string | undefined;
+    const parsedLimit = rawLimit !== undefined && /^\d+$/.test(rawLimit)
+      ? Number.parseInt(rawLimit, 10)
+      : null;
+    if (rawLimit !== undefined && (parsedLimit === null || !Number.isInteger(parsedLimit) || parsedLimit <= 0)) {
+      res.status(400).json({ error: `limit must be a positive integer up to ${ISSUE_LIST_MAX_LIMIT}` });
+      return;
+    }
+    const rawOffset = req.query.offset as string | undefined;
+    const parsedOffset = rawOffset !== undefined && /^\d+$/.test(rawOffset)
+      ? Number.parseInt(rawOffset, 10)
+      : null;
+    if (rawOffset !== undefined && (parsedOffset === null || !Number.isInteger(parsedOffset) || parsedOffset < 0)) {
+      res.status(400).json({ error: "offset must be a non-negative integer" });
+      return;
+    }
+
     const interactions = await issueThreadInteractionService(db).listForCompany({
       companyId,
       resolvedAfter,
       resolvedBefore,
       method,
+      statuses,
+      issueStatuses,
+      createdAfter,
+      createdBefore,
+      limit: parsedLimit === null ? null : clampIssueListLimit(parsedLimit),
+      offset: parsedOffset ?? 0,
     });
     res.json(interactions);
   });
