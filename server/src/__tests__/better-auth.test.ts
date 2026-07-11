@@ -3,6 +3,7 @@ import type { BetterAuthOptions } from "better-auth";
 import { getCookies } from "better-auth/cookies";
 import {
   buildBetterAuthAdvancedOptions,
+  createBetterAuthInstance,
   deriveAuthCookiePrefix,
   deriveAuthTrustedOrigins,
   shouldDisableSecureAuthCookies,
@@ -10,15 +11,54 @@ import {
 
 const ORIGINAL_INSTANCE_ID = process.env.PAPERCLIP_INSTANCE_ID;
 const ORIGINAL_PUBLIC_URL = process.env.PAPERCLIP_PUBLIC_URL;
+const ORIGINAL_BETTER_AUTH_SECRET = process.env.BETTER_AUTH_SECRET;
+const ORIGINAL_AGENT_JWT_SECRET = process.env.PAPERCLIP_AGENT_JWT_SECRET;
 
 afterEach(() => {
   if (ORIGINAL_INSTANCE_ID === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
   else process.env.PAPERCLIP_INSTANCE_ID = ORIGINAL_INSTANCE_ID;
   if (ORIGINAL_PUBLIC_URL === undefined) delete process.env.PAPERCLIP_PUBLIC_URL;
   else process.env.PAPERCLIP_PUBLIC_URL = ORIGINAL_PUBLIC_URL;
+  if (ORIGINAL_BETTER_AUTH_SECRET === undefined) delete process.env.BETTER_AUTH_SECRET;
+  else process.env.BETTER_AUTH_SECRET = ORIGINAL_BETTER_AUTH_SECRET;
+  if (ORIGINAL_AGENT_JWT_SECRET === undefined) delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
+  else process.env.PAPERCLIP_AGENT_JWT_SECRET = ORIGINAL_AGENT_JWT_SECRET;
 });
 
 describe("Better Auth cookie scoping", () => {
+  const authenticatedConfig = {
+    deploymentMode: "authenticated",
+    deploymentExposure: "private",
+    authBaseUrlMode: "auto",
+    authPublicBaseUrl: undefined,
+    authDisableSignUp: false,
+  } as Parameters<typeof createBetterAuthInstance>[1];
+
+  it("does not start authenticated auth with only the agent JWT secret", () => {
+    delete process.env.BETTER_AUTH_SECRET;
+    process.env.PAPERCLIP_AGENT_JWT_SECRET = "agent-jwt-only-test-secret";
+
+    expect(() => createBetterAuthInstance({} as never, authenticatedConfig, [])).toThrow(
+      "BETTER_AUTH_SECRET must be set in authenticated mode",
+    );
+  });
+
+  it("rejects reuse of one secret for board sessions and agent JWTs", () => {
+    process.env.BETTER_AUTH_SECRET = "shared-test-secret";
+    process.env.PAPERCLIP_AGENT_JWT_SECRET = "shared-test-secret";
+
+    expect(() => createBetterAuthInstance({} as never, authenticatedConfig, [])).toThrow(
+      "must be distinct",
+    );
+  });
+
+  it("constructs authenticated auth when board and agent secrets are distinct", () => {
+    process.env.BETTER_AUTH_SECRET = "better-auth-distinct-test-secret";
+    process.env.PAPERCLIP_AGENT_JWT_SECRET = "agent-jwt-distinct-test-secret";
+
+    expect(createBetterAuthInstance({} as never, authenticatedConfig, [])).toBeTruthy();
+  });
+
   it("derives an instance-scoped cookie prefix", () => {
     expect(deriveAuthCookiePrefix("default")).toBe("paperclip-default");
     expect(deriveAuthCookiePrefix("PAP-1601-worktree")).toBe("paperclip-PAP-1601-worktree");

@@ -228,7 +228,7 @@ describeEmbeddedPostgres("authorization service", () => {
     expect(decision.explanation).toContain("Agent key cannot access another company");
   });
 
-  it("ignores malformed run ids before loading run-scoped policy", async () => {
+  it("fails closed on malformed agent run ids", async () => {
     const company = await createCompany(db, "MalformedRunId");
     const actorAgent = await createAgent(db, company.id);
 
@@ -245,8 +245,8 @@ describeEmbeddedPostgres("authorization service", () => {
     });
 
     expect(decision).toMatchObject({
-      allowed: true,
-      reason: "allow_company_agent",
+      allowed: false,
+      reason: "deny_scope",
     });
   });
 

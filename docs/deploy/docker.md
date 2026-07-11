@@ -8,7 +8,8 @@ Run Paperclip in Docker without installing Node or pnpm locally.
 ## Compose Quickstart (Recommended)
 
 ```sh
-docker compose -f docker/docker-compose.quickstart.yml up --build
+BETTER_AUTH_SECRET=$(openssl rand -hex 32) \
+  docker compose -f docker/docker-compose.quickstart.yml up --build
 ```
 
 Open [http://localhost:3100](http://localhost:3100).
@@ -46,7 +47,15 @@ All data is persisted under the bind mount (`./data/docker-paperclip`):
 - Embedded PostgreSQL data
 - Uploaded assets
 - Local secrets key
+- Independent agent JWT signing secret
 - Agent workspace data
+
+Authenticated images create `PAPERCLIP_AGENT_JWT_SECRET` once in the instance
+`.env` on the persistent `/paperclip` mount when no value is supplied. This is
+separate from `BETTER_AUTH_SECRET` and lets local adapters receive run-bound
+authentication on the first boot. Production secret managers may inject both
+values instead, but they must be distinct. `local_trusted` mode does not require
+either authenticated-mode secret.
 
 ## Local Adapter CLIs in Docker
 

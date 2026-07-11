@@ -140,6 +140,7 @@ fi
 
 agents_js="$dist_dir/routes/agents.js"
 agent_auth_jwt_js="$dist_dir/agent-auth-jwt.js"
+better_auth_js="$dist_dir/auth/better-auth.js"
 board_chat_js="$dist_dir/routes/board-chat.js"
 companies_js="$dist_dir/routes/companies.js"
 config_js="$dist_dir/config.js"
@@ -196,6 +197,10 @@ require_in_file "$agent_auth_jwt_js" "PAPERCLIP_AGENT_JWT_ENABLE_LEGACY_FALLBACK
 require_in_file "$agent_auth_jwt_js" "legacyFallbackEnabled" "legacy fallback disabled-by-default marker"
 require_in_file "$agent_auth_jwt_js" "PAPERCLIP_AGENT_JWT_DISABLE_LEGACY_FALLBACK" "legacy fallback disable guard marker"
 forbid_in_file "$agent_auth_jwt_js" "BETTER_AUTH_SECRET" "agent JWT must not fall back to BETTER_AUTH_SECRET"
+require_in_file "$better_auth_js" "BETTER_AUTH_SECRET must be set in authenticated mode" "Better Auth dedicated-secret requirement"
+require_in_file "$better_auth_js" "BETTER_AUTH_SECRET and PAPERCLIP_AGENT_JWT_SECRET must be distinct" "Better Auth secret separation guard"
+forbid_in_file "$better_auth_js" "BETTER_AUTH_SECRET ?? process.env.PAPERCLIP_AGENT_JWT_SECRET" "Better Auth must not fall back to agent JWT secret"
+forbid_in_file "$better_auth_js" "BETTER_AUTH_SECRET?.trim() ?? process.env.PAPERCLIP_AGENT_JWT_SECRET?.trim()" "Better Auth trimmed secret must not fall back to agent JWT secret"
 
 if [ "${#missing[@]}" -gt 0 ]; then
   echo "Package integrity check failed for $dist_dir:" >&2

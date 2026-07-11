@@ -57,6 +57,17 @@ const companyDeletionEnabled = process.env.PAPERCLIP_ENABLE_COMPANY_DELETION?.tr
 `;
 const hardenedBoardChat = "const env = buildSafeInheritedProcessEnv({});\n";
 const hardenedWorkspaceRuntime = "const env = sanitizeRuntimeServiceBaseEnv({});\n";
+const hardenedBetterAuth = `
+const secret = process.env.BETTER_AUTH_SECRET?.trim();
+const agentJwtSecret = process.env.PAPERCLIP_AGENT_JWT_SECRET?.trim();
+if (!secret) throw new Error("BETTER_AUTH_SECRET must be set in authenticated mode");
+if (agentJwtSecret && secret === agentJwtSecret) {
+  throw new Error("BETTER_AUTH_SECRET and PAPERCLIP_AGENT_JWT_SECRET must be distinct");
+}
+`;
+const staleBetterAuth = `
+const secret = process.env.BETTER_AUTH_SECRET?.trim() ?? process.env.PAPERCLIP_AGENT_JWT_SECRET?.trim();
+`;
 const hardenedCliEntrypoint = `
 const serverPackageSpecifier = "@paperclipai/server";
 const secret = process.env.BETTER_AUTH_SECRET?.trim();
@@ -71,6 +82,7 @@ const message = "authenticated mode requires BETTER_AUTH_SECRET (or PAPERCLIP_AG
 test("passes when a built dist contains every mandatory marker", () => {
   const root = makeFixture({
     "agent-auth-jwt.js": hardenedAgentJwt,
+    "auth/better-auth.js": hardenedBetterAuth,
     "config.js": hardenedConfig,
     "routes/board-chat.js": hardenedBoardChat,
     "routes/agents.js": cappedAgentsRoute,
@@ -91,6 +103,7 @@ test("passes when a built dist contains every mandatory marker", () => {
 test("accepts an installed package root containing dist", () => {
   const root = makeFixture({
     "dist/agent-auth-jwt.js": hardenedAgentJwt,
+    "dist/auth/better-auth.js": hardenedBetterAuth,
     "dist/config.js": hardenedConfig,
     "dist/routes/board-chat.js": hardenedBoardChat,
     "dist/routes/agents.js": cappedAgentsRoute,
@@ -112,6 +125,7 @@ test("accepts an installed service package and validates its resolved server pac
     "paperclipai/package.json": JSON.stringify({ name: "paperclipai" }),
     "paperclipai/dist/index.js": hardenedCliEntrypoint,
     "@paperclipai/server/dist/agent-auth-jwt.js": hardenedAgentJwt,
+    "@paperclipai/server/dist/auth/better-auth.js": hardenedBetterAuth,
     "@paperclipai/server/dist/config.js": hardenedConfig,
     "@paperclipai/server/dist/routes/board-chat.js": hardenedBoardChat,
     "@paperclipai/server/dist/routes/agents.js": cappedAgentsRoute,
@@ -135,6 +149,7 @@ test("fails and names the service entrypoint when CLI auth falls back to agent J
     "paperclipai/package.json": JSON.stringify({ name: "paperclipai" }),
     "paperclipai/dist/index.js": staleCliEntrypoint,
     "@paperclipai/server/dist/agent-auth-jwt.js": hardenedAgentJwt,
+    "@paperclipai/server/dist/auth/better-auth.js": hardenedBetterAuth,
     "@paperclipai/server/dist/config.js": hardenedConfig,
     "@paperclipai/server/dist/routes/board-chat.js": hardenedBoardChat,
     "@paperclipai/server/dist/routes/agents.js": cappedAgentsRoute,
@@ -149,6 +164,28 @@ test("fails and names the service entrypoint when CLI auth falls back to agent J
     assert.equal(result.status, 1);
     assert.match(result.output, /CLI auth check must not fall back to agent JWT secret/);
     assert.match(result.output, /paperclipai\/dist\/index[.]js/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fails when the built Better Auth module falls back to the agent JWT secret", () => {
+  const root = makeFixture({
+    "agent-auth-jwt.js": hardenedAgentJwt,
+    "auth/better-auth.js": staleBetterAuth,
+    "config.js": hardenedConfig,
+    "routes/board-chat.js": hardenedBoardChat,
+    "routes/agents.js": cappedAgentsRoute,
+    "routes/companies.js": hardenedCompaniesRoute,
+    "routes/issues.js": "const code = 'pending_issue_thread_interaction';\n",
+    "services/heartbeat.js": "function premiumManagedMaxConcurrentRuns() { return 2; }\n",
+    "services/workspace-runtime.js": hardenedWorkspaceRuntime,
+  });
+  try {
+    const result = runVerifier(root);
+    assert.equal(result.status, 1);
+    assert.match(result.output, /Better Auth trimmed secret must not fall back to agent JWT secret/);
+    assert.match(result.output, /auth\/better-auth[.]js/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

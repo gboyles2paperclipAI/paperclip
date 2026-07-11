@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const issueId = "11111111-1111-4111-8111-111111111111";
 const companyId = "22222222-2222-4222-8222-222222222222";
+const runId = "33333333-3333-4333-8333-333333333333";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -156,7 +157,7 @@ function createRunContextDb(contextSnapshot: Record<string, unknown>) {
         where: vi.fn(() => ({
           then: async (resolve: (rows: unknown[]) => unknown) =>
             resolve([{
-              id: "run-1",
+              id: runId,
               companyId,
               agentId: "agent-1",
               contextSnapshot,
@@ -360,7 +361,7 @@ describe("issue document revision routes", () => {
         type: "agent",
         agentId: "agent-1",
         companyId,
-        runId: "run-1",
+        runId,
         source: "agent_jwt",
       },
       createRunContextDb({

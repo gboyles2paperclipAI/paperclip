@@ -102,6 +102,32 @@ describe("agent local JWT", () => {
     expect(verifyLocalAgentJwt(token!)).toBeNull();
   });
 
+  it.each(["iss", "aud"] as const)("rejects a signed token missing %s", (missingClaim) => {
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const masterSecret = process.env[secretEnv]!;
+    const companyId = "company-claims";
+    const now = Math.floor(Date.now() / 1000);
+    const header = { alg: "HS256", typ: "JWT" };
+    const claims: Record<string, unknown> = {
+      sub: "agent-claims",
+      company_id: companyId,
+      adapter_type: "codex_local",
+      run_id: "run-claims",
+      iat: now,
+      exp: now + 3600,
+      iss: "paperclip",
+      aud: "paperclip-api",
+    };
+    delete claims[missingClaim];
+    const headerB64 = Buffer.from(JSON.stringify(header), "utf8").toString("base64url");
+    const claimsB64 = Buffer.from(JSON.stringify(claims), "utf8").toString("base64url");
+    const signingInput = `${headerB64}.${claimsB64}`;
+    const companyKey = createHmac("sha256", masterSecret).update(`jwt:${companyId}`).digest("hex");
+    const signature = createHmac("sha256", companyKey).update(signingInput).digest("base64url");
+
+    expect(verifyLocalAgentJwt(`${signingInput}.${signature}`)).toBeNull();
+  });
+
   it("does not verify a token across companies (per-company isolation)", () => {
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     const tokenA = createLocalAgentJwt("agent-1", "company-A", "claude_local", "run-1");

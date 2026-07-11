@@ -170,8 +170,8 @@ export function verifyLocalAgentJwt(token: string): LocalAgentJwtClaims | null {
 
   const issuer = typeof claims.iss === "string" ? claims.iss : undefined;
   const audience = typeof claims.aud === "string" ? claims.aud : undefined;
-  if (issuer && issuer !== config.issuer) return null;
-  if (audience && audience !== config.audience) return null;
+  if (issuer !== config.issuer) return null;
+  if (audience !== config.audience) return null;
 
   return {
     sub,
@@ -180,8 +180,8 @@ export function verifyLocalAgentJwt(token: string): LocalAgentJwtClaims | null {
     run_id: runId,
     iat,
     exp,
-    ...(issuer ? { iss: issuer } : {}),
-    ...(audience ? { aud: audience } : {}),
+    iss: issuer,
+    aud: audience,
     jti: typeof claims.jti === "string" ? claims.jti : undefined,
   };
 }
