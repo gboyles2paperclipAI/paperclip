@@ -388,6 +388,12 @@ describeEmbeddedPostgres("pipeline routes", () => {
       scope: null,
     });
     const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId: company.id,
+      agentId: agent!.id,
+      status: "running",
+    });
     const agentActor: Express.Request["actor"] = {
       type: "agent",
       agentId: agent!.id,

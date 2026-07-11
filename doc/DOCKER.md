@@ -44,9 +44,17 @@ Data persistence:
 - Embedded PostgreSQL data
 - uploaded assets
 - local secrets key
+- the independently generated agent JWT signing secret
 - local agent workspace data
 
 All persisted under your bind mount (`./data/docker-paperclip` in the example above).
+
+On the first authenticated boot, the image generates
+`PAPERCLIP_AGENT_JWT_SECRET` in the instance `.env` under `/paperclip` when it
+was not supplied. That value persists with the data volume and is deliberately
+separate from `BETTER_AUTH_SECRET`; local adapters use it to authenticate each
+run with a signed JWT. You may supply `PAPERCLIP_AGENT_JWT_SECRET` from a secret
+manager instead, but never reuse the Better Auth value.
 
 ## Docker Compose
 
@@ -187,6 +195,7 @@ The `docker/quadlet/` directory contains unit files to run Paperclip + PostgreSQ
    ```sh
    cat > ~/.config/containers/systemd/paperclip.env <<EOL
    BETTER_AUTH_SECRET=$(openssl rand -hex 32)
+   PAPERCLIP_AGENT_JWT_SECRET=$(openssl rand -hex 32)
    POSTGRES_USER=paperclip
    POSTGRES_PASSWORD=paperclip
    POSTGRES_DB=paperclip
@@ -216,6 +225,9 @@ systemctl --user stop paperclip-pod      # Stop all
 
 ### Quadlet notes
 
+- **Independent auth secrets**: the example provisions separate board-session
+  and agent-run signing values. If `PAPERCLIP_AGENT_JWT_SECRET` is omitted, the
+  container entrypoint creates it once under the persistent `/paperclip` mount.
 - **First boot**: Unlike Docker Compose's `condition: service_healthy`, Quadlet's `After=` only waits for the DB unit to *start*, not for PostgreSQL to be ready. On a cold first boot you may see one or two restart attempts in `journalctl --user -u paperclip` while PostgreSQL initialises — this is expected and resolves automatically via `Restart=on-failure`.
 - Containers in a pod share `localhost`, so Paperclip reaches Postgres at `127.0.0.1:5432`.
 - PostgreSQL data persists in the `paperclip-pgdata` named volume.

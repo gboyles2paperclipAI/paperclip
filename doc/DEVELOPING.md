@@ -10,6 +10,13 @@ Current implementation status:
 
 - canonical model: `local_trusted` and `authenticated` (with `private/public` exposure)
 
+Authenticated mode requires a dedicated `BETTER_AUTH_SECRET`. Agent-run JWTs
+use `PAPERCLIP_AGENT_JWT_SECRET`; the two secrets are not interchangeable.
+Legacy agent JWTs signed directly with the instance-wide agent secret are
+rejected by default. During a bounded upgrade window, operators can temporarily
+set `PAPERCLIP_AGENT_JWT_ENABLE_LEGACY_FALLBACK=true`; setting
+`PAPERCLIP_AGENT_JWT_DISABLE_LEGACY_FALLBACK=true` always disables that fallback.
+
 ## Prerequisites
 
 - Node.js 20+
@@ -666,16 +673,15 @@ pnpm secrets:migrate-inline-env --apply # apply migration
 
 ## Company Deletion Toggle
 
-Company deletion is intended as a dev/debug capability and can be disabled at runtime:
+Company deletion is intended as a dev/debug capability and is disabled by
+default in every deployment mode. Enable it only for a bounded maintenance
+window:
 
 ```sh
-PAPERCLIP_ENABLE_COMPANY_DELETION=false
+PAPERCLIP_ENABLE_COMPANY_DELETION=true
 ```
 
-Default behavior:
-
-- `local_trusted`: enabled
-- `authenticated`: disabled
+Any missing or non-`true` value keeps the delete route disabled.
 
 ## CLI Client Operations
 

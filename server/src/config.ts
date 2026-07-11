@@ -239,11 +239,8 @@ export function loadConfig(): Config {
         .filter(Boolean),
     ),
   );
-  const companyDeletionEnvRaw = process.env.PAPERCLIP_ENABLE_COMPANY_DELETION;
   const companyDeletionEnabled =
-    companyDeletionEnvRaw !== undefined
-      ? companyDeletionEnvRaw === "true"
-      : deploymentMode === "local_trusted";
+    process.env.PAPERCLIP_ENABLE_COMPANY_DELETION?.trim().toLowerCase() === "true";
   const databaseBackupEnabled =
     process.env.PAPERCLIP_DB_BACKUP_ENABLED !== undefined
       ? process.env.PAPERCLIP_DB_BACKUP_ENABLED === "true"

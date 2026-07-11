@@ -9,6 +9,7 @@ import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
+import { loadMatchingAgentRun } from "../services/agent-run-context.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -159,12 +160,23 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         return;
       }
 
+      const signedRunId = normalizeRunIdHeader(claims.run_id);
+      const matchingRun = await loadMatchingAgentRun(db, {
+        runId: signedRunId,
+        companyId: claims.company_id,
+        agentId: claims.sub,
+      });
+      if (!matchingRun) {
+        next();
+        return;
+      }
+
       req.actor = {
         type: "agent",
         agentId: claims.sub,
         companyId: claims.company_id,
         keyId: undefined,
-        runId: runIdHeader || normalizeRunIdHeader(claims.run_id) || undefined,
+        runId: matchingRun.id,
         source: "agent_jwt",
       };
       next();
@@ -187,13 +199,19 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       return;
     }
 
+    const matchingRun = await loadMatchingAgentRun(db, {
+      runId: runIdHeader,
+      companyId: key.companyId,
+      agentId: key.agentId,
+    });
+
     req.actor = {
       type: "agent",
       agentId: key.agentId,
       companyId: key.companyId,
       keyId: key.id,
       keyScope: normalizeAgentApiKeyScope(key.scopeConfig),
-      runId: runIdHeader || undefined,
+      runId: matchingRun?.id,
       source: "agent_key",
     };
 

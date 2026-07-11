@@ -242,7 +242,9 @@ export async function createApp(
     }),
   );
   api.use(openApiRoutes());
-  api.use("/companies", companyRoutes(db, opts.storageService));
+  api.use("/companies", companyRoutes(db, opts.storageService, {
+    companyDeletionEnabled: opts.companyDeletionEnabled,
+  }));
   api.use(llmRoutes(db));
   api.use(companySkillRoutes(db));
   api.use(teamsCatalogRoutes(db));

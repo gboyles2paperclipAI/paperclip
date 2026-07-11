@@ -1,6 +1,5 @@
 import { Router, type Request } from "express";
-import { eq } from "drizzle-orm";
-import { heartbeatRuns, type Db } from "@paperclipai/db";
+import type { Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
   createApprovalSchema,
@@ -23,6 +22,7 @@ import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { slackIntegrationService } from "../services/slack-integration.js";
+import { loadMatchingAgentRun } from "../services/agent-run-context.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -81,19 +81,21 @@ export function approvalRoutes(
   async function assertApprovalMutationAllowedByRunContext(req: Request, res: any, companyId: string) {
     if (req.actor.type !== "agent") return true;
     const runId = req.actor.runId?.trim();
-    if (!runId || !req.actor.agentId) return true;
+    if (!runId || !req.actor.agentId) {
+      if (req.actor.source !== "agent_jwt") return true;
+      res.status(403).json({ error: "Agent approval mutations require a valid authenticated run context" });
+      return false;
+    }
 
-    const run = await db
-      .select({
-        id: heartbeatRuns.id,
-        companyId: heartbeatRuns.companyId,
-        agentId: heartbeatRuns.agentId,
-        contextSnapshot: heartbeatRuns.contextSnapshot,
-      })
-      .from(heartbeatRuns)
-      .where(eq(heartbeatRuns.id, runId))
-      .then((rows) => rows[0] ?? null);
-    if (!run || run.companyId !== companyId || run.agentId !== req.actor.agentId) return true;
+    const run = await loadMatchingAgentRun(db, {
+      runId,
+      companyId,
+      agentId: req.actor.agentId,
+    });
+    if (!run) {
+      res.status(403).json({ error: "Agent approval run context does not match the authenticated agent and company" });
+      return false;
+    }
     if (!isStatusOnlyCheapRecoveryContext(run.contextSnapshot)) return true;
 
     res.status(403).json({
