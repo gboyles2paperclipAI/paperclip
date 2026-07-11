@@ -161,6 +161,7 @@ import {
   type TrustPresetResolution,
 } from "../services/trust-preset-resolver.js";
 import { externalObjectService } from "../services/external-objects.js";
+import { loadMatchingAgentRun, type MatchingAgentRun } from "../services/agent-run-context.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -2759,22 +2760,26 @@ export function issueRoutes(
       (overrides as Record<string, unknown>).modelProfile === "cheap";
   }
 
-  async function loadActorRunContext(req: Request, companyId: string) {
-    if (req.actor.type !== "agent") return null;
+  async function loadActorRunContext(
+    req: Request,
+    companyId: string,
+  ): Promise<{ kind: "none" } | { kind: "invalid" } | { kind: "valid"; run: MatchingAgentRun }> {
+    if (req.actor.type !== "agent") return { kind: "none" };
     const runId = req.actor.runId?.trim();
-    if (!runId) return null;
-    const run = await db
-      .select({
-        id: heartbeatRuns.id,
-        companyId: heartbeatRuns.companyId,
-        agentId: heartbeatRuns.agentId,
-        contextSnapshot: heartbeatRuns.contextSnapshot,
-      })
-      .from(heartbeatRuns)
-      .where(eq(heartbeatRuns.id, runId))
-      .then((rows) => rows[0] ?? null);
-    if (!run || run.companyId !== companyId || run.agentId !== req.actor.agentId) return null;
-    return run;
+    if (!runId || !req.actor.agentId) {
+      return req.actor.source === "agent_jwt" ? { kind: "invalid" } : { kind: "none" };
+    }
+    const run = await loadMatchingAgentRun(db, { runId, companyId, agentId: req.actor.agentId });
+    return run ? { kind: "valid", run } : { kind: "invalid" };
+  }
+
+  function denyInvalidRunContext(
+    result: Awaited<ReturnType<typeof loadActorRunContext>>,
+    res: Response,
+  ) {
+    if (result.kind !== "invalid") return false;
+    res.status(403).json({ error: "Agent mutation requires a valid authenticated run context" });
+    return true;
   }
 
   async function assertCheapRecoveryIssueAssigneeProfileAllowed(
@@ -2784,8 +2789,10 @@ export function issueRoutes(
     input: { assigneeAdapterOverrides?: unknown },
   ) {
     if (!requestsCheapIssueAssigneeModelProfile(input)) return true;
-    const run = await loadActorRunContext(req, issue.companyId);
-    if (!run || !isStatusOnlyCheapRecoveryContext(run.contextSnapshot)) return true;
+    const result = await loadActorRunContext(req, issue.companyId);
+    if (denyInvalidRunContext(result, res)) return false;
+    if (result.kind !== "valid" || !isStatusOnlyCheapRecoveryContext(result.run.contextSnapshot)) return true;
+    const { run } = result;
 
     res.status(403).json({
       error: "Cheap status-only recovery runs cannot assign downstream issue work to the cheap model profile",
@@ -2827,8 +2834,10 @@ export function issueRoutes(
     res: Response,
     issue: { id: string; companyId: string },
   ) {
-    const run = await loadActorRunContext(req, issue.companyId);
-    if (!run) return true;
+    const result = await loadActorRunContext(req, issue.companyId);
+    if (denyInvalidRunContext(result, res)) return false;
+    if (result.kind !== "valid") return true;
+    const { run } = result;
     if (!isStatusOnlyCheapRecoveryContext(run.contextSnapshot)) return true;
 
     res.status(403).json({
@@ -2849,8 +2858,10 @@ export function issueRoutes(
     res: Response,
     issue: { id: string; companyId: string },
   ) {
-    const run = await loadActorRunContext(req, issue.companyId);
-    if (!run) return true;
+    const result = await loadActorRunContext(req, issue.companyId);
+    if (denyInvalidRunContext(result, res)) return false;
+    if (result.kind !== "valid") return true;
+    const { run } = result;
     if (!isStatusOnlyCheapRecoveryContext(run.contextSnapshot)) return true;
 
     res.status(403).json({

@@ -67,6 +67,38 @@ afterEach(() => {
 });
 
 describe("docker-entrypoint.sh", () => {
+  it("creates one persistent agent JWT secret for authenticated containers", async () => {
+    installStubs({ uid: 0, gid: 0 });
+    const instanceDir = join(stubDir, "instance");
+    const configPath = join(instanceDir, "config.json");
+    const env = {
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated",
+      PAPERCLIP_CONFIG: configPath,
+      BETTER_AUTH_SECRET: "separate-board-auth-test-secret",
+    };
+
+    await runEntrypoint(env);
+    const first = readFileSync(join(instanceDir, ".env"), "utf8");
+    await runEntrypoint(env);
+    const second = readFileSync(join(instanceDir, ".env"), "utf8");
+
+    expect(first).toBe(second);
+    expect(first).toMatch(/^PAPERCLIP_AGENT_JWT_SECRET=[a-f0-9]{64}$/m);
+    expect(first).not.toContain(env.BETTER_AUTH_SECRET);
+  });
+
+  it("does not require or generate auth secrets in local_trusted mode", async () => {
+    installStubs({ uid: 0, gid: 0 });
+    const instanceDir = join(stubDir, "local-instance");
+
+    await runEntrypoint({
+      PAPERCLIP_DEPLOYMENT_MODE: "local_trusted",
+      PAPERCLIP_CONFIG: join(instanceDir, "config.json"),
+    });
+
+    expect(existsSync(join(instanceDir, ".env"))).toBe(false);
+  });
+
   it("keeps the root-start gosu flow with default UID/GID (Docker Compose)", async () => {
     installStubs({ uid: 0, gid: 0 });
 

@@ -41,6 +41,10 @@
           "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:paperclip/better-auth-secret"
         },
         {
+          "name": "PAPERCLIP_AGENT_JWT_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:paperclip/agent-jwt-secret"
+        },
+        {
           "name": "ANTHROPIC_API_KEY",
           "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:paperclip/anthropic-api-key"
         },

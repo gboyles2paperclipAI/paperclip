@@ -900,13 +900,9 @@ describeEmbeddedPostgres("low-trust red-team HTTP route regression suite", () =>
       });
       const bogusRunContext = await request(bogusRunStandardApp)
         .get(`/api/issues/${fixture.issues.reviewRoot.id}/heartbeat-context`);
-      expect(bogusRunContext.status, JSON.stringify(bogusRunContext.body)).toBe(200);
-      expect(bogusRunContext.body.continuationSummary).toMatchObject({
-        body: LOW_TRUST_QUARANTINED_BODY,
-        sourceTrust: {
-          preset: LOW_TRUST_REVIEW_PRESET,
-          disposition: "quarantined",
-        },
+      expect(bogusRunContext.status, JSON.stringify(bogusRunContext.body)).toBe(403);
+      expect(bogusRunContext.body).toMatchObject({
+        error: "Issue is outside this actor's authorization boundary",
       });
       expectNoCanary(bogusRunContext.body, fixture.canaries.raw);
 

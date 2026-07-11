@@ -25,14 +25,12 @@ export function deploymentAuthCheck(config: PaperclipConfig): CheckResult {
     };
   }
 
-  const secret =
-    process.env.BETTER_AUTH_SECRET?.trim() ??
-    process.env.PAPERCLIP_AGENT_JWT_SECRET?.trim();
+  const secret = process.env.BETTER_AUTH_SECRET?.trim();
   if (!secret) {
     return {
       name: "Deployment/auth mode",
       status: "fail",
-      message: "authenticated mode requires BETTER_AUTH_SECRET (or PAPERCLIP_AGENT_JWT_SECRET)",
+      message: "authenticated mode requires BETTER_AUTH_SECRET",
       canRepair: false,
       repairHint: "Set BETTER_AUTH_SECRET before starting Paperclip",
     };

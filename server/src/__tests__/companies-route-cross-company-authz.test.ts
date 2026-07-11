@@ -61,7 +61,7 @@ function registerCompanyRouteMocks() {
 
 let appImportCounter = 0;
 
-async function createApp(actor: Record<string, unknown>) {
+async function createApp(actor: Record<string, unknown>, opts: { companyDeletionEnabled?: boolean } = {}) {
   registerCompanyRouteMocks();
   appImportCounter += 1;
   const routeModulePath = `../routes/companies.js?cross-company-authz-${appImportCounter}`;
@@ -76,7 +76,7 @@ async function createApp(actor: Record<string, unknown>) {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api/companies", companyRoutes({} as any));
+  app.use("/api/companies", companyRoutes({} as any, undefined, opts));
   app.use(errorHandler);
   return app;
 }
@@ -316,7 +316,7 @@ describe.sequential("company route cross-company authorization", () => {
       userId: "member",
       companyIds: [companyBId],
       memberships: [{ companyId: companyBId, membershipRole: "member", status: "active" }],
-    }));
+    }), { companyDeletionEnabled: true });
     await request(memberApp).patch(`/api/companies/${companyBId}`).send({ description: "Updated" }).expect(200);
     await request(memberApp).patch(`/api/companies/${companyBId}/branding`).send({ brandColor: "#abcdef" }).expect(200);
     await request(memberApp).post(`/api/companies/${companyBId}/archive`).send({}).expect(200);
@@ -349,5 +349,62 @@ describe.sequential("company route cross-company authorization", () => {
     expect(adminWrite.status).toBe(403);
     expect(adminWrite.body.error).toContain("access to this company");
     assertNoTargetMutationSideEffects();
+  });
+
+  it("fails closed for company deletion when the server-side flag is missing or disabled", async () => {
+    const actor = boardActor({
+      userId: "member",
+      companyIds: [companyBId],
+      memberships: [{ companyId: companyBId, membershipRole: "member", status: "active" }],
+    });
+
+    const missingFlagApp = await createApp(actor);
+    const missingFlag = await request(missingFlagApp).delete(`/api/companies/${companyBId}`);
+    expect(missingFlag.status).toBe(403);
+    expect(missingFlag.body.error).toContain("Company deletion is disabled");
+    expect(mockCompanyService.remove).not.toHaveBeenCalled();
+
+    vi.clearAllMocks();
+    resetMockDefaults();
+    const disabledFlagApp = await createApp(actor, { companyDeletionEnabled: false });
+    const disabledFlag = await request(disabledFlagApp).delete(`/api/companies/${companyBId}`);
+    expect(disabledFlag.status).toBe(403);
+    expect(disabledFlag.body.error).toContain("Company deletion is disabled");
+    expect(mockCompanyService.remove).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for local_trusted destructive company deletion unless explicitly enabled", async () => {
+    const app = await createApp(boardActor({
+      userId: "local-board",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    }));
+
+    await request(app).get(`/api/companies/${companyBId}`).expect(200);
+    const res = await request(app).delete(`/api/companies/${companyBId}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("Company deletion is disabled");
+    expect(mockCompanyService.remove).not.toHaveBeenCalled();
+  });
+
+  it("preserves existing delete behavior only when company deletion is explicitly enabled", async () => {
+    const app = await createApp(boardActor({
+      userId: "member",
+      companyIds: [companyBId],
+      memberships: [{ companyId: companyBId, membershipRole: "member", status: "active" }],
+    }), { companyDeletionEnabled: true });
+
+    await request(app).delete(`/api/companies/${companyBId}`).expect(200);
+    expect(mockCompanyService.remove).toHaveBeenCalledWith(companyBId);
+  });
+
+  it("blocks unauthenticated company deletion before the deletion gate can allow removal", async () => {
+    const app = await createApp({ type: "none" }, { companyDeletionEnabled: true });
+
+    const res = await request(app).delete(`/api/companies/${companyBId}`);
+
+    expect(res.status).toBe(401);
+    expect(mockCompanyService.remove).not.toHaveBeenCalled();
   });
 });

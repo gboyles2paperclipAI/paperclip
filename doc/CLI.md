@@ -149,7 +149,8 @@ Notes:
   or `/api/agents/me` and then reads only that scoped company.
 - `company create` requires board/instance-admin authentication because it is
   an instance-wide setup command.
-- Deletion is server-gated by `PAPERCLIP_ENABLE_COMPANY_DELETION`.
+- Deletion is disabled by default and is server-gated by the exact setting
+  `PAPERCLIP_ENABLE_COMPANY_DELETION=true`.
 - With agent authentication, company deletion is company-scoped. Use the current company ID/prefix (for example via `--company-id` or `PAPERCLIP_COMPANY_ID`), not another company.
 
 ## Issue Commands

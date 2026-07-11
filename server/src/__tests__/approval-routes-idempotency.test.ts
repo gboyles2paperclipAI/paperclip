@@ -34,6 +34,7 @@ const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockAccessService = vi.hoisted(() => ({
   decide: vi.fn(),
 }));
+const TEST_RUN_ID = "11111111-1111-4111-8111-111111111111";
 
 vi.mock("../services/slack-integration.js", () => ({
   slackIntegrationService: () => mockSlackIntegrationService,
@@ -73,7 +74,7 @@ async function createApp(actorOverrides: Record<string, unknown> = {}) {
   return app;
 }
 
-function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = "run-1", agentId = "agent-1") {
+function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = TEST_RUN_ID, agentId = "agent-1") {
   const runRows = [{
     id: runId,
     companyId: "company-1",
@@ -93,7 +94,12 @@ function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = "r
   } as any;
 }
 
-async function createAgentApp(options: { runId?: string; contextSnapshot?: Record<string, unknown> } = {}) {
+async function createAgentApp(options: {
+  runId?: string;
+  contextSnapshot?: Record<string, unknown>;
+  persistedAgentId?: string;
+  source?: "agent_key" | "agent_jwt";
+} = {}) {
   const [{ errorHandler }, { approvalRoutes }] = await Promise.all([
     import("../middleware/index.js"),
     import("../routes/approvals.js"),
@@ -105,13 +111,17 @@ async function createAgentApp(options: { runId?: string; contextSnapshot?: Recor
       type: "agent",
       agentId: "agent-1",
       companyId: "company-1",
-      runId: options.runId ?? "run-1",
-      source: "api_key",
+      runId: options.runId ?? TEST_RUN_ID,
+      source: options.source ?? "agent_key",
       isInstanceAdmin: false,
     };
     next();
   });
-  app.use("/api", approvalRoutes(createRouteDb(options.contextSnapshot, options.runId ?? "run-1")));
+  app.use("/api", approvalRoutes(createRouteDb(
+    options.contextSnapshot ?? {},
+    options.runId ?? TEST_RUN_ID,
+    options.persistedAgentId ?? "agent-1",
+  )));
   app.use(errorHandler);
   return app;
 }
@@ -405,6 +415,36 @@ describe("approval routes idempotent retries", () => {
     expect(res.body.error).toContain("Cheap status-only recovery runs cannot create or modify approvals");
     expect(mockApprovalService.create).not.toHaveBeenCalled();
     expect(mockIssueApprovalService.linkManyForApproval).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when an agent JWT approval mutation is missing its signed run", async () => {
+    const res = await request(await createAgentApp({ runId: "", source: "agent_jwt" }))
+      .post("/api/companies/company-1/approvals")
+      .send({ type: "request_board_approval", payload: { title: "Bypass attempt" } });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("valid authenticated run context");
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a cheap recovery approval mutation cites another agent's run", async () => {
+    const res = await request(await createAgentApp({
+      source: "agent_jwt",
+      persistedAgentId: "agent-2",
+      contextSnapshot: {
+        modelProfile: "cheap",
+        recoveryIntent: "status_only",
+        allowDeliverableWork: false,
+        allowDocumentUpdates: false,
+        resumeRequiresNormalModel: true,
+      },
+    }))
+      .post("/api/companies/company-1/approvals")
+      .send({ type: "request_board_approval", payload: { title: "Bypass attempt" } });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("does not match the authenticated agent and company");
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
   });
 
   it("blocks status-only recovery runs from resubmitting approvals", async () => {
