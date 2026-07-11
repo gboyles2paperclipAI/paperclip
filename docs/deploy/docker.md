@@ -30,10 +30,26 @@ PAPERCLIP_PORT=3200 PAPERCLIP_DATA_DIR=../data/pc \
 
 ## Manual Docker Build
 
+Create the Better Auth secret file once, outside the repository. Keep this
+same file for every restart or replacement of the authenticated container; do
+not generate a new board-session signing secret for each `docker run`:
+
+```sh
+install -d -m 700 "$HOME/.config/paperclip"
+if [ ! -s "$HOME/.config/paperclip/docker.env" ]; then
+  (umask 077; printf 'BETTER_AUTH_SECRET=%s\n' "$(openssl rand -hex 32)" \
+    > "$HOME/.config/paperclip/docker.env")
+fi
+```
+
+The command writes the secret directly to the protected file and does not
+print its value.
+
 ```sh
 docker build -t paperclip-local .
 docker run --name paperclip \
   -p 3100:3100 \
+  --env-file "$HOME/.config/paperclip/docker.env" \
   -e HOST=0.0.0.0 \
   -e PAPERCLIP_HOME=/paperclip \
   -v "$(pwd)/data/docker-paperclip:/paperclip" \
@@ -71,6 +87,7 @@ Pass API keys to enable local adapter runs inside the container:
 ```sh
 docker run --name paperclip \
   -p 3100:3100 \
+  --env-file "$HOME/.config/paperclip/docker.env" \
   -e HOST=0.0.0.0 \
   -e PAPERCLIP_HOME=/paperclip \
   -e OPENAI_API_KEY=sk-... \
@@ -79,6 +96,11 @@ docker run --name paperclip \
   -v "$(pwd)/data/docker-paperclip:/paperclip" \
   paperclip-local
 ```
+
+This local-adapter example uses the same persistent Better Auth env file from
+the manual-build section. Paperclip separately creates and persists the agent
+JWT signing secret under the `/paperclip` data mount, so local adapters receive
+run-bound authentication without reusing the board-session secret.
 
 Each adapter reads its provider's standard credentials — for example `ANTHROPIC_API_KEY` (Claude), `OPENAI_API_KEY` (Codex), and `GEMINI_API_KEY` or `GOOGLE_API_KEY` (Gemini). OpenCode is multi-provider and uses whichever provider key you supply.
 
