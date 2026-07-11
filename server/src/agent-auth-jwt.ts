@@ -31,16 +31,23 @@ function parseBooleanEnv(value: string | undefined): boolean {
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
+function parseExplicitTrueEnv(value: string | undefined): boolean {
+  return value?.trim().toLowerCase() === "true";
+}
+
 function jwtConfig() {
-  const secret = process.env.PAPERCLIP_AGENT_JWT_SECRET?.trim() || process.env.BETTER_AUTH_SECRET?.trim();
+  const secret = process.env.PAPERCLIP_AGENT_JWT_SECRET?.trim();
   if (!secret) return null;
+  const disableLegacyFallback = parseBooleanEnv(process.env.PAPERCLIP_AGENT_JWT_DISABLE_LEGACY_FALLBACK);
 
   return {
     secret,
     ttlSeconds: parseNumber(process.env.PAPERCLIP_AGENT_JWT_TTL_SECONDS, 60 * 60),
     issuer: process.env.PAPERCLIP_AGENT_JWT_ISSUER ?? "paperclip",
     audience: process.env.PAPERCLIP_AGENT_JWT_AUDIENCE ?? "paperclip-api",
-    disableLegacyFallback: parseBooleanEnv(process.env.PAPERCLIP_AGENT_JWT_DISABLE_LEGACY_FALLBACK),
+    legacyFallbackEnabled:
+      parseExplicitTrueEnv(process.env.PAPERCLIP_AGENT_JWT_ENABLE_LEGACY_FALLBACK) &&
+      !disableLegacyFallback,
   };
 }
 
@@ -50,8 +57,8 @@ function jwtConfig() {
  * In a multi-tenant deployment this ensures that a JWT signed for company A
  * cannot be reused to authenticate as an agent in company B, even if the raw
  * token leaks. The instance-wide master secret is never used to sign new
- * tokens — it is retained only as a verification fallback so that tokens
- * issued before this change continue to validate.
+ * tokens. Legacy master-secret verification is disabled by default and can
+ * only be temporarily restored with an explicit unsafe migration opt-in.
  *
  * The derivation domain-separates with the `jwt:` prefix so the same master
  * secret can safely be reused for other HMAC purposes without key reuse.
@@ -137,21 +144,14 @@ export function verifyLocalAgentJwt(token: string): LocalAgentJwtClaims | null {
   if (!claimedCompanyId) return null;
 
   const signingInput = `${headerB64}.${claimsB64}`;
-  // Try the per-company derived key first (current tokens). Fall back to the
-  // raw master secret so tokens issued before per-company derivation existed
-  // continue to verify — this preserves backward compatibility for any
-  // outstanding tokens (TTL bounds the legacy window naturally).
-  //
-  // Operators should set `PAPERCLIP_AGENT_JWT_DISABLE_LEGACY_FALLBACK=true`
-  // approximately one JWT TTL (~1h by default, see PAPERCLIP_AGENT_JWT_TTL_SECONDS)
-  // after deploying per-company signing. Once set, the master-secret fallback
-  // is disabled and only tokens validating under the per-company derived key
-  // are accepted — closing the window in which a leaked master secret could
-  // be used to forge tokens with arbitrary future `exp` values for any tenant.
+  // Legacy master-secret fallback is unsafe for production and disabled by
+  // default. Use PAPERCLIP_AGENT_JWT_ENABLE_LEGACY_FALLBACK=true only as a
+  // temporary migration window; PAPERCLIP_AGENT_JWT_DISABLE_LEGACY_FALLBACK=true
+  // always keeps the fallback disabled.
   const perCompanyKey = deriveCompanySigningKey(config.secret, claimedCompanyId);
   const perCompanySig = signPayload(perCompanyKey, signingInput);
   let signatureOk = safeCompare(signature, perCompanySig);
-  if (!signatureOk && !config.disableLegacyFallback) {
+  if (!signatureOk && config.legacyFallbackEnabled) {
     const legacySig = signPayload(config.secret, signingInput);
     signatureOk = safeCompare(signature, legacySig);
   }
