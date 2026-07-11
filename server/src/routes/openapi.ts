@@ -4456,11 +4456,17 @@ registerCurrentRoute({
   method: "get",
   path: "/api/companies/{companyId}/interactions",
   tags: ["issues"],
-  summary: "List resolved issue thread interactions",
+  summary: "List company issue thread interactions for audit",
   query: z.object({
+    status: z.string().optional(),
+    issueStatus: z.string().optional(),
+    createdAfter: z.string().optional(),
+    createdBefore: z.string().optional(),
     resolvedAfter: z.string().optional(),
     resolvedBefore: z.string().optional(),
     method: z.enum(["ui_click", "api_explicit", "api_automated", "unknown"]).optional(),
+    limit: z.string().optional(),
+    offset: z.string().optional(),
   }),
 });
 

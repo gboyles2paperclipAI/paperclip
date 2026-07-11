@@ -1051,6 +1051,126 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     })).rejects.toThrow("A decline reason is required for this confirmation");
   });
 
+  it("scopes company interaction audits by pending status, issue status, and created window", async () => {
+    const { companyId, goalId, issueId: doneIssueId } = await seedConfirmationIssue("Company audit filters");
+    const cancelledIssueId = randomUUID();
+    const todoIssueId = randomUUID();
+    await db.insert(issues).values([{
+      id: cancelledIssueId,
+      companyId,
+      goalId,
+      title: "Cancelled issue",
+      status: "in_progress",
+      priority: "medium",
+    }, {
+      id: todoIssueId,
+      companyId,
+      goalId,
+      title: "Todo issue",
+      status: "in_progress",
+      priority: "medium",
+    }]);
+
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, doneIssueId));
+    await db.update(issues).set({ status: "cancelled" }).where(eq(issues.id, cancelledIssueId));
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, todoIssueId));
+
+    const oldDone = await interactionsSvc.create({
+      id: doneIssueId,
+      companyId,
+    }, {
+      kind: "request_confirmation",
+      payload: {
+        version: 1,
+        prompt: "Old pending terminal issue",
+      },
+    }, {
+      userId: "local-board",
+    });
+    const oldCancelled = await interactionsSvc.create({
+      id: cancelledIssueId,
+      companyId,
+    }, {
+      kind: "request_confirmation",
+      payload: {
+        version: 1,
+        prompt: "Old pending cancelled issue",
+      },
+    }, {
+      userId: "local-board",
+    });
+    const oldTodo = await interactionsSvc.create({
+      id: todoIssueId,
+      companyId,
+    }, {
+      kind: "request_confirmation",
+      payload: {
+        version: 1,
+        prompt: "Old pending todo issue",
+      },
+    }, {
+      userId: "local-board",
+    });
+    const freshDone = await interactionsSvc.create({
+      id: doneIssueId,
+      companyId,
+    }, {
+      kind: "request_confirmation",
+      payload: {
+        version: 1,
+        prompt: "Fresh pending terminal issue",
+      },
+    }, {
+      userId: "local-board",
+    });
+
+    const oldCreatedAt = new Date("2026-07-01T00:00:00.000Z");
+    const freshCreatedAt = new Date("2026-07-03T00:00:00.000Z");
+    await db.update(issueThreadInteractions)
+      .set({ createdAt: oldCreatedAt, updatedAt: oldCreatedAt })
+      .where(eq(issueThreadInteractions.id, oldDone.id));
+    await db.update(issueThreadInteractions)
+      .set({ createdAt: oldCreatedAt, updatedAt: oldCreatedAt })
+      .where(eq(issueThreadInteractions.id, oldCancelled.id));
+    await db.update(issueThreadInteractions)
+      .set({ createdAt: oldCreatedAt, updatedAt: oldCreatedAt })
+      .where(eq(issueThreadInteractions.id, oldTodo.id));
+    await db.update(issueThreadInteractions)
+      .set({ createdAt: freshCreatedAt, updatedAt: freshCreatedAt })
+      .where(eq(issueThreadInteractions.id, freshDone.id));
+
+    const defaultAuditRows = await interactionsSvc.listForCompany({ companyId });
+    expect(defaultAuditRows).toHaveLength(0);
+
+    const terminalPendingRows = await interactionsSvc.listForCompany({
+      companyId,
+      statuses: ["pending"],
+      issueStatuses: ["done", "cancelled"],
+      createdBefore: new Date("2026-07-02T00:00:00.000Z"),
+    });
+    expect(terminalPendingRows.map((row) => row.id).sort()).toEqual([
+      oldCancelled.id,
+      oldDone.id,
+    ].sort());
+
+    const firstPagedRow = await interactionsSvc.listForCompany({
+      companyId,
+      statuses: ["pending"],
+      issueStatuses: ["done", "cancelled"],
+      limit: 1,
+    });
+    const secondPagedRow = await interactionsSvc.listForCompany({
+      companyId,
+      statuses: ["pending"],
+      issueStatuses: ["done", "cancelled"],
+      limit: 1,
+      offset: 1,
+    });
+    expect(firstPagedRow).toHaveLength(1);
+    expect(secondPagedRow).toHaveLength(1);
+    expect(firstPagedRow[0]?.id).not.toBe(secondPagedRow[0]?.id);
+  });
+
   it("accepts request_checkbox_confirmation interactions with selected option ids", async () => {
     const { companyId, goalId, issueId } = await seedConfirmationIssue("Checkbox confirmation accept");
 
