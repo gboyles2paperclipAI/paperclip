@@ -151,6 +151,15 @@ describe("approval routes idempotent retries", () => {
     mockLogActivity.mockResolvedValue(undefined);
   });
 
+  it("rejects malformed approval detail ids before hitting the service", async () => {
+    const res = await request(await createApp())
+      .get("/api/approvals/cf7cdade");
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("valid UUID");
+    expect(mockApprovalService.getById).not.toHaveBeenCalled();
+  });
+
   it("does not emit duplicate approval side effects when approve is already resolved", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-1",
