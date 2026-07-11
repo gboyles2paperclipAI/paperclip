@@ -8,8 +8,6 @@ paperclip_instance_id="${PAPERCLIP_INSTANCE_ID:-default}"
 paperclip_dir="$worktree_cwd/.paperclip"
 worktree_config_path="$paperclip_dir/config.json"
 worktree_env_path="$paperclip_dir/.env"
-worktree_config_tmp_path="$worktree_config_path.tmp.${BASHPID:-$$}"
-worktree_env_tmp_path="$worktree_env_path.tmp.${BASHPID:-$$}"
 worktree_name="${PAPERCLIP_WORKSPACE_BRANCH:-$(basename "$worktree_cwd")}"
 skip_host_cli_discovery=false
 case "${PAPERCLIP_WORKTREE_INIT_SKIP_HOST_CLI:-}" in
@@ -39,23 +37,51 @@ source_env_path="$(dirname "$source_config_path")/.env"
 
 mkdir -p "$paperclip_dir"
 
-cleanup_fallback_tmp_files() {
-  rm -f -- "$worktree_config_tmp_path" "$worktree_env_tmp_path"
-}
-
-trap cleanup_fallback_tmp_files EXIT
-
 remove_provision_path() {
   local target_path="$1"
-  if [[ -z "$target_path" || "$target_path" == "/" || "$target_path" == "$worktree_cwd" || "$target_path" == "$paperclip_dir" ]]; then
-    echo "Refusing to remove unsafe provision path: ${target_path:-<empty>}" >&2
-    return 1
-  fi
-  if [[ -d "$target_path" && ! -L "$target_path" ]]; then
-    rm -r -- "$target_path"
-  else
-    rm -f -- "$target_path"
-  fi
+  WORKTREE_CWD="$worktree_cwd" TARGET_PATH="$target_path" node <<'EOF'
+const fs = require("node:fs");
+const path = require("node:path");
+
+function refuse(reason) {
+  console.error(`Refusing to remove unsafe provision path: ${reason}`);
+  process.exit(1);
+}
+
+const worktreeInput = process.env.WORKTREE_CWD;
+const targetInput = process.env.TARGET_PATH;
+if (!worktreeInput || !targetInput) refuse("missing path");
+
+const worktreeReal = fs.realpathSync(worktreeInput);
+const targetPath = path.resolve(targetInput);
+const targetParentReal = fs.realpathSync(path.dirname(targetPath));
+const targetRealShape = path.join(targetParentReal, path.basename(targetPath));
+const relative = path.relative(worktreeReal, targetRealShape);
+if (!relative || relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
+  refuse(targetPath);
+}
+
+const leaf = path.basename(targetRealShape);
+if (leaf !== "node_modules" && !/^node_modules\.paperclip-backup-[0-9]+$/.test(leaf)) {
+  refuse(targetPath);
+}
+
+let entry;
+try {
+  entry = fs.lstatSync(targetRealShape);
+} catch (error) {
+  if (error && error.code === "ENOENT") process.exit(0);
+  throw error;
+}
+
+if (entry.isSymbolicLink() || entry.isFile()) {
+  fs.unlinkSync(targetRealShape);
+} else if (entry.isDirectory()) {
+  fs.rmSync(targetRealShape, { recursive: true, force: false });
+} else {
+  refuse(targetPath);
+}
+EOF
 }
 
 run_isolated_worktree_init() {
@@ -199,13 +225,12 @@ write_fallback_worktree_config() {
   BASE_CWD="$base_cwd" \
   WORKTREE_CWD="$worktree_cwd" \
   PAPERCLIP_DIR="$paperclip_dir" \
-  WORKTREE_CONFIG_TMP_PATH="$worktree_config_tmp_path" \
-  WORKTREE_ENV_TMP_PATH="$worktree_env_tmp_path" \
   SOURCE_CONFIG_PATH="$source_config_path" \
   SOURCE_ENV_PATH="$source_env_path" \
   PAPERCLIP_WORKTREES_DIR="${PAPERCLIP_WORKTREES_DIR:-}" \
   node <<'EOF'
 const fs = require("node:fs");
+const crypto = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
 const net = require("node:net");
@@ -311,6 +336,115 @@ function resolveRuntimeLikePath(value, configPath) {
   return path.resolve(path.dirname(configPath), expanded);
 }
 
+function secureSiblingPath(finalPath, purpose) {
+  return path.join(
+    path.dirname(finalPath),
+    `${path.basename(finalPath)}.paperclip-${purpose}-${crypto.randomBytes(16).toString("hex")}`,
+  );
+}
+
+function writeSecureSibling(finalPath, purpose, contents) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const candidate = secureSiblingPath(finalPath, purpose);
+    let fd;
+    try {
+      const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+      fd = fs.openSync(candidate, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | noFollow, 0o600);
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile()) throw new Error(`secure fallback path is not a regular file: ${path.basename(candidate)}`);
+      fs.fchmodSync(fd, 0o600);
+      fs.writeFileSync(fd, contents);
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      return candidate;
+    } catch (error) {
+      if (fd !== undefined) {
+        try { fs.closeSync(fd); } catch {}
+      }
+      if (error && error.code === "EEXIST") continue;
+      unlinkRegularOrSymlink(candidate);
+      throw error;
+    }
+  }
+  throw new Error(`could not allocate secure fallback file for ${path.basename(finalPath)}`);
+}
+
+function readRegularFileOrMissing(finalPath) {
+  let fd;
+  try {
+    const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+    fd = fs.openSync(finalPath, fs.constants.O_RDONLY | noFollow);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw new Error(`existing fallback path is not a regular file: ${path.basename(finalPath)}`);
+    return fs.readFileSync(fd);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return null;
+    throw error;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+function unlinkRegularOrSymlink(filePath) {
+  if (!filePath) return;
+  try {
+    const stat = fs.lstatSync(filePath);
+    if (!stat.isFile() && !stat.isSymbolicLink()) {
+      throw new Error(`refusing to unlink non-file fallback path: ${path.basename(filePath)}`);
+    }
+    fs.unlinkSync(filePath);
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") throw error;
+  }
+}
+
+function replaceFallbackPair(configPath, configContents, envPath, envContents) {
+  const originalConfig = readRegularFileOrMissing(configPath);
+  const originalEnv = readRegularFileOrMissing(envPath);
+  let configTmpPath;
+  let envTmpPath;
+  let configBackupPath;
+  let envBackupPath;
+  let configInstalled = false;
+  let envInstalled = false;
+
+  try {
+    configTmpPath = writeSecureSibling(configPath, "temp", configContents);
+    envTmpPath = writeSecureSibling(envPath, "temp", envContents);
+    if (originalConfig !== null) configBackupPath = writeSecureSibling(configPath, "backup", originalConfig);
+    if (originalEnv !== null) envBackupPath = writeSecureSibling(envPath, "backup", originalEnv);
+
+    fs.renameSync(configTmpPath, configPath);
+    configTmpPath = undefined;
+    configInstalled = true;
+    fs.renameSync(envTmpPath, envPath);
+    envTmpPath = undefined;
+    envInstalled = true;
+  } catch (error) {
+    try {
+      if (envInstalled) unlinkRegularOrSymlink(envPath);
+      if (configInstalled) unlinkRegularOrSymlink(configPath);
+      if (envBackupPath) {
+        fs.renameSync(envBackupPath, envPath);
+        envBackupPath = undefined;
+      }
+      if (configBackupPath) {
+        fs.renameSync(configBackupPath, configPath);
+        configBackupPath = undefined;
+      }
+    } catch (rollbackError) {
+      throw new AggregateError([error, rollbackError], "fallback config replacement and rollback both failed");
+    }
+    throw error;
+  } finally {
+    unlinkRegularOrSymlink(configTmpPath);
+    unlinkRegularOrSymlink(envTmpPath);
+  }
+
+  unlinkRegularOrSymlink(configBackupPath);
+  unlinkRegularOrSymlink(envBackupPath);
+}
+
 async function main() {
   const worktreeName = process.env.WORKTREE_NAME;
   const paperclipDir = process.env.PAPERCLIP_DIR;
@@ -321,8 +455,6 @@ async function main() {
   const instanceRoot = path.resolve(worktreeHome, "instances", instanceId);
   const configPath = path.resolve(paperclipDir, "config.json");
   const envPath = path.resolve(paperclipDir, ".env");
-  const configTmpPath = path.resolve(process.env.WORKTREE_CONFIG_TMP_PATH);
-  const envTmpPath = path.resolve(process.env.WORKTREE_ENV_TMP_PATH);
 
   let sourceConfig = null;
   if (sourceConfigPath && fs.existsSync(sourceConfigPath)) {
@@ -437,10 +569,12 @@ async function main() {
     envLines.push("PAPERCLIP_AGENT_JWT_SECRET=" + JSON.stringify(agentJwtSecret));
   }
 
-  fs.writeFileSync(configTmpPath, `${JSON.stringify(targetConfig, null, 2)}\n`, { mode: 0o600 });
-  fs.writeFileSync(envTmpPath, `${envLines.join("\n")}\n`, { mode: 0o600 });
-  fs.renameSync(configTmpPath, configPath);
-  fs.renameSync(envTmpPath, envPath);
+  replaceFallbackPair(
+    configPath,
+    `${JSON.stringify(targetConfig, null, 2)}\n`,
+    envPath,
+    `${envLines.join("\n")}\n`,
+  );
 }
 
 main().catch((error) => {
@@ -521,7 +655,7 @@ if [[ -f "$worktree_cwd/package.json" && -f "$worktree_cwd/pnpm-lock.yaml" ]]; t
       for relative_path in "${moved_symlink_paths[@]}"; do
         target_path="$worktree_cwd/$relative_path"
         backup_path="${target_path}${backup_suffix}"
-        [[ -L "$backup_path" ]] && rm "$backup_path"
+        [[ -L "$backup_path" ]] && remove_provision_path "$backup_path"
       done
     }
 

@@ -17,6 +17,16 @@ async function flushConnection() {
   await Promise.resolve();
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("Slack Socket Mode lifecycle", () => {
   const originalAppToken = process.env.SLACK_APP_TOKEN;
 
@@ -116,5 +126,107 @@ describe("Slack Socket Mode lifecycle", () => {
     expect(sockets).toHaveLength(2);
 
     connection?.close();
+  });
+
+  it("schedules one reconnect when opening a Slack connection rejects", async () => {
+    const sockets: FakeSocket[] = [];
+    const openConnection = vi.fn()
+      .mockRejectedValueOnce(new Error("connection open failed"))
+      .mockResolvedValue("wss://socket.example.test");
+    const connection = startSlackSocketMode({} as Db, {
+      reconnectDelayMs: 40,
+      openConnection,
+      createSocket: () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as never;
+      },
+    });
+
+    await flushConnection();
+    expect(sockets).toHaveLength(0);
+    expect(openConnection).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(39);
+    expect(openConnection).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushConnection();
+    expect(openConnection).toHaveBeenCalledTimes(2);
+    expect(sockets).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(openConnection).toHaveBeenCalledTimes(2);
+
+    connection?.close();
+  });
+
+  it("schedules one reconnect when socket construction throws", async () => {
+    const socket = new FakeSocket();
+    const createSocket = vi.fn()
+      .mockImplementationOnce(() => {
+        throw new Error("socket construction failed");
+      })
+      .mockReturnValue(socket as never);
+    const connection = startSlackSocketMode({} as Db, {
+      reconnectDelayMs: 30,
+      openConnection: async () => "wss://socket.example.test",
+      createSocket,
+    });
+
+    await flushConnection();
+    expect(createSocket).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(29);
+    expect(createSocket).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushConnection();
+    expect(createSocket).toHaveBeenCalledTimes(2);
+    expect(socket.listenerCount("message")).toBe(1);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(createSocket).toHaveBeenCalledTimes(2);
+
+    connection?.close();
+  });
+
+  it("catches token resolution failures and schedules one reconnect", async () => {
+    const resolveAppToken = vi.fn()
+      .mockRejectedValueOnce(new Error("secret provider unavailable"))
+      .mockResolvedValue("test-app-token");
+    const openConnection = vi.fn(async () => "wss://socket.example.test");
+    const socket = new FakeSocket();
+    const connection = startSlackSocketMode({} as Db, {
+      reconnectDelayMs: 20,
+      resolveAppToken,
+      openConnection,
+      createSocket: () => socket as never,
+    });
+
+    await flushConnection();
+    expect(openConnection).not.toHaveBeenCalled();
+    expect(resolveAppToken).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(19);
+    expect(resolveAppToken).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushConnection();
+    expect(resolveAppToken).toHaveBeenCalledTimes(2);
+    expect(openConnection).toHaveBeenCalledOnce();
+    expect(socket.listenerCount("message")).toBe(1);
+
+    connection?.close();
+  });
+
+  it("does not create a socket or timer when closed during an in-flight open", async () => {
+    const pendingOpen = deferred<string | null>();
+    const createSocket = vi.fn(() => new FakeSocket() as never);
+    const connection = startSlackSocketMode({} as Db, {
+      reconnectDelayMs: 10,
+      openConnection: () => pendingOpen.promise,
+      createSocket,
+    });
+
+    await flushConnection();
+    connection?.close();
+    pendingOpen.resolve("wss://socket.example.test");
+    await flushConnection();
+
+    expect(createSocket).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
