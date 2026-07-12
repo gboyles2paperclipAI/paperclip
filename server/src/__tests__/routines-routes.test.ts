@@ -663,6 +663,36 @@ describe("routine routes", () => {
     });
   });
 
+  it("preserves explicit null workspace overrides when manually running a routine", async () => {
+    mockAccessService.canUser.mockResolvedValue(true);
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const res = await request(app)
+      .post(`/api/routines/${routineId}/run`)
+      .send({
+        projectId: null,
+        projectWorkspaceId: null,
+        executionWorkspacePreference: "agent_default",
+      });
+
+    expect(res.status).toBe(202);
+    expect(mockRoutineService.runRoutine).toHaveBeenCalledWith(routineId, {
+      source: "manual",
+      projectId: null,
+      projectWorkspaceId: null,
+      executionWorkspacePreference: "agent_default",
+    }, {
+      agentId: null,
+      userId: "board-user",
+    });
+  });
+
   it("allows routine creation when the board user has tasks:assign", async () => {
     mockAccessService.canUser.mockResolvedValue(true);
     const app = await createApp({

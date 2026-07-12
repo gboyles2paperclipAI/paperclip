@@ -1325,6 +1325,172 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     });
   });
 
+  it("lets an explicit agent-default run clear the parent project workspace", async () => {
+    const { companyId, agentId, projectId, svc } = await seedFixture();
+    const parentIssueId = randomUUID();
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      projectId,
+      title: "Routine parent",
+      status: "in_progress",
+      priority: "medium",
+    });
+
+    const parentRoutine = await svc.create(
+      companyId,
+      {
+        projectId,
+        goalId: null,
+        parentIssueId,
+        title: "Read-only monitor",
+        description: "Run outside the code project",
+        assigneeAgentId: agentId,
+        priority: "medium",
+        status: "active",
+        concurrencyPolicy: "coalesce_if_active",
+        catchUpPolicy: "skip_missed",
+      },
+      {},
+    );
+
+    const run = await svc.runRoutine(parentRoutine.id, {
+      source: "manual",
+      projectId: null,
+      executionWorkspacePreference: "agent_default",
+    });
+
+    const storedIssue = await db
+      .select({
+        projectId: issues.projectId,
+        projectWorkspaceId: issues.projectWorkspaceId,
+        executionWorkspaceId: issues.executionWorkspaceId,
+        assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
+      })
+      .from(issues)
+      .where(eq(issues.id, run.linkedIssueId!))
+      .then((rows) => rows[0] ?? null);
+
+    expect(storedIssue).toEqual({
+      projectId: null,
+      projectWorkspaceId: null,
+      executionWorkspaceId: null,
+      assigneeAdapterOverrides: { useProjectWorkspace: false },
+    });
+  });
+
+  it("treats explicit null project overrides as authoritative and preserves agent_default without isolation", async () => {
+    const { companyId, issueSvc, projectId, routine, svc } = await seedFixture();
+    const projectWorkspaceId = randomUUID();
+
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Parent workspace",
+      isPrimary: true,
+      sharedWorkspaceKey: "parent-workspace",
+    });
+    const parent = await issueSvc.create(companyId, {
+      projectId,
+      projectWorkspaceId,
+      title: "Parent code-repo issue",
+      status: "todo",
+      priority: "medium",
+    });
+    await db
+      .update(routines)
+      .set({ projectId: null, parentIssueId: parent.id })
+      .where(eq(routines.id, routine.id));
+
+    const run = await svc.runRoutine(routine.id, {
+      source: "manual",
+      projectId: null,
+      projectWorkspaceId: null,
+      executionWorkspacePreference: "agent_default",
+    });
+
+    const storedIssue = await db
+      .select({
+        parentId: issues.parentId,
+        projectId: issues.projectId,
+        projectWorkspaceId: issues.projectWorkspaceId,
+        executionWorkspaceId: issues.executionWorkspaceId,
+        executionWorkspacePreference: issues.executionWorkspacePreference,
+        assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
+      })
+      .from(issues)
+      .where(eq(issues.id, run.linkedIssueId!))
+      .then((rows) => rows[0] ?? null);
+
+    expect(storedIssue).toEqual({
+      parentId: parent.id,
+      projectId: null,
+      projectWorkspaceId: null,
+      executionWorkspaceId: null,
+      executionWorkspacePreference: null,
+      assigneeAdapterOverrides: { useProjectWorkspace: false },
+    });
+  });
+
+  it("keeps parent project workspace inheritance when manual overrides are omitted", async () => {
+    const { companyId, issueSvc, projectId, routine, svc } = await seedFixture();
+    const projectWorkspaceId = randomUUID();
+
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Inherited workspace",
+      isPrimary: true,
+      sharedWorkspaceKey: "inherited-workspace",
+    });
+    const parent = await issueSvc.create(companyId, {
+      projectId,
+      projectWorkspaceId,
+      title: "Parent code-repo issue",
+      status: "todo",
+      priority: "medium",
+    });
+    await db
+      .update(routines)
+      .set({ projectId: null, parentIssueId: parent.id })
+      .where(eq(routines.id, routine.id));
+
+    const run = await svc.runRoutine(routine.id, { source: "manual" });
+
+    const storedIssue = await db
+      .select({
+        parentId: issues.parentId,
+        projectId: issues.projectId,
+        projectWorkspaceId: issues.projectWorkspaceId,
+      })
+      .from(issues)
+      .where(eq(issues.id, run.linkedIssueId!))
+      .then((rows) => rows[0] ?? null);
+
+    expect(storedIssue).toEqual({
+      parentId: parent.id,
+      projectId,
+      projectWorkspaceId,
+    });
+  });
+
+  it("uses distinct dispatch fingerprints for omitted and explicit-null project overrides", async () => {
+    const { routine, svc } = await seedFixture();
+    await db.update(routines).set({ projectId: null }).where(eq(routines.id, routine.id));
+
+    const inheritedRun = await svc.runRoutine(routine.id, { source: "manual" });
+    const clearedRun = await svc.runRoutine(routine.id, { source: "manual", projectId: null });
+
+    expect(inheritedRun.status).toBe("issue_created");
+    expect(clearedRun.status).toBe("issue_created");
+    expect(clearedRun.linkedIssueId).not.toBe(inheritedRun.linkedIssueId);
+    expect(clearedRun.dispatchFingerprint).not.toBe(inheritedRun.dispatchFingerprint);
+  });
+
   it("auto-populates workspaceBranch from a reused isolated workspace", async () => {
     const { companyId, agentId, projectId, svc } = await seedFixture();
     const projectWorkspaceId = randomUUID();

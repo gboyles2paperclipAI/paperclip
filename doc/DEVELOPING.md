@@ -131,6 +131,20 @@ These browser suites are intended for targeted local verification and CI, not th
 
 For normal issue work, start with the smallest targeted check that proves the change. Reserve repo-wide typecheck/build/test runs for PR-ready handoff or changes broad enough that narrow checks do not cover the risk.
 
+## Manual Routine Run Workspace Precedence
+
+Manual routine-run workspace fields are authoritative when present. An explicit
+`projectId`, `projectWorkspaceId`, `executionWorkspaceId`,
+`executionWorkspacePreference`, or `executionWorkspaceSettings` overrides the
+corresponding saved routine default or parent-issue workspace inheritance.
+Explicit `null` clears that field; it is different from omitting the field.
+
+When a field is omitted, Paperclip keeps the saved routine default and existing
+parent-issue inheritance behavior. Selecting `agent_default` opts the created
+issue out of the project workspace. On instances where isolated workspaces are
+disabled, Paperclip preserves that intent with the legacy agent-workspace
+compatibility flag.
+
 ## One-Command Local Run
 
 For a first-time local install, you can bootstrap and run in one command:

@@ -3031,6 +3031,49 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     });
   });
 
+  it("honors an explicit null project override instead of inheriting the parent project", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const parentIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Workspace project",
+      status: "in_progress",
+    });
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      projectId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+    });
+
+    const child = await svc.create(companyId, {
+      parentId: parentIssueId,
+      projectId: null,
+      title: "Agent-default child",
+      executionWorkspacePreference: "agent_default",
+      workspaceOverrideIntent: {
+        projectId: true,
+        projectWorkspaceId: false,
+        executionWorkspace: true,
+      },
+    });
+
+    expect(child.projectId).toBeNull();
+    expect(child.projectWorkspaceId).toBeNull();
+    expect(child.executionWorkspaceId).toBeNull();
+  });
+
   it("inherits workspace linkage from an explicit source issue without creating a parent-child relationship", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
