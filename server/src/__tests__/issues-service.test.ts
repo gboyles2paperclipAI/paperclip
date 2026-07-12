@@ -2595,6 +2595,73 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     });
   });
 
+  it("persists preference-only agent_default as the authoritative mode when isolation is enabled", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Workspace project",
+      status: "in_progress",
+      executionWorkspacePolicy: {
+        enabled: true,
+        defaultMode: "shared_workspace",
+        allowIssueOverride: true,
+      },
+    });
+
+    const issue = await svc.create(companyId, {
+      projectId,
+      title: "Agent-default monitor",
+      executionWorkspacePreference: "agent_default",
+    });
+
+    expect(issue.executionWorkspacePreference).toBe("agent_default");
+    expect(issue.executionWorkspaceSettings).toEqual({ mode: "agent_default" });
+  });
+
+  it("preserves combined agent_default preference and explicit null settings without policy rehydration", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Workspace project",
+      status: "in_progress",
+      executionWorkspacePolicy: {
+        enabled: true,
+        defaultMode: "isolated_workspace",
+        allowIssueOverride: true,
+      },
+    });
+
+    const issue = await svc.create(companyId, {
+      projectId,
+      title: "Explicit workspace-policy clear",
+      executionWorkspacePreference: "agent_default",
+      executionWorkspaceSettings: null,
+    });
+
+    expect(issue.executionWorkspacePreference).toBe("agent_default");
+    expect(issue.executionWorkspaceSettings).toBeNull();
+  });
+
   it("does not stamp the assignee default environment onto new issues", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
@@ -3029,6 +3096,49 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(child.executionWorkspaceSettings).toEqual({
       mode: "shared_workspace",
     });
+  });
+
+  it("honors an explicit null project override instead of inheriting the parent project", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const parentIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Workspace project",
+      status: "in_progress",
+    });
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      projectId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+    });
+
+    const child = await svc.create(companyId, {
+      parentId: parentIssueId,
+      projectId: null,
+      title: "Agent-default child",
+      executionWorkspacePreference: "agent_default",
+      workspaceOverrideIntent: {
+        projectId: true,
+        projectWorkspaceId: false,
+        executionWorkspace: true,
+      },
+    });
+
+    expect(child.projectId).toBeNull();
+    expect(child.projectWorkspaceId).toBeNull();
+    expect(child.executionWorkspaceId).toBeNull();
   });
 
   it("inherits workspace linkage from an explicit source issue without creating a parent-child relationship", async () => {

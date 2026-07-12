@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -38,6 +38,28 @@ import { secretService } from "../services/secrets.ts";
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 const originalSecretsProviderEnv = process.env.PAPERCLIP_SECRETS_PROVIDER;
+
+function legacyRoutineFingerprint(value: unknown): string {
+  const normalize = (candidate: unknown): unknown => {
+    if (candidate === undefined) return null;
+    if (
+      candidate == null ||
+      typeof candidate === "string" ||
+      typeof candidate === "number" ||
+      typeof candidate === "boolean"
+    ) {
+      return candidate;
+    }
+    if (candidate instanceof Date) return candidate.toISOString();
+    if (Array.isArray(candidate)) return candidate.map(normalize);
+    if (typeof candidate === "object") {
+      const record = candidate as Record<string, unknown>;
+      return Object.fromEntries(Object.keys(record).sort().map((key) => [key, normalize(record[key])]));
+    }
+    return String(candidate);
+  };
+  return createHash("sha256").update(JSON.stringify(normalize(value))).digest("hex");
+}
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -878,69 +900,93 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(wakeupResolved).toBe(true);
   });
 
-  it("coalesces only when the existing routine issue has a live execution run", async () => {
-    const { agentId, companyId, issueSvc, routine, svc } = await seedFixture();
-    const previousRunId = randomUUID();
-    const liveHeartbeatRunId = randomUUID();
-    const previousIssue = await issueSvc.create(companyId, {
-      projectId: routine.projectId,
-      title: routine.title,
-      description: routine.description,
-      status: "in_progress",
-      priority: routine.priority,
-      assigneeAgentId: routine.assigneeAgentId,
-      originKind: "routine_execution",
-      originId: routine.id,
-      originRunId: previousRunId,
-    });
+  it.each(["omitted", "explicit non-null"] as const)(
+    "coalesces an %s manual run against an open issue with the parent-commit legacy fingerprint",
+    async (overrideKind) => {
+      const { agentId, companyId, issueSvc, routine, svc } = await seedFixture();
+      const previousRunId = randomUUID();
+      const liveHeartbeatRunId = randomUUID();
+      const legacyDispatchFingerprint = legacyRoutineFingerprint({
+        payload: null,
+        projectId: routine.projectId ?? null,
+        projectWorkspaceId: null,
+        assigneeAgentId: routine.assigneeAgentId ?? null,
+        routineRevisionId: routine.latestRevisionId,
+        routineEnvFingerprint: legacyRoutineFingerprint(routine.env ?? null),
+        executionWorkspaceId: null,
+        executionWorkspacePreference: null,
+        executionWorkspaceSettings: null,
+        title: routine.title,
+        description: routine.description ?? "",
+      });
+      const previousIssue = await issueSvc.create(companyId, {
+        projectId: routine.projectId,
+        title: routine.title,
+        description: routine.description,
+        status: "in_progress",
+        priority: routine.priority,
+        assigneeAgentId: routine.assigneeAgentId,
+        originKind: "routine_execution",
+        originId: routine.id,
+        originRunId: previousRunId,
+        originFingerprint: legacyDispatchFingerprint,
+      });
 
-    await db.insert(routineRuns).values({
-      id: previousRunId,
-      companyId,
-      routineId: routine.id,
-      triggerId: null,
-      source: "manual",
-      status: "issue_created",
-      triggeredAt: new Date("2026-03-20T12:00:00.000Z"),
-      linkedIssueId: previousIssue.id,
-    });
+      await db.insert(routineRuns).values({
+        id: previousRunId,
+        companyId,
+        routineId: routine.id,
+        triggerId: null,
+        source: "manual",
+        status: "issue_created",
+        triggeredAt: new Date("2026-03-20T12:00:00.000Z"),
+        dispatchFingerprint: legacyDispatchFingerprint,
+        linkedIssueId: previousIssue.id,
+      });
 
-    await db.insert(heartbeatRuns).values({
-      id: liveHeartbeatRunId,
-      companyId,
-      agentId,
-      invocationSource: "assignment",
-      triggerDetail: "system",
-      status: "running",
-      contextSnapshot: { issueId: previousIssue.id },
-      startedAt: new Date("2026-03-20T12:01:00.000Z"),
-    });
+      await db.insert(heartbeatRuns).values({
+        id: liveHeartbeatRunId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        triggerDetail: "system",
+        status: "running",
+        contextSnapshot: { issueId: previousIssue.id },
+        startedAt: new Date("2026-03-20T12:01:00.000Z"),
+      });
 
-    await db
-      .update(issues)
-      .set({
-        checkoutRunId: liveHeartbeatRunId,
-        executionRunId: liveHeartbeatRunId,
-        executionLockedAt: new Date("2026-03-20T12:01:00.000Z"),
-      })
-      .where(eq(issues.id, previousIssue.id));
+      await db
+        .update(issues)
+        .set({
+          checkoutRunId: liveHeartbeatRunId,
+          executionRunId: liveHeartbeatRunId,
+          executionLockedAt: new Date("2026-03-20T12:01:00.000Z"),
+        })
+        .where(eq(issues.id, previousIssue.id));
 
-    const detailBefore = await svc.getDetail(routine.id);
-    expect(detailBefore?.activeIssue?.id).toBe(previousIssue.id);
+      const detailBefore = await svc.getDetail(routine.id);
+      expect(detailBefore?.activeIssue?.id).toBe(previousIssue.id);
 
-    const run = await svc.runRoutine(routine.id, { source: "manual" });
-    expect(run.status).toBe("coalesced");
-    expect(run.linkedIssueId).toBe(previousIssue.id);
-    expect(run.coalescedIntoRunId).toBe(previousRunId);
+      const run = await svc.runRoutine(
+        routine.id,
+        overrideKind === "omitted"
+          ? { source: "manual" }
+          : { source: "manual", projectId: routine.projectId! },
+      );
+      expect(run.status).toBe("coalesced");
+      expect(run.dispatchFingerprint).toBe(legacyDispatchFingerprint);
+      expect(run.linkedIssueId).toBe(previousIssue.id);
+      expect(run.coalescedIntoRunId).toBe(previousRunId);
 
-    const routineIssues = await db
-      .select({ id: issues.id })
-      .from(issues)
-      .where(eq(issues.originId, routine.id));
+      const routineIssues = await db
+        .select({ id: issues.id })
+        .from(issues)
+        .where(eq(issues.originId, routine.id));
 
-    expect(routineIssues).toHaveLength(1);
-    expect(routineIssues[0]?.id).toBe(previousIssue.id);
-  });
+      expect(routineIssues).toHaveLength(1);
+      expect(routineIssues[0]?.id).toBe(previousIssue.id);
+    },
+  );
 
   it("touches a coalesced routine issue for the manual runner's inbox", async () => {
     const { agentId, companyId, issueSvc, routine, svc } = await seedFixture();
@@ -1323,6 +1369,226 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       executionWorkspacePreference: "reuse_existing",
       executionWorkspaceSettings: { mode: "isolated_workspace" },
     });
+  });
+
+  it("lets an explicit agent-default run clear the parent project workspace", async () => {
+    const { companyId, agentId, projectId, svc } = await seedFixture();
+    const parentIssueId = randomUUID();
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      projectId,
+      title: "Routine parent",
+      status: "in_progress",
+      priority: "medium",
+    });
+
+    const parentRoutine = await svc.create(
+      companyId,
+      {
+        projectId,
+        goalId: null,
+        parentIssueId,
+        title: "Read-only monitor",
+        description: "Run outside the code project",
+        assigneeAgentId: agentId,
+        priority: "medium",
+        status: "active",
+        concurrencyPolicy: "coalesce_if_active",
+        catchUpPolicy: "skip_missed",
+      },
+      {},
+    );
+
+    const run = await svc.runRoutine(parentRoutine.id, {
+      source: "manual",
+      projectId: null,
+      executionWorkspacePreference: "agent_default",
+    });
+
+    const storedIssue = await db
+      .select({
+        projectId: issues.projectId,
+        projectWorkspaceId: issues.projectWorkspaceId,
+        executionWorkspaceId: issues.executionWorkspaceId,
+        assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
+      })
+      .from(issues)
+      .where(eq(issues.id, run.linkedIssueId!))
+      .then((rows) => rows[0] ?? null);
+
+    expect(storedIssue).toEqual({
+      projectId: null,
+      projectWorkspaceId: null,
+      executionWorkspaceId: null,
+      assigneeAdapterOverrides: { useProjectWorkspace: false },
+    });
+  });
+
+  it("treats explicit null project overrides as authoritative and preserves agent_default without isolation", async () => {
+    const { companyId, issueSvc, projectId, routine, svc } = await seedFixture();
+    const projectWorkspaceId = randomUUID();
+
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Parent workspace",
+      isPrimary: true,
+      sharedWorkspaceKey: "parent-workspace",
+    });
+    const parent = await issueSvc.create(companyId, {
+      projectId,
+      projectWorkspaceId,
+      title: "Parent code-repo issue",
+      status: "todo",
+      priority: "medium",
+    });
+    await db
+      .update(routines)
+      .set({ projectId: null, parentIssueId: parent.id })
+      .where(eq(routines.id, routine.id));
+
+    const run = await svc.runRoutine(routine.id, {
+      source: "manual",
+      projectId: null,
+      projectWorkspaceId: null,
+      executionWorkspacePreference: "agent_default",
+    });
+
+    const storedIssue = await db
+      .select({
+        parentId: issues.parentId,
+        projectId: issues.projectId,
+        projectWorkspaceId: issues.projectWorkspaceId,
+        executionWorkspaceId: issues.executionWorkspaceId,
+        executionWorkspacePreference: issues.executionWorkspacePreference,
+        assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
+      })
+      .from(issues)
+      .where(eq(issues.id, run.linkedIssueId!))
+      .then((rows) => rows[0] ?? null);
+
+    expect(storedIssue).toEqual({
+      parentId: parent.id,
+      projectId: null,
+      projectWorkspaceId: null,
+      executionWorkspaceId: null,
+      executionWorkspacePreference: null,
+      assigneeAdapterOverrides: { useProjectWorkspace: false },
+    });
+  });
+
+  it("honors explicit null, preference-only, and combined agent_default inputs under isolated policy", async () => {
+    const { projectId, routine, svc } = await seedFixture();
+
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+    await db
+      .update(projects)
+      .set({
+        executionWorkspacePolicy: {
+          enabled: true,
+          defaultMode: "isolated_workspace",
+          allowIssueOverride: true,
+        },
+      })
+      .where(eq(projects.id, projectId));
+
+    const clearedRun = await svc.runRoutine(routine.id, {
+      source: "manual",
+      executionWorkspaceSettings: null,
+    });
+    const agentDefaultRun = await svc.runRoutine(routine.id, {
+      source: "manual",
+      executionWorkspacePreference: "agent_default",
+    });
+    const combinedRun = await svc.runRoutine(routine.id, {
+      source: "manual",
+      executionWorkspacePreference: "agent_default",
+      executionWorkspaceSettings: null,
+    });
+
+    const routineIssues = await db
+      .select({
+        id: issues.id,
+        executionWorkspacePreference: issues.executionWorkspacePreference,
+        executionWorkspaceSettings: issues.executionWorkspaceSettings,
+      })
+      .from(issues);
+    const clearedIssue = routineIssues.find((issue) => issue.id === clearedRun.linkedIssueId);
+    const agentDefaultIssue = routineIssues.find((issue) => issue.id === agentDefaultRun.linkedIssueId);
+    const combinedIssue = routineIssues.find((issue) => issue.id === combinedRun.linkedIssueId);
+
+    expect(clearedIssue).toMatchObject({
+      executionWorkspacePreference: null,
+      executionWorkspaceSettings: null,
+    });
+    expect(agentDefaultIssue).toMatchObject({
+      executionWorkspacePreference: "agent_default",
+      executionWorkspaceSettings: { mode: "agent_default" },
+    });
+    expect(combinedIssue).toMatchObject({
+      executionWorkspacePreference: "agent_default",
+      executionWorkspaceSettings: null,
+    });
+  });
+
+  it("keeps parent project workspace inheritance when manual overrides are omitted", async () => {
+    const { companyId, issueSvc, projectId, routine, svc } = await seedFixture();
+    const projectWorkspaceId = randomUUID();
+
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Inherited workspace",
+      isPrimary: true,
+      sharedWorkspaceKey: "inherited-workspace",
+    });
+    const parent = await issueSvc.create(companyId, {
+      projectId,
+      projectWorkspaceId,
+      title: "Parent code-repo issue",
+      status: "todo",
+      priority: "medium",
+    });
+    await db
+      .update(routines)
+      .set({ projectId: null, parentIssueId: parent.id })
+      .where(eq(routines.id, routine.id));
+
+    const run = await svc.runRoutine(routine.id, { source: "manual" });
+
+    const storedIssue = await db
+      .select({
+        parentId: issues.parentId,
+        projectId: issues.projectId,
+        projectWorkspaceId: issues.projectWorkspaceId,
+      })
+      .from(issues)
+      .where(eq(issues.id, run.linkedIssueId!))
+      .then((rows) => rows[0] ?? null);
+
+    expect(storedIssue).toEqual({
+      parentId: parent.id,
+      projectId,
+      projectWorkspaceId,
+    });
+  });
+
+  it("uses distinct dispatch fingerprints for omitted and explicit-null project overrides", async () => {
+    const { routine, svc } = await seedFixture();
+    await db.update(routines).set({ projectId: null }).where(eq(routines.id, routine.id));
+
+    const inheritedRun = await svc.runRoutine(routine.id, { source: "manual" });
+    const clearedRun = await svc.runRoutine(routine.id, { source: "manual", projectId: null });
+
+    expect(inheritedRun.status).toBe("issue_created");
+    expect(clearedRun.status).toBe("issue_created");
+    expect(clearedRun.linkedIssueId).not.toBe(inheritedRun.linkedIssueId);
+    expect(clearedRun.dispatchFingerprint).not.toBe(inheritedRun.dispatchFingerprint);
   });
 
   it("auto-populates workspaceBranch from a reused isolated workspace", async () => {

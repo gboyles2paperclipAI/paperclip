@@ -626,6 +626,11 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   labelIds?: string[];
   blockedByIssueIds?: string[];
   inheritExecutionWorkspaceFromIssueId?: string | null;
+  workspaceOverrideIntent?: {
+    projectId: boolean;
+    projectWorkspaceId: boolean;
+    executionWorkspace: boolean;
+  };
   watchdog?: { agentId: string; instructions?: string | null } | null;
   watchdogActorRunId?: string | null;
 };
@@ -5490,12 +5495,26 @@ export function issueService(db: Db) {
         labelIds: inputLabelIds,
         blockedByIssueIds,
         inheritExecutionWorkspaceFromIssueId,
+        workspaceOverrideIntent,
         watchdog,
         watchdogActorRunId,
         ...issueData
       } = data;
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
+        const executionWorkspaceSettings = issueData.executionWorkspaceSettings as
+          | Record<string, unknown>
+          | null
+          | undefined;
+        const requestsAgentDefault =
+          issueData.executionWorkspacePreference === "agent_default" ||
+          executionWorkspaceSettings?.mode === "agent_default";
+        if (requestsAgentDefault) {
+          issueData.assigneeAdapterOverrides = {
+            ...((issueData.assigneeAdapterOverrides as Record<string, unknown> | null | undefined) ?? {}),
+            useProjectWorkspace: false,
+          };
+        }
         delete issueData.executionWorkspaceId;
         delete issueData.executionWorkspacePreference;
         delete issueData.executionWorkspaceSettings;
@@ -5517,8 +5536,19 @@ export function issueService(db: Db) {
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
         let executionWorkspaceId = issueData.executionWorkspaceId ?? null;
         let executionWorkspacePreference = issueData.executionWorkspacePreference ?? null;
+        const hasExplicitExecutionWorkspaceSettings = issueData.executionWorkspaceSettings !== undefined;
         let executionWorkspaceSettings =
           (issueData.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null;
+        if (
+          isolatedWorkspacesEnabled &&
+          executionWorkspacePreference === "agent_default" &&
+          !hasExplicitExecutionWorkspaceSettings
+        ) {
+          executionWorkspaceSettings = {
+            ...(executionWorkspaceSettings ?? {}),
+            mode: "agent_default",
+          };
+        }
         const workspaceInheritanceIssueId = inheritExecutionWorkspaceFromIssueId ?? issueData.parentId ?? null;
         const hasExplicitExecutionWorkspaceOverride =
           issueData.executionWorkspaceId !== undefined ||
@@ -5526,14 +5556,26 @@ export function issueService(db: Db) {
           issueData.executionWorkspaceSettings !== undefined;
         if (workspaceInheritanceIssueId) {
           const workspaceSource = await getWorkspaceInheritanceIssue(tx, companyId, workspaceInheritanceIssueId);
-          if (issueData.projectId == null && workspaceSource.projectId) {
+          if (
+            !workspaceOverrideIntent?.projectId &&
+            issueData.projectId == null &&
+            workspaceSource.projectId
+          ) {
             issueData.projectId = workspaceSource.projectId;
           }
-          if (projectWorkspaceId == null && workspaceSource.projectWorkspaceId) {
+          if (
+            !workspaceOverrideIntent?.projectId &&
+            !workspaceOverrideIntent?.projectWorkspaceId &&
+            projectWorkspaceId == null &&
+            workspaceSource.projectWorkspaceId
+          ) {
             projectWorkspaceId = workspaceSource.projectWorkspaceId;
           }
           if (
             isolatedWorkspacesEnabled &&
+            !workspaceOverrideIntent?.projectId &&
+            !workspaceOverrideIntent?.projectWorkspaceId &&
+            !workspaceOverrideIntent?.executionWorkspace &&
             !hasExplicitExecutionWorkspaceOverride &&
             workspaceSource.executionWorkspaceId
           ) {
@@ -5582,6 +5624,7 @@ export function issueService(db: Db) {
         };
 
         if (
+          !hasExplicitExecutionWorkspaceSettings &&
           executionWorkspaceSettings == null &&
           executionWorkspaceId == null &&
           issueData.projectId
@@ -5594,7 +5637,10 @@ export function issueService(db: Db) {
               ),
             ) as Record<string, unknown> | null;
         }
-        if (!projectWorkspaceId && issueData.projectId) {
+        const suppressProjectWorkspaceDefault =
+          (workspaceOverrideIntent?.projectId === true && issueData.projectId == null) ||
+          (workspaceOverrideIntent?.projectWorkspaceId === true && projectWorkspaceId == null);
+        if (!suppressProjectWorkspaceDefault && !projectWorkspaceId && issueData.projectId) {
           const project = await tx
             .select({
               executionWorkspacePolicy: projects.executionWorkspacePolicy,

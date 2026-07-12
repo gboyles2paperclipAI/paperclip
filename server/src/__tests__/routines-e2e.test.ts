@@ -511,4 +511,81 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
       executionWorkspaceSettings: { mode: "isolated_workspace" },
     });
   });
+
+  it("clears inherited code-repo workspace context for explicit null manual overrides", async () => {
+    const { companyId, agentId, projectId, userId } = await seedFixture();
+    const projectWorkspaceId = randomUUID();
+    const parentIssueId = randomUUID();
+    const app = await createApp({
+      type: "board",
+      userId,
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Parent workspace",
+      isPrimary: true,
+      sharedWorkspaceKey: "e2e-parent-workspace",
+    });
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      title: "Parent code-repo issue",
+      status: "todo",
+      priority: "medium",
+    });
+
+    const createRes = await request(app)
+      .post(`/api/companies/${companyId}/routines`)
+      .send({
+        projectId,
+        parentIssueId,
+        title: "Read-only monitor",
+        assigneeAgentId: agentId,
+      });
+    expect([200, 201], JSON.stringify(createRes.body)).toContain(createRes.status);
+
+    const clearRoutineProjectRes = await request(app)
+      .patch(`/api/routines/${createRes.body.id}`)
+      .send({ projectId: null });
+    expect(clearRoutineProjectRes.status).toBe(200);
+    expect(clearRoutineProjectRes.body.projectId).toBeNull();
+
+    const runRes = await postRoutineRun(app, createRes.body.id, {
+      source: "manual",
+      projectId: null,
+      projectWorkspaceId: null,
+      executionWorkspacePreference: "agent_default",
+    });
+    expect(runRes.status).toBe(202);
+    expect(runRes.body.status).toBe("issue_created");
+
+    const [issue] = await db
+      .select({
+        parentId: issues.parentId,
+        projectId: issues.projectId,
+        projectWorkspaceId: issues.projectWorkspaceId,
+        executionWorkspaceId: issues.executionWorkspaceId,
+        executionWorkspacePreference: issues.executionWorkspacePreference,
+        assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
+      })
+      .from(issues)
+      .where(eq(issues.id, runRes.body.linkedIssueId));
+
+    expect(issue).toEqual({
+      parentId: parentIssueId,
+      projectId: null,
+      projectWorkspaceId: null,
+      executionWorkspaceId: null,
+      executionWorkspacePreference: null,
+      assigneeAdapterOverrides: { useProjectWorkspace: false },
+    });
+  });
 });

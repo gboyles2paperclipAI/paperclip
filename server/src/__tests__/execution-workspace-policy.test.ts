@@ -37,6 +37,17 @@ describe("execution workspace policy helpers", () => {
     ).toBe("isolated_workspace");
   });
 
+  it("treats agent_default preference as authoritative when persisted settings are explicitly null", () => {
+    expect(
+      resolveExecutionWorkspaceMode({
+        projectPolicy: { enabled: true, defaultMode: "shared_workspace" },
+        issueSettings: null,
+        issuePreference: "agent_default",
+        legacyUseProjectWorkspace: null,
+      }),
+    ).toBe("agent_default");
+  });
+
   it("falls back to project policy before legacy project-workspace compatibility flag", () => {
     expect(
       resolveExecutionWorkspaceMode({
