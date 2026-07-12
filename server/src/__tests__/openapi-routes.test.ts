@@ -193,4 +193,80 @@ describe("openapi routes", () => {
     expect(spec.paths["/api/board-api-keys"].post.responses["201"]).toBeDefined();
     expect(spec.paths["/api/companies/import"].post.responses["202"]).toBeDefined();
   });
+
+  it("documents the strict company interaction audit response and rate-limit retry header", () => {
+    const { spec } = loadSpecRoutes();
+    const operation = spec.paths["/api/companies/{companyId}/interactions"].get;
+    const responseSchema = operation.responses["200"].content["application/json"].schema;
+
+    expect(responseSchema).toMatchObject({
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["issue", "interaction"],
+        properties: {
+          issue: {
+            type: "object",
+            additionalProperties: false,
+            required: ["id", "identifier", "status"],
+          },
+          interaction: {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "id",
+              "kind",
+              "status",
+              "createdAt",
+              "updatedAt",
+              "resolvedAt",
+              "resolvedBy",
+              "outcome",
+              "resolutionAudit",
+            ],
+          },
+        },
+      },
+    });
+    expect(Object.keys(responseSchema.items.properties.issue.properties)).toEqual([
+      "id",
+      "identifier",
+      "status",
+    ]);
+    expect(Object.keys(responseSchema.items.properties.interaction.properties)).toEqual([
+      "id",
+      "kind",
+      "status",
+      "createdAt",
+      "updatedAt",
+      "resolvedAt",
+      "resolvedBy",
+      "outcome",
+      "resolutionAudit",
+    ]);
+    expect(responseSchema.items.properties.interaction.properties.resolvedBy).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["agentId", "userId"],
+    });
+    expect(responseSchema.items.properties.interaction.properties.resolutionAudit).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["method"],
+    });
+    expect(operation.parameters.find((parameter: { name: string }) => parameter.name === "offset")?.schema)
+      .toMatchObject({ type: "integer", minimum: 0, maximum: 10_000 });
+    expect(operation.responses["429"].headers["Retry-After"]).toEqual({
+      description: "Seconds until the client may retry the request",
+      schema: { type: "integer", minimum: 1 },
+    });
+    for (const path of [
+      "/api/issues/{issueId}/file-resources/list",
+      "/api/issues/{issueId}/file-resources/resolve",
+      "/api/issues/{issueId}/file-resources/content",
+    ]) {
+      expect(spec.paths[path].get.responses["429"].headers).toBeUndefined();
+    }
+  });
 });

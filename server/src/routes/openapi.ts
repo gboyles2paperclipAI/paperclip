@@ -138,6 +138,10 @@ import {
   remoteSecretImportSchema,
   workspaceFileListQuerySchema,
   workspaceFileResourceQuerySchema,
+  COMPANY_INTERACTION_AUDIT_MAX_OFFSET,
+  ISSUE_STATUSES,
+  ISSUE_THREAD_INTERACTION_KINDS,
+  ISSUE_THREAD_INTERACTION_STATUSES,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -295,6 +299,7 @@ function zodToOpenApiSchema(schema: z.ZodTypeAny): JsonSchema {
     }
     const jsonSchema: JsonSchema = { type: "object", properties };
     if (required.length > 0) jsonSchema.required = required;
+    if (unwrapped._def.unknownKeys === "strict") jsonSchema.additionalProperties = false;
     return jsonSchema;
   }
 
@@ -448,6 +453,16 @@ const responses = {
   },
 };
 
+const tooManyRequestsWithRetryAfter = {
+  ...responses.tooManyRequests,
+  headers: {
+    "Retry-After": {
+      description: "Seconds until the client may retry the request",
+      schema: { type: "integer", minimum: 1 },
+    },
+  },
+};
+
 const jsonBody = (schema: z.ZodTypeAny) => ({
   content: { "application/json": { schema } },
   required: true as const,
@@ -508,6 +523,7 @@ function registerCurrentRoute(input: {
   path: string;
   tags: string[];
   summary: string;
+  description?: string;
   query?: z.ZodTypeAny;
   body?: z.ZodTypeAny;
   responses?: Record<string, OpenApiResponse>;
@@ -525,6 +541,7 @@ function registerCurrentRoute(input: {
     path: input.path,
     tags: input.tags,
     summary: input.summary,
+    ...(input.description ? { description: input.description } : {}),
     ...(request ? { request } : {}),
     responses: input.responses ?? { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound },
   });
@@ -4452,22 +4469,57 @@ for (const route of [
   });
 }
 
+const companyInteractionAuditRowSchema = z.object({
+  issue: z.object({
+    id: z.string().uuid(),
+    identifier: z.string().nullable(),
+    status: z.enum(ISSUE_STATUSES),
+  }).strict(),
+  interaction: z.object({
+    id: z.string().uuid(),
+    kind: z.enum(ISSUE_THREAD_INTERACTION_KINDS),
+    status: z.enum(ISSUE_THREAD_INTERACTION_STATUSES),
+    createdAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+    resolvedAt: z.string().datetime({ offset: true }).nullable(),
+    resolvedBy: z.object({
+      agentId: z.string().nullable(),
+      userId: z.string().nullable(),
+    }).strict(),
+    outcome: z.string().nullable(),
+    resolutionAudit: z.object({
+      method: z.enum(["ui_click", "api_explicit", "api_automated", "unknown"]).nullable(),
+    }).strict(),
+  }).strict(),
+}).strict();
+
 registerCurrentRoute({
   method: "get",
   path: "/api/companies/{companyId}/interactions",
   tags: ["issues"],
   summary: "List company issue thread interactions for audit",
+  description: `Returns only issue {id, identifier, status} and interaction {id, kind, status, createdAt, updatedAt, resolvedAt, resolvedBy {agentId, userId}, outcome, resolutionAudit {method}}. Transcript bodies, customer PII, secrets, source identifiers, creator identifiers, and other audit metadata are excluded. Pages are capped at 100 rows and offsets at ${COMPANY_INTERACTION_AUDIT_MAX_OFFSET}. Standard API rate limiting returns HTTP 429 with Retry-After when capacity is exceeded.`,
   query: z.object({
     status: z.string().optional(),
+    interactionStatus: z.string().optional(),
     issueStatus: z.string().optional(),
-    createdAfter: z.string().optional(),
-    createdBefore: z.string().optional(),
-    resolvedAfter: z.string().optional(),
-    resolvedBefore: z.string().optional(),
+    createdAfter: z.string().datetime({ offset: true }).optional(),
+    createdBefore: z.string().datetime({ offset: true }).optional(),
+    updatedAfter: z.string().datetime({ offset: true }).optional(),
+    resolvedAfter: z.string().datetime({ offset: true }).optional(),
+    resolvedBefore: z.string().datetime({ offset: true }).optional(),
     method: z.enum(["ui_click", "api_explicit", "api_automated", "unknown"]).optional(),
     limit: z.string().optional(),
-    offset: z.string().optional(),
+    offset: z.coerce.number().int().min(0).max(COMPANY_INTERACTION_AUDIT_MAX_OFFSET).optional(),
   }),
+  responses: {
+    200: r.ok(z.array(companyInteractionAuditRowSchema)),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    422: r.unprocessable,
+    429: tooManyRequestsWithRetryAfter,
+  },
 });
 
 registerCurrentRoute({

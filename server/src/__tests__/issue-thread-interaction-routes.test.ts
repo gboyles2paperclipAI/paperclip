@@ -12,6 +12,7 @@ const mockIssueService = vi.hoisted(() => ({
 
 const mockInteractionService = vi.hoisted(() => ({
   listForIssue: vi.fn(),
+  listForCompany: vi.fn(),
   getById: vi.fn(async () => null),
   create: vi.fn(),
   acceptInteraction: vi.fn(),
@@ -184,6 +185,7 @@ describe.sequential("issue thread interaction routes", () => {
     vi.clearAllMocks();
     mockIssueService.getById.mockResolvedValue(createIssue());
     mockInteractionService.listForIssue.mockResolvedValue([]);
+    mockInteractionService.listForCompany.mockResolvedValue([]);
     mockInteractionService.expireRequestConfirmationsSupersededByHistoricalComments.mockResolvedValue([]);
     mockInteractionService.create.mockResolvedValue({
       id: "interaction-1",
@@ -416,6 +418,92 @@ describe.sequential("issue thread interaction routes", () => {
         }),
       }),
     );
+  }, 10_000);
+
+  it("lists the exact company audit projection with normalized filters and default pagination", async () => {
+    const projected = [{
+      issue: {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        identifier: "PAP-1714",
+        status: "done",
+      },
+      interaction: {
+        id: "interaction-1",
+        kind: "request_confirmation",
+        status: "accepted",
+        createdAt: "2026-07-01T00:00:00.000Z",
+        updatedAt: "2026-07-02T00:00:00.000Z",
+        resolvedAt: "2026-07-02T00:00:00.000Z",
+        resolvedBy: { agentId: null, userId: "local-board" },
+        outcome: "accepted",
+        resolutionAudit: { method: "ui_click" },
+      },
+    }];
+    mockInteractionService.listForCompany.mockResolvedValueOnce(projected);
+    const app = await createApp();
+
+    const res = await request(app).get(
+      "/api/companies/company-1/interactions?interactionStatus=accepted&issueStatus=done&updatedAfter=2026-07-01T00%3A00%3A00.000Z&method=ui_click",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(projected);
+    expect(mockInteractionService.listForCompany).toHaveBeenCalledWith({
+      companyId: "company-1",
+      resolvedAfter: null,
+      resolvedBefore: null,
+      method: "ui_click",
+      statuses: ["accepted"],
+      issueStatuses: ["done"],
+      createdAfter: null,
+      createdBefore: null,
+      updatedAfter: new Date("2026-07-01T00:00:00.000Z"),
+      limit: 100,
+      offset: 0,
+    });
+    expect(JSON.stringify(res.body)).not.toMatch(
+      /sourceRunId|sourceCommentId|createdBy|requestId|prompt|payload|result|secret|transcript/i,
+    );
+  });
+
+  it("accepts the maximum company audit page size and rejects out-of-range pagination", async () => {
+    const app = await createApp();
+
+    await request(app).get("/api/companies/company-1/interactions?limit=100&offset=25").expect(200);
+    expect(mockInteractionService.listForCompany).toHaveBeenLastCalledWith(
+      expect.objectContaining({ limit: 100, offset: 25 }),
+    );
+
+    await request(app).get("/api/companies/company-1/interactions?limit=101").expect(400);
+    await request(app).get("/api/companies/company-1/interactions?limit=0").expect(400);
+    await request(app).get("/api/companies/company-1/interactions?offset=-1").expect(400);
+    await request(app).get("/api/companies/company-1/interactions?offset=10001").expect(400);
+    await request(app).get("/api/companies/company-1/interactions?offset=9007199254740992").expect(400);
+  });
+
+  it("rejects invalid company audit query values", async () => {
+    const app = await createApp();
+
+    await request(app).get("/api/companies/company-1/interactions?interactionStatus=bogus").expect(422);
+    await request(app).get("/api/companies/company-1/interactions?issueStatus=bogus").expect(422);
+    await request(app).get("/api/companies/company-1/interactions?updatedAfter=not-a-date").expect(422);
+    await request(app).get("/api/companies/company-1/interactions?createdAfter=2026-07-01").expect(422);
+    await request(app).get("/api/companies/company-1/interactions?resolvedBefore=2026-02-30T00%3A00%3A00Z").expect(422);
+    await request(app).get("/api/companies/company-1/interactions?createdBefore=2026-07-01T00%3A00%3A00").expect(422);
+    await request(app).get("/api/companies/company-1/interactions?method=implicit_magic").expect(422);
+  });
+
+  it("denies company interaction audit access outside the actor company scope", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      companyIds: ["company-1"],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    await request(app).get("/api/companies/company-2/interactions").expect(403);
+    expect(mockInteractionService.listForCompany).not.toHaveBeenCalled();
   });
 
   it("logs readable metadata for request confirmation Slack notifications", async () => {

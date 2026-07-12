@@ -248,6 +248,9 @@ export const ISSUE_THREAD_INTERACTION_STATUSES = [
 ] as const;
 export type IssueThreadInteractionStatus = (typeof ISSUE_THREAD_INTERACTION_STATUSES)[number];
 
+/** Maximum SQL offset accepted by the bounded company interaction audit API. */
+export const COMPANY_INTERACTION_AUDIT_MAX_OFFSET = 10_000;
+
 export const ISSUE_THREAD_INTERACTION_CONTINUATION_POLICIES = [
   "none",
   "wake_assignee",

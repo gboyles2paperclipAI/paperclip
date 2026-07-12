@@ -51,6 +51,7 @@ import {
   linkIssueApprovalSchema,
   ISSUE_STATUSES,
   ISSUE_THREAD_INTERACTION_STATUSES,
+  COMPANY_INTERACTION_AUDIT_MAX_OFFSET,
   issueDocumentKeySchema,
   ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
   ISSUE_WATCHDOG_DISCOVERY_KINDS,
@@ -164,6 +165,34 @@ import { externalObjectService } from "../services/external-objects.js";
 import { loadMatchingAgentRun, type MatchingAgentRun } from "../services/agent-run-context.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
+const strictIsoTimestampSchema = z.string().datetime({ offset: true });
+
+function parseStrictIsoTimestamp(value: string | null, fieldName: string): Date | null {
+  if (!value) return null;
+  const parsed = strictIsoTimestampSchema.safeParse(value);
+  const dateParts = /^(\d{4})-(\d{2})-(\d{2})T/.exec(value);
+  if (!parsed.success || !dateParts) {
+    throw unprocessable(`${fieldName} must be a valid ISO-8601 timestamp`);
+  }
+
+  const year = Number(dateParts[1]);
+  const month = Number(dateParts[2]);
+  const day = Number(dateParts[3]);
+  const calendarCheck = new Date(Date.UTC(year, month - 1, day));
+  if (
+    calendarCheck.getUTCFullYear() !== year ||
+    calendarCheck.getUTCMonth() !== month - 1 ||
+    calendarCheck.getUTCDate() !== day
+  ) {
+    throw unprocessable(`${fieldName} must be a valid ISO-8601 timestamp`);
+  }
+
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) {
+    throw unprocessable(`${fieldName} must be a valid ISO-8601 timestamp`);
+  }
+  return timestamp;
+}
 const updateIssueRouteSchema = updateIssueSchema.extend({
   interrupt: z.boolean().optional(),
   executionState: z.unknown().optional(),
@@ -3634,11 +3663,13 @@ export function issueRoutes(
     const resolvedBeforeRaw = typeof req.query.resolvedBefore === "string" ? req.query.resolvedBefore.trim() : null;
     const createdAfterRaw = typeof req.query.createdAfter === "string" ? req.query.createdAfter.trim() : null;
     const createdBeforeRaw = typeof req.query.createdBefore === "string" ? req.query.createdBefore.trim() : null;
+    const updatedAfterRaw = typeof req.query.updatedAfter === "string" ? req.query.updatedAfter.trim() : null;
     const methodRaw = typeof req.query.method === "string" ? req.query.method.trim() : null;
+    const interactionStatusQuery = req.query.interactionStatus ?? req.query.status;
     const statuses = parseCommaSeparatedQuery<IssueThreadInteractionStatus>(
-      req.query.status,
+      interactionStatusQuery,
       ISSUE_THREAD_INTERACTION_STATUSES,
-      "status",
+      "interactionStatus",
     );
     const issueStatuses = parseCommaSeparatedQuery<IssueStatus>(
       req.query.issueStatus,
@@ -3646,25 +3677,11 @@ export function issueRoutes(
       "issueStatus",
     );
 
-    const resolvedAfter = resolvedAfterRaw ? new Date(resolvedAfterRaw) : null;
-    if (resolvedAfterRaw && (!resolvedAfter || Number.isNaN(resolvedAfter.getTime()))) {
-      throw unprocessable("resolvedAfter must be a valid ISO-8601 timestamp");
-    }
-
-    const resolvedBefore = resolvedBeforeRaw ? new Date(resolvedBeforeRaw) : null;
-    if (resolvedBeforeRaw && (!resolvedBefore || Number.isNaN(resolvedBefore.getTime()))) {
-      throw unprocessable("resolvedBefore must be a valid ISO-8601 timestamp");
-    }
-
-    const createdAfter = createdAfterRaw ? new Date(createdAfterRaw) : null;
-    if (createdAfterRaw && (!createdAfter || Number.isNaN(createdAfter.getTime()))) {
-      throw unprocessable("createdAfter must be a valid ISO-8601 timestamp");
-    }
-
-    const createdBefore = createdBeforeRaw ? new Date(createdBeforeRaw) : null;
-    if (createdBeforeRaw && (!createdBefore || Number.isNaN(createdBefore.getTime()))) {
-      throw unprocessable("createdBefore must be a valid ISO-8601 timestamp");
-    }
+    const resolvedAfter = parseStrictIsoTimestamp(resolvedAfterRaw, "resolvedAfter");
+    const resolvedBefore = parseStrictIsoTimestamp(resolvedBeforeRaw, "resolvedBefore");
+    const createdAfter = parseStrictIsoTimestamp(createdAfterRaw, "createdAfter");
+    const createdBefore = parseStrictIsoTimestamp(createdBeforeRaw, "createdBefore");
+    const updatedAfter = parseStrictIsoTimestamp(updatedAfterRaw, "updatedAfter");
 
     const allowedMethods: Set<InteractionResolutionMethod> =
       new Set(["ui_click", "api_explicit", "api_automated", "unknown"]);
@@ -3682,15 +3699,29 @@ export function issueRoutes(
       ? Number.parseInt(rawLimit, 10)
       : null;
     if (rawLimit !== undefined && (parsedLimit === null || !Number.isInteger(parsedLimit) || parsedLimit <= 0)) {
-      res.status(400).json({ error: `limit must be a positive integer up to ${ISSUE_LIST_MAX_LIMIT}` });
+      res.status(400).json({ error: "limit must be a positive integer up to 100" });
       return;
     }
-    const rawOffset = req.query.offset as string | undefined;
+    if (parsedLimit !== null && parsedLimit > 100) {
+      res.status(400).json({ error: "limit must be a positive integer up to 100" });
+      return;
+    }
+    const rawOffset = typeof req.query.offset === "string" ? req.query.offset : undefined;
     const parsedOffset = rawOffset !== undefined && /^\d+$/.test(rawOffset)
       ? Number.parseInt(rawOffset, 10)
       : null;
-    if (rawOffset !== undefined && (parsedOffset === null || !Number.isInteger(parsedOffset) || parsedOffset < 0)) {
-      res.status(400).json({ error: "offset must be a non-negative integer" });
+    if (
+      req.query.offset !== undefined &&
+      (
+        parsedOffset === null ||
+        !Number.isSafeInteger(parsedOffset) ||
+        parsedOffset < 0 ||
+        parsedOffset > COMPANY_INTERACTION_AUDIT_MAX_OFFSET
+      )
+    ) {
+      res.status(400).json({
+        error: `offset must be a non-negative safe integer up to ${COMPANY_INTERACTION_AUDIT_MAX_OFFSET}`,
+      });
       return;
     }
 
@@ -3703,7 +3734,8 @@ export function issueRoutes(
       issueStatuses,
       createdAfter,
       createdBefore,
-      limit: parsedLimit === null ? null : clampIssueListLimit(parsedLimit),
+      updatedAfter,
+      limit: parsedLimit ?? 100,
       offset: parsedOffset ?? 0,
     });
     res.json(interactions);
