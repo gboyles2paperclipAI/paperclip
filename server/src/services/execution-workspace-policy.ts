@@ -186,8 +186,12 @@ export function issueExecutionWorkspaceModeForPersistedWorkspace(
 export function resolveExecutionWorkspaceMode(input: {
   projectPolicy: ProjectExecutionWorkspacePolicy | null;
   issueSettings: IssueExecutionWorkspaceSettings | null;
+  issuePreference?: string | null;
   legacyUseProjectWorkspace: boolean | null;
 }): ParsedExecutionWorkspaceMode {
+  if (input.issuePreference === "agent_default") {
+    return "agent_default";
+  }
   const issueMode = input.issueSettings?.mode;
   if (issueMode && issueMode !== "inherit" && issueMode !== "reuse_existing") {
     return issueMode;

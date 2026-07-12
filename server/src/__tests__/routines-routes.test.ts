@@ -679,6 +679,7 @@ describe("routine routes", () => {
         projectId: null,
         projectWorkspaceId: null,
         executionWorkspacePreference: "agent_default",
+        executionWorkspaceSettings: null,
       });
 
     expect(res.status).toBe(202);
@@ -687,6 +688,7 @@ describe("routine routes", () => {
       projectId: null,
       projectWorkspaceId: null,
       executionWorkspacePreference: "agent_default",
+      executionWorkspaceSettings: null,
     }, {
       agentId: null,
       userId: "board-user",

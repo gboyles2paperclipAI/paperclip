@@ -411,9 +411,20 @@ function normalizeRoutineDispatchFingerprintValue(value: unknown): unknown {
   return String(value);
 }
 
-function hasOwnRoutineRunField(value: object, field: string) {
-  return Object.prototype.hasOwnProperty.call(value, field);
+function hasExplicitRoutineRunField(value: object, field: string) {
+  return (
+    Object.prototype.hasOwnProperty.call(value, field) &&
+    (value as Record<string, unknown>)[field] !== undefined
+  );
 }
+
+type RoutineWorkspaceOverridePresence = {
+  projectId: boolean;
+  projectWorkspaceId: boolean;
+  executionWorkspaceId: boolean;
+  executionWorkspacePreference: boolean;
+  executionWorkspaceSettings: boolean;
+};
 
 function createRoutineDispatchFingerprint(input: {
   payload: Record<string, unknown> | null;
@@ -425,12 +436,9 @@ function createRoutineDispatchFingerprint(input: {
   executionWorkspaceId?: string | null;
   executionWorkspacePreference?: string | null;
   executionWorkspaceSettings?: Record<string, unknown> | null;
-  workspaceOverridePresence: {
-    projectId: boolean;
-    projectWorkspaceId: boolean;
-    executionWorkspaceId: boolean;
-    executionWorkspacePreference: boolean;
-    executionWorkspaceSettings: boolean;
+  explicitNullWorkspaceOverride?: {
+    version: 1;
+    presence: RoutineWorkspaceOverridePresence;
   };
   title: string;
   description: string | null;
@@ -1455,17 +1463,27 @@ export function routineService(
     descriptionAppendix?: string | null;
     actor?: Actor;
   }) {
-    const projectIdOverrideProvided = hasOwnRoutineRunField(input, "projectId");
-    const projectWorkspaceIdOverrideProvided = hasOwnRoutineRunField(input, "projectWorkspaceId");
-    const executionWorkspaceIdOverrideProvided = hasOwnRoutineRunField(input, "executionWorkspaceId");
-    const executionWorkspacePreferenceOverrideProvided = hasOwnRoutineRunField(
+    const projectIdOverrideProvided = hasExplicitRoutineRunField(input, "projectId");
+    const projectWorkspaceIdOverrideProvided = hasExplicitRoutineRunField(input, "projectWorkspaceId");
+    const executionWorkspaceIdOverrideProvided = hasExplicitRoutineRunField(input, "executionWorkspaceId");
+    const executionWorkspacePreferenceOverrideProvided = hasExplicitRoutineRunField(
       input,
       "executionWorkspacePreference",
     );
-    const executionWorkspaceSettingsOverrideProvided = hasOwnRoutineRunField(
+    const executionWorkspaceSettingsOverrideProvided = hasExplicitRoutineRunField(
       input,
       "executionWorkspaceSettings",
     );
+    const explicitNullWorkspaceOverridePresence: RoutineWorkspaceOverridePresence = {
+      projectId: projectIdOverrideProvided && input.projectId === null,
+      projectWorkspaceId: projectWorkspaceIdOverrideProvided && input.projectWorkspaceId === null,
+      executionWorkspaceId: executionWorkspaceIdOverrideProvided && input.executionWorkspaceId === null,
+      executionWorkspacePreference:
+        executionWorkspacePreferenceOverrideProvided && input.executionWorkspacePreference === null,
+      executionWorkspaceSettings:
+        executionWorkspaceSettingsOverrideProvided && input.executionWorkspaceSettings === null,
+    };
+    const hasExplicitNullWorkspaceOverride = Object.values(explicitNullWorkspaceOverridePresence).some(Boolean);
     const projectId = projectIdOverrideProvided
       ? input.projectId ?? null
       : input.routine.projectId ?? null;
@@ -1523,13 +1541,14 @@ export function routineService(
       executionWorkspaceId: input.executionWorkspaceId ?? null,
       executionWorkspacePreference: input.executionWorkspacePreference ?? null,
       executionWorkspaceSettings: input.executionWorkspaceSettings ?? null,
-      workspaceOverridePresence: {
-        projectId: projectIdOverrideProvided,
-        projectWorkspaceId: projectWorkspaceIdOverrideProvided,
-        executionWorkspaceId: executionWorkspaceIdOverrideProvided,
-        executionWorkspacePreference: executionWorkspacePreferenceOverrideProvided,
-        executionWorkspaceSettings: executionWorkspaceSettingsOverrideProvided,
-      },
+      ...(hasExplicitNullWorkspaceOverride
+        ? {
+            explicitNullWorkspaceOverride: {
+              version: 1 as const,
+              presence: explicitNullWorkspaceOverridePresence,
+            },
+          }
+        : {}),
       title,
       description,
     });
@@ -2543,19 +2562,19 @@ export function routineService(
         source: input.source,
         payload: input.payload as Record<string, unknown> | null | undefined,
         variables: input.variables as Record<string, unknown> | null | undefined,
-        ...(hasOwnRoutineRunField(input, "projectId") ? { projectId: input.projectId ?? null } : {}),
-        ...(hasOwnRoutineRunField(input, "projectWorkspaceId")
+        ...(hasExplicitRoutineRunField(input, "projectId") ? { projectId: input.projectId ?? null } : {}),
+        ...(hasExplicitRoutineRunField(input, "projectWorkspaceId")
           ? { projectWorkspaceId: input.projectWorkspaceId ?? null }
           : {}),
         assigneeAgentId: input.assigneeAgentId ?? null,
         idempotencyKey: input.idempotencyKey,
-        ...(hasOwnRoutineRunField(input, "executionWorkspaceId")
+        ...(hasExplicitRoutineRunField(input, "executionWorkspaceId")
           ? { executionWorkspaceId: input.executionWorkspaceId ?? null }
           : {}),
-        ...(hasOwnRoutineRunField(input, "executionWorkspacePreference")
+        ...(hasExplicitRoutineRunField(input, "executionWorkspacePreference")
           ? { executionWorkspacePreference: input.executionWorkspacePreference ?? null }
           : {}),
-        ...(hasOwnRoutineRunField(input, "executionWorkspaceSettings")
+        ...(hasExplicitRoutineRunField(input, "executionWorkspaceSettings")
           ? {
               executionWorkspaceSettings:
                 (input.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null,
@@ -2578,19 +2597,19 @@ export function routineService(
         source: "api",
         payload: input.payload as Record<string, unknown> | null | undefined,
         variables: input.variables as Record<string, unknown> | null | undefined,
-        ...(hasOwnRoutineRunField(input, "projectId") ? { projectId: input.projectId ?? null } : {}),
-        ...(hasOwnRoutineRunField(input, "projectWorkspaceId")
+        ...(hasExplicitRoutineRunField(input, "projectId") ? { projectId: input.projectId ?? null } : {}),
+        ...(hasExplicitRoutineRunField(input, "projectWorkspaceId")
           ? { projectWorkspaceId: input.projectWorkspaceId ?? null }
           : {}),
         assigneeAgentId: input.assigneeAgentId ?? null,
         idempotencyKey: input.idempotencyKey,
-        ...(hasOwnRoutineRunField(input, "executionWorkspaceId")
+        ...(hasExplicitRoutineRunField(input, "executionWorkspaceId")
           ? { executionWorkspaceId: input.executionWorkspaceId ?? null }
           : {}),
-        ...(hasOwnRoutineRunField(input, "executionWorkspacePreference")
+        ...(hasExplicitRoutineRunField(input, "executionWorkspacePreference")
           ? { executionWorkspacePreference: input.executionWorkspacePreference ?? null }
           : {}),
-        ...(hasOwnRoutineRunField(input, "executionWorkspaceSettings")
+        ...(hasExplicitRoutineRunField(input, "executionWorkspaceSettings")
           ? {
               executionWorkspaceSettings:
                 (input.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null,

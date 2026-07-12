@@ -5536,8 +5536,19 @@ export function issueService(db: Db) {
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
         let executionWorkspaceId = issueData.executionWorkspaceId ?? null;
         let executionWorkspacePreference = issueData.executionWorkspacePreference ?? null;
+        const hasExplicitExecutionWorkspaceSettings = issueData.executionWorkspaceSettings !== undefined;
         let executionWorkspaceSettings =
           (issueData.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null;
+        if (
+          isolatedWorkspacesEnabled &&
+          executionWorkspacePreference === "agent_default" &&
+          !hasExplicitExecutionWorkspaceSettings
+        ) {
+          executionWorkspaceSettings = {
+            ...(executionWorkspaceSettings ?? {}),
+            mode: "agent_default",
+          };
+        }
         const workspaceInheritanceIssueId = inheritExecutionWorkspaceFromIssueId ?? issueData.parentId ?? null;
         const hasExplicitExecutionWorkspaceOverride =
           issueData.executionWorkspaceId !== undefined ||
@@ -5613,6 +5624,7 @@ export function issueService(db: Db) {
         };
 
         if (
+          !hasExplicitExecutionWorkspaceSettings &&
           executionWorkspaceSettings == null &&
           executionWorkspaceId == null &&
           issueData.projectId

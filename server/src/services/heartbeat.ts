@@ -10305,6 +10305,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const resolvedExecutionWorkspaceMode = resolveExecutionWorkspaceMode({
       projectPolicy: projectExecutionWorkspacePolicy,
       issueSettings: issueExecutionWorkspaceSettings,
+      issuePreference: issueContext?.executionWorkspacePreference ?? null,
       legacyUseProjectWorkspace: issueAssigneeOverrides?.useProjectWorkspace ?? null,
     });
     const requestedExecutionWorkspaceMode =
