@@ -735,6 +735,149 @@ describe.sequential("agent permission routes", () => {
     );
   });
 
+  it("updates cheap while preserving paused-agent legacy model profiles losslessly", async () => {
+    const legacyProfile = {
+      label: "Brand policy fallback",
+      adapterConfig: {
+        adapterType: "claude_local",
+        model: "claude-sonnet-4-6",
+      },
+      legacyMetadata: { source: "pre-model-profile-v1" },
+    };
+    const existingRuntimeConfig = {
+      heartbeat: { enabled: false, wakeOnDemand: true, maxConcurrentRuns: 1 },
+      modelProfiles: {
+        cheap: {
+          adapterConfig: {
+            model: "claude-haiku-4-5-20251001",
+            modelReasoningEffort: "low",
+          },
+        },
+        "brand-policy-fallback": legacyProfile,
+      },
+      futureRuntimeField: { preserved: true },
+    };
+    const requestedRuntimeConfig = {
+      ...existingRuntimeConfig,
+      modelProfiles: {
+        ...existingRuntimeConfig.modelProfiles,
+        cheap: {
+          ...existingRuntimeConfig.modelProfiles.cheap,
+          adapterConfig: {
+            ...existingRuntimeConfig.modelProfiles.cheap.adapterConfig,
+            model: "gpt-5.3-codex-spark",
+          },
+        },
+      },
+    };
+    const pausedAgent = {
+      ...baseAgent,
+      status: "paused",
+      pauseReason: "manual",
+      pausedAt: new Date("2026-07-12T00:00:00.000Z"),
+      adapterType: "codex_local",
+      runtimeConfig: existingRuntimeConfig,
+    };
+    mockAgentService.getById.mockResolvedValue(pausedAgent);
+    mockAgentService.update.mockResolvedValue({
+      ...pausedAgent,
+      runtimeConfig: requestedRuntimeConfig,
+    });
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ runtimeConfig: requestedRuntimeConfig }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.status).toBe("paused");
+    expect(mockSecretService.normalizeAdapterConfigForPersistence).toHaveBeenCalledTimes(1);
+    expect(mockSecretService.normalizeAdapterConfigForPersistence).toHaveBeenCalledWith(
+      companyId,
+      requestedRuntimeConfig.modelProfiles.cheap.adapterConfig,
+      { strictMode: false, adapterType: "codex_local" },
+    );
+    expect(mockAgentService.update).toHaveBeenCalledWith(
+      agentId,
+      expect.objectContaining({ runtimeConfig: requestedRuntimeConfig }),
+      expect.anything(),
+    );
+    const persistedPatch = mockAgentService.update.mock.calls[0]?.[1] as {
+      runtimeConfig: typeof requestedRuntimeConfig;
+    };
+    expect(persistedPatch.runtimeConfig.modelProfiles["brand-policy-fallback"]).toEqual(legacyProfile);
+    expect(persistedPatch.runtimeConfig.futureRuntimeField).toEqual({ preserved: true });
+  });
+
+  it.each([
+    {
+      name: "changes",
+      legacyProfiles: {
+        "brand-policy-fallback": {
+          label: "Changed",
+          adapterConfig: { model: "claude-sonnet-4-6" },
+        },
+      },
+    },
+    { name: "deletes", legacyProfiles: {} },
+    {
+      name: "adds",
+      legacyProfiles: {
+        "brand-policy-fallback": {
+          label: "Brand policy fallback",
+          adapterConfig: { model: "claude-sonnet-4-6" },
+        },
+        "new-legacy-profile": { adapterConfig: { model: "gpt-5-mini" } },
+      },
+    },
+  ])("rejects a runtimeConfig update that $name legacy model profiles", async ({ legacyProfiles }) => {
+    const legacyProfile = {
+      label: "Brand policy fallback",
+      adapterConfig: { model: "claude-sonnet-4-6" },
+    };
+    mockAgentService.getById.mockResolvedValue({
+      ...baseAgent,
+      status: "paused",
+      adapterType: "codex_local",
+      runtimeConfig: {
+        heartbeat: { enabled: false },
+        modelProfiles: {
+          cheap: { adapterConfig: { model: "claude-haiku-4-5-20251001" } },
+          "brand-policy-fallback": legacyProfile,
+        },
+      },
+    });
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({
+        runtimeConfig: {
+          heartbeat: { enabled: false },
+          modelProfiles: {
+            cheap: { adapterConfig: { model: "gpt-5.3-codex-spark" } },
+            ...legacyProfiles,
+          },
+        },
+      }));
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain("preservation-only");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
   it("blocks agent-authenticated self-updates that set instructions bundle roots", async () => {
     const app = await createApp({
       type: "agent",
