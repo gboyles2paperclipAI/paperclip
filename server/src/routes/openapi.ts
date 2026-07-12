@@ -4457,7 +4457,7 @@ registerCurrentRoute({
   path: "/api/companies/{companyId}/interactions",
   tags: ["issues"],
   summary: "List company issue thread interactions for audit",
-  description: "Returns a company-scoped, audit-only projection without transcript bodies, customer PII, or secrets. Pages are capped at 100 rows. Standard API rate limiting returns HTTP 429 with Retry-After when capacity is exceeded.",
+  description: "Returns only issue {id, identifier, status} and interaction {id, kind, status, createdAt, updatedAt, resolvedAt, resolvedBy {agentId, userId}, outcome, resolutionAudit {method}}. Transcript bodies, customer PII, secrets, source identifiers, creator identifiers, and other audit metadata are excluded. Pages are capped at 100 rows. Standard API rate limiting returns HTTP 429 with Retry-After when capacity is exceeded.",
   query: z.object({
     status: z.string().optional(),
     interactionStatus: z.string().optional(),

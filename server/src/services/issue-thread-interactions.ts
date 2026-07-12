@@ -20,7 +20,6 @@ import type {
   DismissIssueThreadInteraction,
   IssueThreadInteraction,
   IssueThreadInteractionResult,
-  InteractionResolutionAudit,
   InteractionResolutionAuditMetadata,
   InteractionResolutionMethod,
   IssueStatus,
@@ -1051,28 +1050,10 @@ export function issueThreadInteractionService(db: Db) {
       return rows
         .map(({ interaction: row, issue }) => {
           const resolutionAudit = row.resolutionAudit ?? null;
-          const method = resolutionAudit?.method ?? "unknown";
           const outcome = row.result && typeof row.result === "object" && "outcome" in row.result
             ? row.result.outcome ?? null
             : null;
-          const auditResolution = { method: resolutionAudit?.method ?? null };
           return {
-            id: row.id,
-            companyId: row.companyId,
-            issueId: row.issueId,
-            kind: row.kind as InteractionResolutionAudit["kind"],
-            status: row.status as InteractionResolutionAudit["status"],
-            method,
-            sourceRunId: row.sourceRunId ?? null,
-            sourceCommentId: row.sourceCommentId ?? null,
-            createdByAgentId: row.createdByAgentId ?? null,
-            createdByUserId: row.createdByUserId ?? null,
-            resolvedByAgentId: row.resolvedByAgentId ?? null,
-            resolvedByUserId: row.resolvedByUserId ?? null,
-            resolvedAt: row.resolvedAt ?? null,
-            createdAt: row.createdAt,
-            updatedAt: row.updatedAt,
-            resolutionAudit,
             issue: {
               id: issue.id,
               identifier: issue.identifier,
@@ -1090,11 +1071,13 @@ export function issueThreadInteractionService(db: Db) {
                 userId: row.resolvedByUserId ?? null,
               },
               outcome,
-              resolutionAudit: auditResolution,
+              resolutionAudit: {
+                method: resolutionAudit?.method ?? null,
+              },
             },
           };
         })
-        .filter((row) => !args.method || row.method === args.method)
+        .filter((row) => !args.method || (row.interaction.resolutionAudit.method ?? "unknown") === args.method)
         .slice(args.offset ?? 0, args.limit ? (args.offset ?? 0) + args.limit : undefined);
     },
 

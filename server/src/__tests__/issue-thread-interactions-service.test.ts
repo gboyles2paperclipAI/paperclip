@@ -1015,15 +1015,32 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       method: "ui_click",
     });
     expect(auditRows).toHaveLength(1);
-    expect(auditRows[0]).toMatchObject({
-      id: created.id,
-      method: "ui_click",
-      resolvedByUserId: "local-board",
-      resolutionAudit: {
-        method: "ui_click",
-        requestId: "req-confirm-1",
+    expect(auditRows[0]).toEqual({
+      issue: {
+        id: issueId,
+        identifier: null,
+        status: "in_progress",
+      },
+      interaction: {
+        id: created.id,
+        kind: "request_confirmation",
+        status: "accepted",
+        createdAt: expect.any(Date),
+        updatedAt: expect.any(Date),
+        resolvedAt: expect.any(Date),
+        resolvedBy: {
+          agentId: null,
+          userId: "local-board",
+        },
+        outcome: "accepted",
+        resolutionAudit: {
+          method: "ui_click",
+        },
       },
     });
+    expect(JSON.stringify(auditRows[0])).not.toMatch(
+      /sourceRunId|sourceCommentId|createdBy|resolvedByAgentId|resolvedByUserId|requestId|prompt|payload|result|secret|transcript/i,
+    );
     expect(await interactionsSvc.listForCompany({
       companyId,
       method: "api_explicit",
@@ -1148,7 +1165,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       issueStatuses: ["done", "cancelled"],
       createdBefore: new Date("2026-07-02T00:00:00.000Z"),
     });
-    expect(terminalPendingRows.map((row) => row.id).sort()).toEqual([
+    expect(terminalPendingRows.map((row) => row.interaction.id).sort()).toEqual([
       oldCancelled.id,
       oldDone.id,
     ].sort());
@@ -1168,8 +1185,8 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       statuses: ["pending"],
       updatedAfter: new Date("2026-07-02T00:00:00.000Z"),
     });
-    expect(updatedRows.map((row) => row.id)).toContain(freshDone.id);
-    expect(updatedRows.map((row) => row.id)).not.toContain(oldDone.id);
+    expect(updatedRows.map((row) => row.interaction.id)).toContain(freshDone.id);
+    expect(updatedRows.map((row) => row.interaction.id)).not.toContain(oldDone.id);
 
     const firstPagedRow = await interactionsSvc.listForCompany({
       companyId,
@@ -1186,7 +1203,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     });
     expect(firstPagedRow).toHaveLength(1);
     expect(secondPagedRow).toHaveLength(1);
-    expect(firstPagedRow[0]?.id).not.toBe(secondPagedRow[0]?.id);
+    expect(firstPagedRow[0]?.interaction.id).not.toBe(secondPagedRow[0]?.interaction.id);
   });
 
   it("accepts request_checkbox_confirmation interactions with selected option ids", async () => {
