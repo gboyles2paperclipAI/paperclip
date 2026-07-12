@@ -64,10 +64,28 @@ const agentModelProfileConfigSchema = z.object({
   adapterConfig: adapterConfigSchema,
 }).strict();
 
+const updateAgentModelProfileConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  label: z.string().refine((value) => value.trim().length > 0, {
+    message: "label must contain non-whitespace characters",
+  }).optional(),
+  adapterConfig: adapterConfigSchema,
+}).catchall(z.unknown());
+
 export const agentRuntimeConfigSchema = z.object({
   modelProfiles: z.object({
     cheap: agentModelProfileConfigSchema.optional(),
   }).strict().optional(),
+}).catchall(z.unknown());
+
+// Updates must be able to round-trip profiles written by older Paperclip
+// versions. The route treats those unknown keys as preservation-only and
+// rejects attempts to add, remove, or change them. Creation remains strict so
+// new opaque profiles cannot enter the system through current APIs.
+export const updateAgentRuntimeConfigSchema = z.object({
+  modelProfiles: z.object({
+    cheap: updateAgentModelProfileConfigSchema.optional(),
+  }).catchall(z.unknown()).optional(),
 }).catchall(z.unknown());
 
 export const createAgentSchema = z.object({
@@ -101,6 +119,7 @@ export const updateAgentSchema = createAgentSchema
   .omit({ permissions: true })
   .partial()
   .extend({
+    runtimeConfig: updateAgentRuntimeConfigSchema.optional(),
     permissions: z.never().optional(),
     replaceAdapterConfig: z.boolean().optional(),
     status: z.enum(AGENT_STATUSES).optional(),

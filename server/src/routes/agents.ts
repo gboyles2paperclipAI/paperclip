@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
 import { agents as agentsTable, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable } from "@paperclipai/db";
@@ -27,6 +28,7 @@ import {
   updateAgentSchema,
   supportedEnvironmentDriversForAdapter,
   LOW_TRUST_REVIEW_PRESET,
+  MODEL_PROFILE_KEYS,
 } from "@paperclipai/shared";
 import {
   resolvePaperclipInstanceRootForAdapter,
@@ -1079,6 +1081,7 @@ export function agentRoutes(
       path: string;
     }> = [];
     for (const [profileKey, rawProfile] of Object.entries(modelProfiles)) {
+      if (!(MODEL_PROFILE_KEYS as readonly string[]).includes(profileKey)) continue;
       const profile = asRecord(rawProfile);
       const adapterConfig = asRecord(profile?.adapterConfig);
       if (!profile || !adapterConfig) continue;
@@ -1090,6 +1093,30 @@ export function agentRoutes(
       });
     }
     return entries;
+  }
+
+  function assertLegacyRuntimeModelProfilesPreserved(
+    existingRuntimeConfig: unknown,
+    requestedRuntimeConfig: Record<string, unknown>,
+  ) {
+    const existingProfiles = asRecord(asRecord(existingRuntimeConfig)?.modelProfiles) ?? {};
+    const requestedProfiles = asRecord(requestedRuntimeConfig.modelProfiles) ?? {};
+    const supportedKeys = new Set<string>(MODEL_PROFILE_KEYS);
+    const legacyKeys = new Set([
+      ...Object.keys(existingProfiles),
+      ...Object.keys(requestedProfiles),
+    ].filter((key) => !supportedKeys.has(key)));
+    const changedLegacyKeys = [...legacyKeys].filter((key) =>
+      !Object.prototype.hasOwnProperty.call(existingProfiles, key)
+      || !Object.prototype.hasOwnProperty.call(requestedProfiles, key)
+      || !isDeepStrictEqual(existingProfiles[key], requestedProfiles[key])
+    ).sort();
+
+    if (changedLegacyKeys.length > 0) {
+      throw unprocessable(
+        `Legacy runtime model profiles are preservation-only and cannot be added, removed, or changed: ${changedLegacyKeys.join(", ")}`,
+      );
+    }
   }
 
   function assertNoAgentRuntimeConfigAdapterConfigMutation(req: Request, runtimeConfig: unknown) {
@@ -2931,6 +2958,7 @@ export function agentRoutes(
         res.status(422).json({ error: "runtimeConfig must be an object" });
         return;
       }
+      assertLegacyRuntimeModelProfilesPreserved(existing.runtimeConfig, runtimeConfig);
       assertNoAgentRuntimeConfigAdapterConfigMutation(req, runtimeConfig);
       requestedRuntimeConfig = runtimeConfig;
     }

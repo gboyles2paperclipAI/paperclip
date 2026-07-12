@@ -1433,6 +1433,46 @@ function sessionParamsWithConfigMetadata(
 }
 
 describe("effective run session config freshness", () => {
+  it("freshens agent runtime config when cheap changes without altering legacy profiles", async () => {
+    const legacyProfile = {
+      label: "Brand policy fallback",
+      adapterConfig: {
+        adapterType: "claude_local",
+        model: "claude-sonnet-4-6",
+      },
+      legacyMetadata: { source: "pre-model-profile-v1" },
+    };
+    const baseRuntimeConfig = {
+      heartbeat: { enabled: false, maxConcurrentRuns: 1 },
+      modelProfiles: {
+        cheap: {
+          adapterConfig: {
+            model: "claude-haiku-4-5-20251001",
+            modelReasoningEffort: "low",
+          },
+        },
+        "brand-policy-fallback": legacyProfile,
+      },
+    };
+    const nextRuntimeConfig = structuredClone(baseRuntimeConfig);
+    nextRuntimeConfig.modelProfiles.cheap.adapterConfig.model = "gpt-5.3-codex-spark";
+    const base = await buildSessionConfigMetadata({ agentRuntimeConfig: baseRuntimeConfig });
+    const next = await buildSessionConfigMetadata({ agentRuntimeConfig: nextRuntimeConfig });
+
+    const decision = resolveTaskSessionConfigFreshness({
+      hasTaskSession: true,
+      configuredModel: "gpt-5.4-mini",
+      taskSessionParams: sessionParamsWithConfigMetadata(base),
+      configMetadata: next,
+    });
+
+    expect(decision).toMatchObject({
+      reset: true,
+      changedCategories: ["agentRuntimeConfig"],
+    });
+    expect(nextRuntimeConfig.modelProfiles["brand-policy-fallback"]).toEqual(legacyProfile);
+  });
+
   it("resets when effective adapter config changes after model/profile/env resolution", async () => {
     const base = await buildSessionConfigMetadata();
     const next = await buildSessionConfigMetadata({

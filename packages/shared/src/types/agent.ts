@@ -1,6 +1,5 @@
 import type {
   AgentAdapterType,
-  ModelProfileKey,
   PauseReason,
   AgentRole,
   AgentStatus,
@@ -25,14 +24,18 @@ export interface AgentPermissions extends Record<string, unknown> {
   triageAuthorityFields?: string[];
 }
 
-export interface AgentModelProfileConfig {
+export interface AgentModelProfileConfig extends Record<string, unknown> {
   enabled?: boolean;
   label?: string;
   adapterConfig: Record<string, unknown>;
 }
 
+export interface AgentModelProfiles extends Record<string, unknown> {
+  cheap?: AgentModelProfileConfig;
+}
+
 export interface AgentRuntimeConfig extends Record<string, unknown> {
-  modelProfiles?: Partial<Record<ModelProfileKey, AgentModelProfileConfig>>;
+  modelProfiles?: AgentModelProfiles;
 }
 
 export type AgentInstructionsBundleMode = "managed" | "external";

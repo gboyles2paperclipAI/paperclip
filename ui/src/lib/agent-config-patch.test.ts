@@ -168,6 +168,58 @@ describe("buildAgentUpdatePatch", () => {
     });
   });
 
+  it("preserves legacy model profiles and unrelated runtime fields when changing cheap", () => {
+    const agent = makeAgent();
+    const legacyProfile = {
+      label: "Brand policy fallback",
+      adapterConfig: {
+        adapterType: "claude_local",
+        model: "claude-sonnet-4-6",
+      },
+      legacyMetadata: { preserved: true },
+    };
+    agent.runtimeConfig = {
+      heartbeat: { enabled: false, wakeOnDemand: true },
+      modelProfiles: {
+        cheap: {
+          enabled: true,
+          adapterConfig: {
+            model: "claude-haiku-4-5-20251001",
+            modelReasoningEffort: "low",
+          },
+        },
+        "brand-policy-fallback": legacyProfile,
+      },
+      futureRuntimeField: { preserved: true },
+    };
+
+    const patch = buildAgentUpdatePatch(
+      agent,
+      makeOverlay({
+        modelProfiles: {
+          cheap: {
+            adapterConfig: { model: "gpt-5.3-codex-spark" },
+          },
+        },
+      }),
+    );
+
+    expect(patch.runtimeConfig).toEqual({
+      heartbeat: { enabled: false, wakeOnDemand: true },
+      modelProfiles: {
+        cheap: {
+          enabled: true,
+          adapterConfig: {
+            model: "gpt-5.3-codex-spark",
+            modelReasoningEffort: "low",
+          },
+        },
+        "brand-policy-fallback": legacyProfile,
+      },
+      futureRuntimeField: { preserved: true },
+    });
+  });
+
   it("clears the cheap profile when the overlay marks it cleared", () => {
     const agent = makeAgent();
     agent.runtimeConfig = {
