@@ -999,9 +999,10 @@ export function issueThreadInteractionService(db: Db) {
       issueStatuses?: readonly IssueStatus[] | null;
       createdAfter?: Date | null;
       createdBefore?: Date | null;
+      updatedAfter?: Date | null;
       limit?: number | null;
       offset?: number | null;
-    }): Promise<InteractionResolutionAudit[]> => {
+    }) => {
       const filters = [
         eq(issueThreadInteractions.companyId, args.companyId),
         eq(issues.companyId, args.companyId),
@@ -1023,6 +1024,9 @@ export function issueThreadInteractionService(db: Db) {
       if (args.createdBefore) {
         filters.push(lte(issueThreadInteractions.createdAt, args.createdBefore));
       }
+      if (args.updatedAfter) {
+        filters.push(gte(issueThreadInteractions.updatedAt, args.updatedAfter));
+      }
       if (args.resolvedAfter) {
         filters.push(gte(issueThreadInteractions.resolvedAt, args.resolvedAfter));
       }
@@ -1031,16 +1035,27 @@ export function issueThreadInteractionService(db: Db) {
       }
 
       const rows = await db
-        .select({ interaction: issueThreadInteractions })
+        .select({
+          interaction: issueThreadInteractions,
+          issue: {
+            id: issues.id,
+            identifier: issues.identifier,
+            status: issues.status,
+          },
+        })
         .from(issueThreadInteractions)
         .innerJoin(issues, eq(issueThreadInteractions.issueId, issues.id))
         .where(and(...filters))
         .orderBy(desc(issueThreadInteractions.resolvedAt), desc(issueThreadInteractions.createdAt));
 
       return rows
-        .map(({ interaction: row }) => {
+        .map(({ interaction: row, issue }) => {
           const resolutionAudit = row.resolutionAudit ?? null;
           const method = resolutionAudit?.method ?? "unknown";
+          const outcome = row.result && typeof row.result === "object" && "outcome" in row.result
+            ? row.result.outcome ?? null
+            : null;
+          const auditResolution = { method: resolutionAudit?.method ?? null };
           return {
             id: row.id,
             companyId: row.companyId,
@@ -1058,6 +1073,25 @@ export function issueThreadInteractionService(db: Db) {
             createdAt: row.createdAt,
             updatedAt: row.updatedAt,
             resolutionAudit,
+            issue: {
+              id: issue.id,
+              identifier: issue.identifier,
+              status: issue.status,
+            },
+            interaction: {
+              id: row.id,
+              kind: row.kind,
+              status: row.status,
+              createdAt: row.createdAt,
+              updatedAt: row.updatedAt,
+              resolvedAt: row.resolvedAt ?? null,
+              resolvedBy: {
+                agentId: row.resolvedByAgentId ?? null,
+                userId: row.resolvedByUserId ?? null,
+              },
+              outcome,
+              resolutionAudit: auditResolution,
+            },
           };
         })
         .filter((row) => !args.method || row.method === args.method)

@@ -3634,11 +3634,13 @@ export function issueRoutes(
     const resolvedBeforeRaw = typeof req.query.resolvedBefore === "string" ? req.query.resolvedBefore.trim() : null;
     const createdAfterRaw = typeof req.query.createdAfter === "string" ? req.query.createdAfter.trim() : null;
     const createdBeforeRaw = typeof req.query.createdBefore === "string" ? req.query.createdBefore.trim() : null;
+    const updatedAfterRaw = typeof req.query.updatedAfter === "string" ? req.query.updatedAfter.trim() : null;
     const methodRaw = typeof req.query.method === "string" ? req.query.method.trim() : null;
+    const interactionStatusQuery = req.query.interactionStatus ?? req.query.status;
     const statuses = parseCommaSeparatedQuery<IssueThreadInteractionStatus>(
-      req.query.status,
+      interactionStatusQuery,
       ISSUE_THREAD_INTERACTION_STATUSES,
-      "status",
+      "interactionStatus",
     );
     const issueStatuses = parseCommaSeparatedQuery<IssueStatus>(
       req.query.issueStatus,
@@ -3666,6 +3668,11 @@ export function issueRoutes(
       throw unprocessable("createdBefore must be a valid ISO-8601 timestamp");
     }
 
+    const updatedAfter = updatedAfterRaw ? new Date(updatedAfterRaw) : null;
+    if (updatedAfterRaw && (!updatedAfter || Number.isNaN(updatedAfter.getTime()))) {
+      throw unprocessable("updatedAfter must be a valid ISO-8601 timestamp");
+    }
+
     const allowedMethods: Set<InteractionResolutionMethod> =
       new Set(["ui_click", "api_explicit", "api_automated", "unknown"]);
     const method = methodRaw
@@ -3682,7 +3689,11 @@ export function issueRoutes(
       ? Number.parseInt(rawLimit, 10)
       : null;
     if (rawLimit !== undefined && (parsedLimit === null || !Number.isInteger(parsedLimit) || parsedLimit <= 0)) {
-      res.status(400).json({ error: `limit must be a positive integer up to ${ISSUE_LIST_MAX_LIMIT}` });
+      res.status(400).json({ error: "limit must be a positive integer up to 100" });
+      return;
+    }
+    if (parsedLimit !== null && parsedLimit > 100) {
+      res.status(400).json({ error: "limit must be a positive integer up to 100" });
       return;
     }
     const rawOffset = req.query.offset as string | undefined;
@@ -3703,7 +3714,8 @@ export function issueRoutes(
       issueStatuses,
       createdAfter,
       createdBefore,
-      limit: parsedLimit === null ? null : clampIssueListLimit(parsedLimit),
+      updatedAfter,
+      limit: parsedLimit ?? 100,
       offset: parsedOffset ?? 0,
     });
     res.json(interactions);

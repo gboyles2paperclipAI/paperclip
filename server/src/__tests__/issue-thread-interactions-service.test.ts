@@ -1152,6 +1152,24 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       oldCancelled.id,
       oldDone.id,
     ].sort());
+    expect(terminalPendingRows[0]).toMatchObject({
+      issue: {
+        status: expect.stringMatching(/done|cancelled/),
+      },
+      interaction: {
+        status: "pending",
+        outcome: null,
+        resolutionAudit: { method: null },
+      },
+    });
+
+    const updatedRows = await interactionsSvc.listForCompany({
+      companyId,
+      statuses: ["pending"],
+      updatedAfter: new Date("2026-07-02T00:00:00.000Z"),
+    });
+    expect(updatedRows.map((row) => row.id)).toContain(freshDone.id);
+    expect(updatedRows.map((row) => row.id)).not.toContain(oldDone.id);
 
     const firstPagedRow = await interactionsSvc.listForCompany({
       companyId,
