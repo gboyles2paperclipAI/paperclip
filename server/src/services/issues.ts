@@ -73,7 +73,12 @@ import {
   parseProjectExecutionWorkspacePolicy,
 } from "./execution-workspace-policy.js";
 import { mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
-import { buildInitialIssueMonitorFields, normalizeIssueExecutionPolicy, parseIssueExecutionState } from "./issue-execution-policy.js";
+import {
+  applyIssueExecutionPolicyTransition,
+  buildInitialIssueMonitorFields,
+  normalizeIssueExecutionPolicy,
+  parseIssueExecutionState,
+} from "./issue-execution-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText } from "../redaction.js";
@@ -5701,6 +5706,92 @@ export function issueService(db: Db) {
         return enriched;
       });
     },
+
+    closeRoutineExecution: async (
+      id: string,
+      input: {
+        companyId: string;
+        actorAgentId: string;
+        actorRunId: string;
+        commentBody?: string | null;
+      },
+    ) => db.transaction(async (tx) => {
+      const current = await tx
+        .select()
+        .from(issues)
+        .where(and(eq(issues.id, id), eq(issues.companyId, input.companyId)))
+        .for("update")
+        .then((rows) => rows[0] ?? null);
+      if (!current) {
+        throw conflict("Routine execution closeout conflict", { reason: "issue_not_found" });
+      }
+
+      const actorAgent = await tx
+        .select({
+          companyId: agents.companyId,
+          permissions: agents.permissions,
+        })
+        .from(agents)
+        .where(and(eq(agents.id, input.actorAgentId), eq(agents.companyId, input.companyId)))
+        .for("share")
+        .then((rows) => rows[0] ?? null);
+      const actorPermissions = actorAgent?.permissions as { triageAuthority?: unknown } | null | undefined;
+      if (!actorAgent || actorPermissions?.triageAuthority !== true) {
+        throw conflict("Routine execution closeout conflict", { reason: "triage_authority_changed" });
+      }
+      if (current.status === "done") {
+        throw conflict("Routine execution closeout conflict", { reason: "already_done" });
+      }
+      if (
+        current.status !== "in_progress" ||
+        current.assigneeAgentId !== input.actorAgentId ||
+        current.assigneeUserId != null ||
+        current.originKind !== "routine_execution" ||
+        current.executionState != null ||
+        current.checkoutRunId !== input.actorRunId ||
+        (current.executionRunId != null && current.executionRunId !== input.actorRunId)
+      ) {
+        throw conflict("Routine execution closeout conflict", { reason: "state_changed" });
+      }
+
+      const policy = normalizeIssueExecutionPolicy(current.executionPolicy ?? null);
+      const transition = applyIssueExecutionPolicyTransition({
+        issue: current,
+        policy,
+        previousPolicy: policy,
+        requestedStatus: "done",
+        requestedAssigneePatch: {},
+        actor: { agentId: input.actorAgentId, userId: null },
+        commentBody: input.commentBody ?? null,
+        monitorExplicitlyUpdated: false,
+      });
+      if (transition.decision) {
+        throw conflict("Routine execution closeout conflict", { reason: "execution_decision_required" });
+      }
+
+      const patch = {
+        status: "done",
+        ...transition.patch,
+      };
+      const updated = await issueService(db).update(id, {
+        ...patch,
+        actorAgentId: input.actorAgentId,
+        actorUserId: null,
+      }, tx);
+      if (!updated) {
+        throw conflict("Routine execution closeout conflict", { reason: "update_lost" });
+      }
+      const comment = input.commentBody
+        ? await issueService(db).addComment(
+            id,
+            input.commentBody,
+            { agentId: input.actorAgentId, runId: input.actorRunId },
+            undefined,
+            tx,
+          )
+        : null;
+      return { issue: updated, comment, patch };
+    }),
 
     update: async (
       id: string,

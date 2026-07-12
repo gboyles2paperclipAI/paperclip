@@ -166,6 +166,7 @@ import { loadMatchingAgentRun, type MatchingAgentRun } from "../services/agent-r
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
   interrupt: z.boolean().optional(),
+  executionState: z.unknown().optional(),
 });
 const refreshExternalObjectsSchema = z.object({
   objectIds: z.array(z.string().uuid()).max(50).optional(),
@@ -2175,6 +2176,7 @@ export function issueRoutes(
   type IssueTriageAuthorityPatchDecision = {
     skipOwnership: boolean;
     allowed: boolean;
+    routineExecutionCloseout?: boolean;
   };
 
   async function assertBoardTriageAuthorityForIssuePatch(
@@ -2185,13 +2187,23 @@ export function issueRoutes(
       companyId: string;
       assigneeAgentId: string | null;
       status: string;
+      originKind?: string | null;
+      executionState?: unknown;
       labels?: Array<{ name?: string | null }> | null;
       updatedAt: string | Date;
       lastActivityAt?: string | Date | null;
     },
     body: Record<string, unknown>,
   ): Promise<IssueTriageAuthorityPatchDecision> {
-    if (req.actor.type !== "agent" || !req.actor.agentId) return { skipOwnership: false, allowed: true };
+    const patchKeys = Object.keys(body);
+    const hasDirectExecutionStatePatch = Object.prototype.hasOwnProperty.call(body, "executionState");
+    if (req.actor.type !== "agent" || !req.actor.agentId) {
+      if (hasDirectExecutionStatePatch) {
+        res.status(403).json({ error: "Execution state cannot be patched directly" });
+        return { skipOwnership: false, allowed: false };
+      }
+      return { skipOwnership: false, allowed: true };
+    }
 
     const actorAgent = await agentsSvc.getById(req.actor.agentId);
     if (!actorAgent || actorAgent.companyId !== existing.companyId) {
@@ -2199,8 +2211,22 @@ export function issueRoutes(
       return { skipOwnership: false, allowed: false };
     }
 
-    const patchKeys = Object.keys(body);
     const hasTriageAuthority = actorAgent.permissions?.triageAuthority === true;
+    const isRoutineExecutionCloseout =
+      hasTriageAuthority &&
+      existing.assigneeAgentId === req.actor.agentId &&
+      existing.originKind === "routine_execution" &&
+      existing.executionState == null &&
+      body.status === "done" &&
+      body.executionState === null &&
+      patchKeys.every((field) => ["status", "comment", "executionState"].includes(field));
+    if (hasDirectExecutionStatePatch) {
+      if (isRoutineExecutionCloseout) {
+        return { skipOwnership: false, allowed: true, routineExecutionCloseout: true };
+      }
+      res.status(403).json({ error: "Execution state cannot be patched directly" });
+      return { skipOwnership: false, allowed: false };
+    }
     if (!hasTriageAuthority) return { skipOwnership: false, allowed: true };
 
     const triageCandidateFields = ["status", "assigneeAgentId", "blockedByIssueIds"];
@@ -6216,6 +6242,9 @@ export function issueRoutes(
       hiddenAt: hiddenAtRaw,
       ...updateFields
     } = req.body;
+    if (triageAuthorityPatch.routineExecutionCloseout) {
+      delete updateFields.executionState;
+    }
     const shouldCancelActiveRunForCancelledStatus =
       existing.status !== "cancelled" && updateFields.status === "cancelled";
     if (resumeRequested === true && !commentBody) {
@@ -6519,7 +6548,23 @@ export function issueRoutes(
     let issue;
     let commentCreatedInPatch: Awaited<ReturnType<typeof svc.addComment>> | null = null;
     try {
-      if (transition.decision && decisionId) {
+      if (triageAuthorityPatch.routineExecutionCloseout) {
+        if (!actor.agentId || !actor.runId) {
+          throw unauthorized("Agent run identity required for routine execution closeout");
+        }
+        const closeout = await svc.closeRoutineExecution(id, {
+          companyId: existing.companyId,
+          actorAgentId: actor.agentId,
+          actorRunId: actor.runId,
+          commentBody,
+        });
+        issue = closeout.issue;
+        commentCreatedInPatch = closeout.comment;
+        for (const field of Object.keys(updateFields)) {
+          delete (updateFields as Record<string, unknown>)[field];
+        }
+        Object.assign(updateFields, closeout.patch);
+      } else if (transition.decision && decisionId) {
         const decision = transition.decision;
         issue = await db.transaction(async (tx) => {
           const updated = await svc.update(
