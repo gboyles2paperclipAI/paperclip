@@ -102,16 +102,22 @@ async function waitForRunToFinish(heartbeat: Heartbeat, runId: string, timeoutMs
   return heartbeat.getRun(runId);
 }
 
-async function waitForHeartbeatIdle(db: Db, timeoutMs = 5_000) {
+async function waitForHeartbeatIdle(db: Db, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const runs = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns);
-    if (!runs.some((run) => run.status === "queued" || run.status === "running")) return;
+    const [runs, agentRows] = await Promise.all([
+      db.select({ status: heartbeatRuns.status }).from(heartbeatRuns),
+      db.select({ status: agents.status }).from(agents),
+    ]);
+    const runActive = runs.some((run) => run.status === "queued" || run.status === "running");
+    const agentFinalizing = agentRows.some((agent) => agent.status === "running");
+    if (!runActive && !agentFinalizing) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+  throw new Error("Timed out waiting for heartbeat execution post-processing to finish");
 }
 
-async function waitForRuntimeStateLastRun(db: Db, agentId: string, runId: string, timeoutMs = 5_000) {
+async function waitForRuntimeStateLastRun(db: Db, agentId: string, runId: string, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const state = await db
@@ -122,6 +128,7 @@ async function waitForRuntimeStateLastRun(db: Db, agentId: string, runId: string
     if (state?.lastRunId === runId) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+  throw new Error(`Timed out waiting for runtime state to record run ${runId}`);
 }
 
 function readAdapterWorkspace(input: unknown) {
