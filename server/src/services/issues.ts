@@ -106,11 +106,6 @@ const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "bloc
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
 const THREAD_AUTO_COMPACTION_THRESHOLD = 50;
-type IssueCompactionState = {
-  status?: string;
-  compactionInProgress?: boolean;
-  [key: string]: unknown;
-};
 export const ISSUE_LIST_DEFAULT_LIMIT = 500;
 export const ISSUE_LIST_MAX_LIMIT = 1000;
 const ISSUE_LIST_RELATED_QUERY_CHUNK_SIZE = 500;
@@ -6937,24 +6932,28 @@ export function issueService(db: Db) {
     runAutoCompaction: async (issueId: string) => {
       const dbOrTx = db; // Using base db
 
-      const issue = await dbOrTx
-        .select({ id: issues.id, executionState: issues.executionState })
-        .from(issues)
-        .where(eq(issues.id, issueId))
-        .then((rows) => rows[0] ?? null);
-
-      if (!issue) return;
-
-      const state = (parseIssueExecutionState(issue.executionState) ?? { status: "idle" }) as IssueCompactionState;
-      if (state.compactionInProgress) return;
-
-      // Set compactionInProgress = true
-      await dbOrTx
+      // Claim compaction in one database statement. The previous read-then-write
+      // sequence allowed two comment writers to observe an idle issue and both
+      // update the same thread-summary revision.
+      const [claimedIssue] = await dbOrTx
         .update(issues)
         .set({
-          executionState: { ...state, compactionInProgress: true },
+          executionState: sql<Record<string, unknown>>`
+            jsonb_set(
+              coalesce(${issues.executionState}, '{}'::jsonb),
+              '{compactionInProgress}',
+              'true'::jsonb,
+              true
+            )
+          `,
         })
-        .where(eq(issues.id, issueId));
+        .where(and(
+          eq(issues.id, issueId),
+          sql`coalesce(${issues.executionState}->>'compactionInProgress', 'false') <> 'true'`,
+        ))
+        .returning({ id: issues.id });
+
+      if (!claimedIssue) return;
 
       try {
         const comments = await dbOrTx
@@ -6990,30 +6989,34 @@ ${threadContent}`;
         ].join("\n");
 
         const documentsSvc = documentService(dbOrTx);
+        const existingSummary = await documentsSvc.getIssueDocumentByKey(issueId, "thread-summary");
+        if (existingSummary?.body === summary) return;
+
         await documentsSvc.upsertIssueDocument({
           issueId,
           key: "thread-summary",
           title: "Thread Summary",
           format: "markdown",
           body: summary,
+          baseRevisionId: existingSummary?.latestRevisionId ?? null,
         });
 
         console.log(`Compaction completed for issue ${issueId}`);
       } catch (e) {
         logger.error({ e, issueId }, "Failed to run auto-compaction");
       } finally {
-        // Reset compactionInProgress
-        const freshState = (parseIssueExecutionState(
-          await dbOrTx.select({ executionState: issues.executionState })
-            .from(issues)
-            .where(eq(issues.id, issueId))
-            .then(rows => rows[0]?.executionState)
-        ) ?? { status: "idle" }) as IssueCompactionState;
-
+        // Remove only the internal claim, preserving any execution-policy fields
+        // written while compaction was running. Restore null when the flag was the
+        // only value so issues without execution state stay unchanged.
         await dbOrTx
           .update(issues)
           .set({
-            executionState: { ...freshState, compactionInProgress: false },
+            executionState: sql<Record<string, unknown> | null>`
+              nullif(
+                coalesce(${issues.executionState}, '{}'::jsonb) - 'compactionInProgress',
+                '{}'::jsonb
+              )
+            `,
           })
           .where(eq(issues.id, issueId));
       }

@@ -32,6 +32,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { instanceSettingsService } from "../services/instance-settings.ts";
+import { documentService } from "../services/documents.ts";
 import {
   clampIssueListLimit,
   deriveIssueCommentRunLogAttribution,
@@ -208,6 +209,97 @@ describeEmbeddedPostgres("issueService terminal prompt cleanup", () => {
       .then((rows) => rows[0]);
     expect(cancelled?.status).toBe("cancelled");
     expect(cancelled?.decisionNote).toContain("was marked cancelled");
+  });
+});
+
+describeEmbeddedPostgres("issueService automatic thread compaction", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issue-compaction-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(documentRevisions);
+    await db.delete(issueDocuments);
+    await db.delete(documents);
+    await db.delete(issueComments);
+    await db.delete(issues);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  it("updates an existing summary once across concurrent compaction attempts", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Compaction Co",
+      issuePrefix: "CMP",
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Compact this issue",
+      status: "todo",
+      priority: "medium",
+      identifier: "CMP-1",
+      issueNumber: 1,
+      executionState: { unrelatedField: "preserved" },
+    });
+    await db.insert(issueComments).values([
+      { companyId, issueId, body: "First decision" },
+      { companyId, issueId, body: "Second decision" },
+    ]);
+
+    const initialSummary = await documentService(db).upsertIssueDocument({
+      issueId,
+      key: "thread-summary",
+      title: "Thread Summary",
+      format: "markdown",
+      body: "stale summary",
+    });
+
+    await Promise.all([
+      svc.runAutoCompaction(issueId),
+      svc.runAutoCompaction(issueId),
+    ]);
+
+    const summary = await documentService(db).getIssueDocumentByKey(issueId, "thread-summary");
+    expect(summary?.latestRevisionNumber).toBe(2);
+    expect(summary?.latestRevisionId).not.toBe(initialSummary.document.latestRevisionId);
+    expect(summary?.body).toContain("First decision");
+    expect(summary?.body).toContain("Second decision");
+
+    const revisionCount = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(documentRevisions)
+      .where(eq(documentRevisions.documentId, summary!.id))
+      .then((rows) => rows[0]?.count);
+    expect(revisionCount).toBe(2);
+
+    const executionState = await db
+      .select({ executionState: issues.executionState })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]?.executionState);
+    expect(executionState).toEqual({ unrelatedField: "preserved" });
+
+    await svc.runAutoCompaction(issueId);
+    const revisionCountAfterNoop = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(documentRevisions)
+      .where(eq(documentRevisions.documentId, summary!.id))
+      .then((rows) => rows[0]?.count);
+    expect(revisionCountAfterNoop).toBe(2);
   });
 });
 
