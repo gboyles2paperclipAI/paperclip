@@ -106,6 +106,30 @@ describe("api route guards", () => {
     expect(statuses.filter((s) => s === 429).length).toBeGreaterThan(0);
   });
 
+  it("rate limits the company interaction audit route with Retry-After", async () => {
+    const app = express();
+    app.use((req, _res, next) => {
+      (req as any).actor = { type: "board", companyIds: ["company-1"] };
+      next();
+    });
+    app.use(
+      "/api",
+      createPollingRateLimitAndCoalescingMiddleware({
+        requestsPerMinute: 1,
+      }),
+    );
+    app.get("/api/companies/company-1/interactions", (_req, res) => {
+      res.json([]);
+    });
+
+    await request(app).get("/api/companies/company-1/interactions").expect(200);
+    const limited = await request(app).get("/api/companies/company-1/interactions").expect(429);
+
+    expect(limited.headers["retry-after"]).toBeDefined();
+    expect(Number(limited.headers["retry-after"])).toBeGreaterThan(0);
+    expect(limited.body).toEqual({ error: "too_many_requests", reason: "rate_limit" });
+  });
+
   it("coalesces duplicate live-runs responses in a 1s window", async () => {
     const app = express();
     let liveRunsCalls = 0;

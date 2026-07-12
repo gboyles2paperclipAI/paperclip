@@ -10,7 +10,7 @@ const POLLING_RATE_LIMIT_WINDOW_MS = 60_000;
 const LIVE_RUNS_COALESCE_WINDOW_MS = 1_000;
 const POLLING_CACHE_CONTROL_HEADER = "private, max-age=1, must-revalidate";
 
-type RouteFamily = "live_runs" | "dashboard" | "agent_runs" | "issue_live_runs" | "heartbeat_logs" | "issues";
+type RouteFamily = "live_runs" | "dashboard" | "agent_runs" | "issue_live_runs" | "heartbeat_logs" | "issues" | "interactions";
 
 const STREAMING_PATH_RE = /^(?:\/api)?\/plugins\/[^/]+\/events(?:\/|$)/;
 const LIVE_RUNS_PATH_RE = /^(?:\/api)?\/companies\/([^/]+)\/live-runs(?:\/|$)/;
@@ -19,6 +19,7 @@ const AGENT_RUNS_PATH_RE = /^(?:\/api)?\/companies\/([^/]+)\/heartbeat-runs(?:\/
 const ISSUE_LIVE_RUNS_PATH_RE = /^(?:\/api)?\/issues\/[^/]+\/live-runs(?:\/|$)/;
 const HEARTBEAT_LOGS_PATH_RE = /^(?:\/api)?\/heartbeat-runs\/[^/]+\/log(?:\/|$)/;
 const ISSUES_PATH_RE = /^(?:\/api)?\/issues(?:\/|$)/;
+const COMPANY_INTERACTIONS_PATH_RE = /^(?:\/api)?\/companies\/([^/]+)\/interactions(?:\/|$)/;
 
 export function createApiRouteTimeoutMiddleware(opts?: {
   timeoutMs?: number;
@@ -242,6 +243,9 @@ function resolveFamilyAndCompany(
 
   const agentRunsMatch = pathname.match(AGENT_RUNS_PATH_RE);
   if (agentRunsMatch?.[1]) return { family: "agent_runs", companyId: agentRunsMatch[1] };
+
+  const interactionsMatch = pathname.match(COMPANY_INTERACTIONS_PATH_RE);
+  if (interactionsMatch?.[1]) return { family: "interactions", companyId: interactionsMatch[1] };
 
   if (ISSUE_LIVE_RUNS_PATH_RE.test(pathname)) {
     const companyId = resolveActorCompanyId(req);

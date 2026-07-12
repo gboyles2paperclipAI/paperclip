@@ -1046,6 +1046,24 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       method: "api_explicit",
     })).toHaveLength(0);
 
+    await db.update(issueThreadInteractions).set({
+      createdAt: new Date("2026-07-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-07-02T00:00:00.000Z"),
+      resolvedAt: new Date("2026-07-03T00:00:00.000Z"),
+    }).where(eq(issueThreadInteractions.id, created.id));
+    expect(await interactionsSvc.listForCompany({
+      companyId,
+      createdAfter: new Date("2026-06-30T00:00:00.000Z"),
+      createdBefore: new Date("2026-07-01T00:00:00.000Z"),
+      updatedAfter: new Date("2026-07-02T00:00:00.000Z"),
+      resolvedAfter: new Date("2026-07-03T00:00:00.000Z"),
+      resolvedBefore: new Date("2026-07-04T00:00:00.000Z"),
+    })).toHaveLength(1);
+    expect(await interactionsSvc.listForCompany({
+      companyId,
+      resolvedBefore: new Date("2026-07-02T23:59:59.999Z"),
+    })).toHaveLength(0);
+
     const requiresReason = await interactionsSvc.create({
       id: issueId,
       companyId,
@@ -1192,18 +1210,51 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       companyId,
       statuses: ["pending"],
       issueStatuses: ["done", "cancelled"],
+      createdBefore: new Date("2026-07-02T00:00:00.000Z"),
       limit: 1,
     });
     const secondPagedRow = await interactionsSvc.listForCompany({
       companyId,
       statuses: ["pending"],
       issueStatuses: ["done", "cancelled"],
+      createdBefore: new Date("2026-07-02T00:00:00.000Z"),
       limit: 1,
       offset: 1,
     });
     expect(firstPagedRow).toHaveLength(1);
     expect(secondPagedRow).toHaveLength(1);
-    expect(firstPagedRow[0]?.interaction.id).not.toBe(secondPagedRow[0]?.interaction.id);
+    expect([
+      firstPagedRow[0]?.interaction.id,
+      secondPagedRow[0]?.interaction.id,
+    ]).toEqual([oldDone.id, oldCancelled.id].sort().reverse());
+  });
+
+  it("keeps company interaction audit rows inside the requested company", async () => {
+    const first = await seedConfirmationIssue("First company audit");
+    const second = await seedConfirmationIssue("Second company audit");
+    const firstInteraction = await interactionsSvc.create({
+      id: first.issueId,
+      companyId: first.companyId,
+    }, {
+      kind: "request_confirmation",
+      payload: { version: 1, prompt: "First company?" },
+    }, { userId: "local-board" });
+    await interactionsSvc.create({
+      id: second.issueId,
+      companyId: second.companyId,
+    }, {
+      kind: "request_confirmation",
+      payload: { version: 1, prompt: "Second company?" },
+    }, { userId: "local-board" });
+
+    const rows = await interactionsSvc.listForCompany({
+      companyId: first.companyId,
+      statuses: ["pending"],
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.issue.id).toBe(first.issueId);
+    expect(rows[0]?.interaction.id).toBe(firstInteraction.id);
   });
 
   it("accepts request_checkbox_confirmation interactions with selected option ids", async () => {

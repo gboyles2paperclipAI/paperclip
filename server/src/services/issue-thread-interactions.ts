@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, desc, eq, gte, inArray, isNotNull, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -11,6 +11,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import { trackInteractionResolved } from "@paperclipai/shared/telemetry";
+import { COMPANY_INTERACTION_AUDIT_MAX_OFFSET } from "@paperclipai/shared";
 import type {
   AcceptIssueThreadInteraction,
   AskUserQuestionsAnswer,
@@ -1032,53 +1033,72 @@ export function issueThreadInteractionService(db: Db) {
       if (args.resolvedBefore) {
         filters.push(lte(issueThreadInteractions.resolvedAt, args.resolvedBefore));
       }
+      if (args.method) {
+        filters.push(
+          sql`coalesce(${issueThreadInteractions.resolutionAudit}->>'method', 'unknown') = ${args.method}`,
+        );
+      }
+
+      const limit = Math.min(100, Math.max(1, args.limit ?? 100));
+      const offset = Math.min(
+        COMPANY_INTERACTION_AUDIT_MAX_OFFSET,
+        Math.max(0, args.offset ?? 0),
+      );
 
       const rows = await db
         .select({
-          interaction: issueThreadInteractions,
           issue: {
             id: issues.id,
             identifier: issues.identifier,
             status: issues.status,
           },
+          interaction: {
+            id: issueThreadInteractions.id,
+            kind: issueThreadInteractions.kind,
+            status: issueThreadInteractions.status,
+            createdAt: issueThreadInteractions.createdAt,
+            updatedAt: issueThreadInteractions.updatedAt,
+            resolvedAt: issueThreadInteractions.resolvedAt,
+            resolvedByAgentId: issueThreadInteractions.resolvedByAgentId,
+            resolvedByUserId: issueThreadInteractions.resolvedByUserId,
+            outcome: sql<string | null>`${issueThreadInteractions.result}->>'outcome'`,
+            resolutionMethod: sql<InteractionResolutionMethod | null>`${issueThreadInteractions.resolutionAudit}->>'method'`,
+          },
         })
         .from(issueThreadInteractions)
         .innerJoin(issues, eq(issueThreadInteractions.issueId, issues.id))
         .where(and(...filters))
-        .orderBy(desc(issueThreadInteractions.resolvedAt), desc(issueThreadInteractions.createdAt));
+        .orderBy(
+          desc(issueThreadInteractions.resolvedAt),
+          desc(issueThreadInteractions.createdAt),
+          desc(issueThreadInteractions.id),
+        )
+        .limit(limit)
+        .offset(offset);
 
-      return rows
-        .map(({ interaction: row, issue }) => {
-          const resolutionAudit = row.resolutionAudit ?? null;
-          const outcome = row.result && typeof row.result === "object" && "outcome" in row.result
-            ? row.result.outcome ?? null
-            : null;
-          return {
-            issue: {
-              id: issue.id,
-              identifier: issue.identifier,
-              status: issue.status,
-            },
-            interaction: {
-              id: row.id,
-              kind: row.kind,
-              status: row.status,
-              createdAt: row.createdAt,
-              updatedAt: row.updatedAt,
-              resolvedAt: row.resolvedAt ?? null,
-              resolvedBy: {
-                agentId: row.resolvedByAgentId ?? null,
-                userId: row.resolvedByUserId ?? null,
-              },
-              outcome,
-              resolutionAudit: {
-                method: resolutionAudit?.method ?? null,
-              },
-            },
-          };
-        })
-        .filter((row) => !args.method || (row.interaction.resolutionAudit.method ?? "unknown") === args.method)
-        .slice(args.offset ?? 0, args.limit ? (args.offset ?? 0) + args.limit : undefined);
+      return rows.map(({ interaction: row, issue }) => ({
+        issue: {
+          id: issue.id,
+          identifier: issue.identifier,
+          status: issue.status,
+        },
+        interaction: {
+          id: row.id,
+          kind: row.kind,
+          status: row.status,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+          resolvedAt: row.resolvedAt ?? null,
+          resolvedBy: {
+            agentId: row.resolvedByAgentId ?? null,
+            userId: row.resolvedByUserId ?? null,
+          },
+          outcome: row.outcome ?? null,
+          resolutionAudit: {
+            method: row.resolutionMethod ?? null,
+          },
+        },
+      }));
     },
 
     create: async (
