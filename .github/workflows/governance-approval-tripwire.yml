@@ -1,0 +1,52 @@
+name: Governance approval tripwire
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  approval-record:
+    name: governance-approval-record
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require visible UUID approval record for governance surfaces
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$RUNNER_TEMP/changed-files.txt"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const files = fs.readFileSync(`${process.env.RUNNER_TEMP}/changed-files.txt`, 'utf8').split('\n').filter(Boolean);
+          // Keep identical to ai-collab/scripts/gh-safe-merge.sh is_governance_path().
+          // All .github/workflows/* are governance (gate-enforcing). Guard/secret/identity/
+          // hygiene/merge-control scripts are governance. No narrow workflow-name allowlist.
+          const isGovernance = (path) =>
+            /(^|\/)AGENTS\.md$/.test(path) ||
+            /agent-operating-(policy|standard)\.md$/.test(path) ||
+            /BASELINE-AGENT-INSTRUCTIONS\.md$/.test(path) ||
+            /\.github\/pull_request_template/.test(path) ||
+            /(^|\/)\.github\/workflows\//.test(path) ||
+            /(^|\/)scripts\/.*(identity|hygiene|preflight|merge|heavy-gate|guard|secret|gh-safe|gh-guard)/.test(path);
+          const governance = files.filter(isGovernance);
+          if (governance.length === 0) process.exit(0);
+          const body = process.env.PR_BODY || '';
+          // Accept only a canonical UUID. Reject missing, placeholders (PENDING/BYPASS/none/TODO),
+          // brackets, and arbitrary text. Marker shape is not authorization; live status is checked
+          // by gh-safe-merge.sh against the Paperclip API.
+          const uuidLine = /^Approval-Record:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*$/im;
+          const match = body.match(uuidLine);
+          if (!match) {
+            console.error('Governance paths require Approval-Record: <uuid> in the PR body.');
+            console.error('Placeholders (PENDING, BYPASS, none, TODO), brackets, and arbitrary text are not accepted.');
+            process.exit(1);
+          }
+          console.log(`Approval record UUID present for ${governance.length} governance file(s): ${match[1]}`);
+          NODE
