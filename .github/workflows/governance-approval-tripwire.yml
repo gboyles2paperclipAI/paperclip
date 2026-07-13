@@ -1,0 +1,42 @@
+name: Governance approval tripwire
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  approval-record:
+    name: governance-approval-record
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require visible approval record for governance surfaces
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$RUNNER_TEMP/changed-files.txt"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const files = fs.readFileSync(`${process.env.RUNNER_TEMP}/changed-files.txt`, 'utf8').split('\n').filter(Boolean);
+          const governance = files.filter((path) =>
+            /(^|\/)AGENTS\.md$/.test(path) ||
+            /agent-operating-(policy|standard)\.md$/.test(path) ||
+            /BASELINE-AGENT-INSTRUCTIONS\.md$/.test(path) ||
+            /^\.github\/pull_request_template/.test(path) ||
+            /scripts\/.*(identity|hygiene|preflight|merge|heavy-gate)/.test(path) ||
+            /^\.github\/workflows\/.*(governance|approval|quality|gitleaks|safety|verify|release)/.test(path)
+          );
+          if (governance.length === 0) process.exit(0);
+          if (!/^Approval-Record:\s*\S+/m.test(process.env.PR_BODY || '')) {
+            console.error('Governance paths require an Approval-Record entry in the PR body.');
+            process.exit(1);
+          }
+          console.log(`Approval record marker present for ${governance.length} governance file(s).`);
+          NODE
