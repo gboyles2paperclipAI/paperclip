@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issueRecoveryActions } from "@paperclipai/db";
 import type {
@@ -44,6 +44,17 @@ export type ResolveIssueRecoveryActionInput = {
   status: Extract<IssueRecoveryActionStatus, "resolved" | "cancelled">;
   outcome: IssueRecoveryActionOutcome;
   resolutionNote?: string | null;
+  /**
+   * When set, the active-action update is conditional on this exact owner agent.
+   * Used to close the recovery-owner check/use race: ownership transfer between
+   * precheck and resolve must fail without mutating the source issue.
+   */
+  expectedOwnerAgentId?: string | null;
+  /**
+   * When set with expectedOwnerAgentId, also require this exact owner type.
+   * Recovery-owner exceptions only bind agent-owned actions.
+   */
+  expectedOwnerType?: IssueRecoveryActionOwnerType | null;
 };
 
 function toReadModel(row: IssueRecoveryActionRow): IssueRecoveryAction {
@@ -269,6 +280,16 @@ export function issueRecoveryActionService(db: Db) {
     ];
     if (input.actionId) {
       predicates.push(eq(issueRecoveryActions.id, input.actionId));
+    }
+    if (input.expectedOwnerAgentId !== undefined) {
+      if (input.expectedOwnerAgentId === null) {
+        predicates.push(isNull(issueRecoveryActions.ownerAgentId));
+      } else {
+        predicates.push(eq(issueRecoveryActions.ownerAgentId, input.expectedOwnerAgentId));
+      }
+    }
+    if (input.expectedOwnerType != null) {
+      predicates.push(eq(issueRecoveryActions.ownerType, input.expectedOwnerType));
     }
 
     const [updated] = await dbOrTx

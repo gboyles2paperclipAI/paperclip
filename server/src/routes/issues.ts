@@ -2349,6 +2349,26 @@ export function issueRoutes(
     return { skipOwnership: true, allowed: true };
   }
 
+  /**
+   * Exact named recovery-owner match for the active source-scoped action.
+   * Satisfies only the ordinary assignee-ownership gate; never bypasses company,
+   * access-boundary, pending-interaction, watchdog, board-hold, or board-only outcome guards.
+   */
+  async function isExactActiveRecoveryOwner(
+    actorAgentId: string,
+    issue: { id: string; companyId: string },
+    actionId?: string | null,
+  ): Promise<boolean> {
+    const activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(issue.companyId, issue.id);
+    if (!activeRecoveryAction) return false;
+    if (activeRecoveryAction.companyId !== issue.companyId) return false;
+    if (activeRecoveryAction.sourceIssueId !== issue.id) return false;
+    if (activeRecoveryAction.ownerType !== "agent") return false;
+    if (activeRecoveryAction.ownerAgentId !== actorAgentId) return false;
+    if (actionId && activeRecoveryAction.id !== actionId) return false;
+    return true;
+  }
+
   async function assertAgentIssueMutationAllowed(
     req: Request,
     res: Response,
@@ -2362,7 +2382,18 @@ export function issueRoutes(
       assigneeUserId?: string | null;
       labels?: Array<{ name?: string | null }> | null;
     },
-    options: { allowBoardOwned?: boolean; skipOwnershipForTriagePatch?: boolean } = {},
+    options: {
+      allowBoardOwned?: boolean;
+      skipOwnershipForTriagePatch?: boolean;
+      /**
+       * Narrow FUL-16336 exception: after all other guards pass, the exact active
+       * recovery owner may satisfy the source-assignee ownership requirement only.
+       * Does not create a general recovery-action bypass.
+       */
+      recoveryOwnerAssigneeException?: {
+        actionId?: string | null;
+      };
+    } = {},
   ) {
     if (req.actor.type !== "agent") return true;
     const actorAgentId = req.actor.agentId;
@@ -2416,7 +2447,20 @@ export function issueRoutes(
       ...issue,
       assigneeUserId: issue.assigneeUserId ?? null,
     }, "issue:mutate");
-    if (!boundaryDecision.allowed) {
+    // For agents, issue:mutate on a peer-assigned issue ordinarily fails with
+    // deny_missing_grant (self-assignee grant). The narrow recovery-owner exception
+    // may satisfy that ordinary assignee grant only — never low-trust, company,
+    // scope, unauthenticated, or policy-restricted denials.
+    const recoveryOwnerSatisfiesAssigneeGrant =
+      !boundaryDecision.allowed &&
+      options.recoveryOwnerAssigneeException &&
+      boundaryDecision.reason === "deny_missing_grant" &&
+      (await isExactActiveRecoveryOwner(
+        actorAgentId,
+        issue,
+        options.recoveryOwnerAssigneeException.actionId,
+      ));
+    if (!boundaryDecision.allowed && !recoveryOwnerSatisfiesAssigneeGrant) {
       res.status(403).json({ error: "Issue is outside this actor's authorization boundary" });
       return false;
     }
@@ -2428,6 +2472,18 @@ export function issueRoutes(
         return true;
       }
       if (await hasActiveCheckoutManagementOverride(actorAgentId, issue.companyId, issue.assigneeAgentId)) {
+        return true;
+      }
+      // Same exact-owner bind also satisfies the route-level assignee ownership gate.
+      if (
+        recoveryOwnerSatisfiesAssigneeGrant ||
+        (options.recoveryOwnerAssigneeException &&
+          (await isExactActiveRecoveryOwner(
+            actorAgentId,
+            issue,
+            options.recoveryOwnerAssigneeException.actionId,
+          )))
+      ) {
         return true;
       }
       if (issue.status === "in_progress") {
@@ -4158,7 +4214,13 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, existing.companyId);
-    if (!(await assertAgentIssueMutationAllowed(req, res, existing, { allowBoardOwned: true }))) return;
+    const { actionId, outcome, sourceIssueStatus, resolutionNote } = req.body;
+    // Recovery-owner exception is only for the assignee-ownership portion and is
+    // bound to the exact requested action ID (when provided), company, and source.
+    if (!(await assertAgentIssueMutationAllowed(req, res, existing, {
+      allowBoardOwned: true,
+      recoveryOwnerAssigneeException: { actionId: actionId ?? null },
+    }))) return;
     const activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(existing.companyId, existing.id);
     if (
       !(await assertRecoveryActionAuthority(
@@ -4172,12 +4234,30 @@ export function issueRoutes(
       return;
     }
 
-    const { actionId, outcome, sourceIssueStatus, resolutionNote } = req.body;
     if (outcome === "false_positive" || outcome === "cancelled") {
       assertBoard(req);
     }
 
     const actor = getActorInfo(req);
+    // Bind atomic revalidation only when the actor is using the recovery-owner
+    // path (not ordinary source assignee / checkout-management override).
+    const enteredAsExactRecoveryOwner =
+      req.actor.type === "agent" &&
+      !!actor.agentId &&
+      existing.assigneeAgentId !== actor.agentId &&
+      !(
+        existing.assigneeAgentId &&
+        (await hasActiveCheckoutManagementOverride(
+          actor.agentId,
+          existing.companyId,
+          existing.assigneeAgentId,
+        ))
+      ) &&
+      !!activeRecoveryAction &&
+      activeRecoveryAction.ownerType === "agent" &&
+      activeRecoveryAction.ownerAgentId === actor.agentId &&
+      (!actionId || activeRecoveryAction.id === actionId);
+
     const updateFields = sourceIssueStatus ? { status: sourceIssueStatus } : {};
     await assertAgentInReviewReviewPath({
       existing,
@@ -4207,6 +4287,10 @@ export function issueRoutes(
         }
       }
 
+      // Resolve the action first and only then mutate the source issue.
+      // When entered as the exact recovery owner, condition the update on the
+      // expected owner/action so ownership transfer or action change fails
+      // closed with no source mutation.
       const recoveryAction = await recoveryActionsSvc.resolveActiveForIssue(
         {
           companyId: existing.companyId,
@@ -4215,10 +4299,26 @@ export function issueRoutes(
           status: actionStatus,
           outcome,
           resolutionNote: resolutionNote ?? null,
+          ...(enteredAsExactRecoveryOwner
+            ? {
+                expectedOwnerAgentId: actor.agentId!,
+                expectedOwnerType: "agent" as const,
+              }
+            : {}),
         },
         tx,
       );
-      if (!recoveryAction) throw notFound("Active recovery action not found");
+      if (!recoveryAction) {
+        if (enteredAsExactRecoveryOwner) {
+          throw conflict("Recovery action ownership or active state changed", {
+            issueId: existing.id,
+            recoveryActionId: actionId ?? activeRecoveryAction?.id ?? null,
+            actorAgentId: actor.agentId,
+            securityPrinciples: ["Least Privilege", "Complete Mediation", "Fail Securely"],
+          });
+        }
+        throw notFound("Active recovery action not found");
+      }
 
       if (sourceIssueStatus) {
         const updatedIssue = await svc.update(
