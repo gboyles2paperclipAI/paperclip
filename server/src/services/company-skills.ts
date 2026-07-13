@@ -289,6 +289,8 @@ type RuntimeSkillSourceResolution =
   | { status: "missing"; source: string; detail: string };
 
 const skillInventoryRefreshPromises = new Map<string, Promise<void>>();
+/** Per-skill single-flight for reader-safe runtime materialization. */
+const runtimeSkillMaterializePromises = new Map<string, Promise<string>>();
 
 function selectCompanySkillColumns() {
   return {
@@ -3996,32 +3998,6 @@ export function companySkillService(db: Db) {
     };
   }
 
-  async function materializeRuntimeSkillFiles(companyId: string, skill: CompanySkill) {
-    const runtimeRoot = path.resolve(resolveManagedSkillsRoot(companyId), "__runtime__");
-    const skillDir = path.resolve(runtimeRoot, buildSkillRuntimeName(skill.key, skill.slug));
-    await fs.rm(skillDir, { recursive: true, force: true });
-    await fs.mkdir(skillDir, { recursive: true });
-
-    let wroteSkillFile = false;
-    for (const entry of skill.fileInventory) {
-      const normalizedPath = normalizePortablePath(entry.path);
-      const detail = await readFile(companyId, skill.id, normalizedPath).catch(() => null);
-      const content = detail?.content ?? (normalizedPath === "SKILL.md" ? skill.markdown : null);
-      if (content === null) continue;
-      const targetPath = path.resolve(skillDir, entry.path);
-      await fs.mkdir(path.dirname(targetPath), { recursive: true });
-      await fs.writeFile(targetPath, content, "utf8");
-      if (normalizedPath === "SKILL.md") wroteSkillFile = true;
-    }
-
-    if (!wroteSkillFile) {
-      await fs.rm(skillDir, { recursive: true, force: true });
-      throw unprocessable("Company skill could not be materialized because its stored SKILL.md copy is missing.");
-    }
-
-    return skillDir;
-  }
-
   function resolveVersionSnapshotPath(skillDir: string, relativePath: string) {
     const normalizedPath = normalizePortablePath(relativePath);
     if (!normalizedPath) return null;
@@ -4030,6 +4006,137 @@ export function companySkillService(db: Db) {
       throw unprocessable(`Skill version file path is invalid: ${relativePath}`);
     }
     return { normalizedPath, targetPath };
+  }
+
+  async function collectRuntimeSkillSnapshot(
+    companyId: string,
+    skill: CompanySkill,
+    skillDir: string,
+  ): Promise<Map<string, string>> {
+    const desired = new Map<string, string>();
+    for (const entry of skill.fileInventory) {
+      const resolved = resolveVersionSnapshotPath(skillDir, entry.path);
+      if (!resolved) continue;
+      const { normalizedPath } = resolved;
+      const detail = await readFile(companyId, skill.id, normalizedPath).catch(() => null);
+      const content = detail?.content ?? (normalizedPath === "SKILL.md" ? skill.markdown : null);
+      if (content === null) continue;
+      desired.set(normalizedPath, content);
+    }
+
+    const skillMarkdown = desired.get("SKILL.md");
+    if (skillMarkdown === undefined) {
+      throw unprocessable("Company skill could not be materialized because its stored SKILL.md copy is missing.");
+    }
+    // Ensure published SKILL.md is not truncated mid-write later: validate it parses as markdown now.
+    parseFrontmatterMarkdown(skillMarkdown);
+    return desired;
+  }
+
+  async function materializedRuntimeSnapshotMatches(skillDir: string, desired: Map<string, string>) {
+    const existingFiles = await listMaterializedFiles(skillDir);
+    if (!existingFiles || existingFiles.length !== desired.size) return false;
+    for (const relativePath of existingFiles) {
+      if (!desired.has(relativePath)) return false;
+    }
+    for (const [relativePath, content] of desired.entries()) {
+      const existingContent = await fs.readFile(path.resolve(skillDir, relativePath), "utf8").catch(() => null);
+      if (existingContent !== content) return false;
+    }
+    return true;
+  }
+
+  async function publishRuntimeSkillFile(skillDir: string, relativePath: string, content: string) {
+    const resolved = resolveVersionSnapshotPath(skillDir, relativePath);
+    if (!resolved) {
+      throw unprocessable(`Skill file path is invalid: ${relativePath}`);
+    }
+    const { targetPath } = resolved;
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    const existing = await fs.readFile(targetPath, "utf8").catch(() => null);
+    if (existing === content) return;
+
+    // Write to a sibling temp file, then rename over the live path so readers never
+    // observe a deleted or partially-written SKILL.md / auxiliary file.
+    const tempPath = path.join(
+      path.dirname(targetPath),
+      `.${path.basename(targetPath)}.publish-${randomUUID()}`,
+    );
+    try {
+      await fs.writeFile(tempPath, content, "utf8");
+      await fs.rename(tempPath, targetPath);
+    } catch (error) {
+      await fs.rm(tempPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async function pruneStaleRuntimeSkillFiles(skillDir: string, desired: Map<string, string>) {
+    const existingFiles = await listMaterializedFiles(skillDir);
+    if (!existingFiles) return;
+
+    const removedDirs = new Set<string>();
+    for (const relativePath of existingFiles) {
+      if (desired.has(relativePath)) continue;
+      const absolutePath = path.resolve(skillDir, relativePath);
+      if (absolutePath !== skillDir && !absolutePath.startsWith(`${skillDir}${path.sep}`)) {
+        continue;
+      }
+      await fs.rm(absolutePath, { force: true });
+      let parent = path.dirname(absolutePath);
+      while (parent.startsWith(`${skillDir}${path.sep}`)) {
+        removedDirs.add(parent);
+        parent = path.dirname(parent);
+      }
+    }
+
+    // Best-effort empty-directory cleanup after auxiliary-file removal.
+    const dirs = Array.from(removedDirs).sort((left, right) => right.length - left.length);
+    for (const dir of dirs) {
+      await fs.rmdir(dir).catch(() => undefined);
+    }
+  }
+
+  async function materializeRuntimeSkillFilesUnlocked(companyId: string, skill: CompanySkill) {
+    const runtimeRoot = path.resolve(resolveManagedSkillsRoot(companyId), "__runtime__");
+    const skillDir = path.resolve(runtimeRoot, buildSkillRuntimeName(skill.key, skill.slug));
+
+    // Build and validate the complete replacement before touching the live tree.
+    // A failure here leaves any previously published snapshot untouched.
+    const desired = await collectRuntimeSkillSnapshot(companyId, skill, skillDir);
+
+    if (await materializedRuntimeSnapshotMatches(skillDir, desired)) {
+      return skillDir;
+    }
+
+    await fs.mkdir(runtimeRoot, { recursive: true });
+    await fs.mkdir(skillDir, { recursive: true });
+
+    // Publish auxiliaries first, then SKILL.md via atomic rename. Never delete the live
+    // SKILL.md before its replacement is ready — concurrent heartbeat/list readers must
+    // always observe a complete file with valid content when one already existed.
+    for (const [relativePath, content] of desired.entries()) {
+      if (relativePath === "SKILL.md") continue;
+      await publishRuntimeSkillFile(skillDir, relativePath, content);
+    }
+    await publishRuntimeSkillFile(skillDir, "SKILL.md", desired.get("SKILL.md")!);
+    await pruneStaleRuntimeSkillFiles(skillDir, desired);
+
+    return skillDir;
+  }
+
+  async function materializeRuntimeSkillFiles(companyId: string, skill: CompanySkill) {
+    const lockKey = `${companyId}:${skill.id}`;
+    const inFlight = runtimeSkillMaterializePromises.get(lockKey);
+    if (inFlight) return inFlight;
+
+    const promise = materializeRuntimeSkillFilesUnlocked(companyId, skill).finally(() => {
+      if (runtimeSkillMaterializePromises.get(lockKey) === promise) {
+        runtimeSkillMaterializePromises.delete(lockKey);
+      }
+    });
+    runtimeSkillMaterializePromises.set(lockKey, promise);
+    return promise;
   }
 
   async function listMaterializedFiles(root: string): Promise<string[] | null> {
@@ -4148,8 +4255,15 @@ export function companySkillService(db: Db) {
       };
     }
 
-    const materializedSource = await materializeRuntimeSkillFiles(companyId, skill).catch(() => null);
-    return materializedSource ? { status: "available", source: materializedSource } : null;
+    const materializedPath = resolveRuntimeSkillMaterializedPath(companyId, skill);
+    try {
+      const materializedSource = await materializeRuntimeSkillFiles(companyId, skill);
+      return { status: "available", source: materializedSource };
+    } catch {
+      // Failed refresh must leave the previous complete snapshot usable when present.
+      const existing = await resolveExistingSkillDirectory(materializedPath);
+      return existing ? { status: "available", source: existing } : null;
+    }
   }
 
   async function listRuntimeSkillEntries(
