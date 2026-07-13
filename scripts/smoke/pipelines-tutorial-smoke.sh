@@ -1,14 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/paperclip-api-auth.sh
+source "$SCRIPT_DIR/../lib/paperclip-api-auth.sh"
+
+api_json() {
+  local method="$1"
+  local path="$2"
+  local body="${3:-}"
+  if [[ -n "$body" ]]; then
+    paperclip_protected_curl "$PAPERCLIP_API_URL" "$path" \
+      --method "$method" \
+      --json-data "$body"
+  else
+    paperclip_protected_curl "$PAPERCLIP_API_URL" "$path" --method "$method"
+  fi
+}
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq is required for the pipeline tutorial smoke." >&2
   exit 1
 fi
+if ! command -v curl >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+  echo "curl and node are required for the pipeline tutorial smoke." >&2
+  exit 1
+fi
 
 : "${PAPERCLIP_API_URL:?Set PAPERCLIP_API_URL for the target dev instance.}"
-: "${PAPERCLIP_API_KEY:?Set PAPERCLIP_API_KEY for the target dev instance.}"
 : "${PAPERCLIP_COMPANY_ID:?Set PAPERCLIP_COMPANY_ID for the target dev company.}"
+paperclip_require_api_key || exit 1
+paperclip_prepare_protected_auth || exit 1
+trap paperclip_cleanup_protected_auth EXIT
 
 read -r -a PC_CMD <<< "${PAPERCLIPAI_CMD:-pnpm --silent paperclipai}"
 RUN_KEY="${PIPELINE_SMOKE_KEY:-$(date +%Y%m%d%H%M%S)}"
@@ -18,29 +45,13 @@ CONTENT_PIPELINE="content-production-${RUN_KEY}"
 TMP_DIR="$(mktemp -d)"
 
 cleanup() {
+  paperclip_cleanup_protected_auth
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
 
 pc_json() {
   "${PC_CMD[@]}" "$@" --json -C "$PAPERCLIP_COMPANY_ID"
-}
-
-api_json() {
-  local method="$1"
-  local path="$2"
-  local body="${3:-}"
-  if [[ -n "$body" ]]; then
-    curl -sS -X "$method" \
-      -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
-      -H "Content-Type: application/json" \
-      --data "$body" \
-      "${PAPERCLIP_API_URL%/}$path"
-  else
-    curl -sS -X "$method" \
-      -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
-      "${PAPERCLIP_API_URL%/}$path"
-  fi
 }
 
 pick_agent_id() {

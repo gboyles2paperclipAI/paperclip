@@ -42,6 +42,10 @@ This does:
 
 Default `pnpm dev` stays in `local_trusted` with loopback-only binding.
 
+`local_trusted` is single-operator only. Do not use it as the long-term posture on a shared OS user, CI runner, or multi-agent host where other local processes can reach loopback. For those environments, switch to `authenticated` + `private` (loopback is fine) and complete the board-claim flow so residual `local-board` API keys, CLI challenges, and memberships are retired atomically.
+
+Board Chat is unavailable outside `local_trusted` unless a future design hardens it for a real browser-session instance admin.
+
 To open Paperclip to a private network with login enabled:
 
 ```sh

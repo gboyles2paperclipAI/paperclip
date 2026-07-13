@@ -10,6 +10,10 @@ import {
   instanceUserRoles,
 } from "@paperclipai/db";
 import { conflict, forbidden, notFound } from "../errors.js";
+import {
+  LOCAL_BOARD_USER_ID,
+  lockLocalBoardInstanceAdminForUpdate,
+} from "../local-board-retirement.js";
 
 export const BOARD_API_KEY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const CLI_AUTH_CHALLENGE_TTL_MS = 10 * 60 * 1000;
@@ -160,22 +164,73 @@ export function boardAuthService(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
-  async function createNamedBoardApiKey(input: {
-    userId: string;
-    name: string;
-    expiresAt?: Date | null;
-  }) {
+  async function createNamedBoardApiKey(
+    input: {
+      userId: string;
+      name: string;
+      expiresAt?: Date | null;
+    },
+    opts?: {
+      /**
+       * Test-only: await this after acquiring the local-board instance-admin row lock
+       * (still inside the mint transaction). Not accepted from HTTP routes.
+       */
+      __testHoldAfterLocalBoardLock?: () => Promise<void>;
+    },
+  ) {
     const token = createBoardApiToken();
-    const created = await db
-      .insert(boardApiKeys)
-      .values({
-        userId: input.userId,
-        name: input.name.trim(),
-        keyHash: hashBearerToken(token),
-        expiresAt: input.expiresAt === undefined ? boardApiKeyExpiresAt() : input.expiresAt,
-      })
-      .returning()
-      .then((rows) => rows[0]);
+    const name = input.name.trim();
+    const expiresAt = input.expiresAt === undefined ? boardApiKeyExpiresAt() : input.expiresAt;
+    const keyHash = hashBearerToken(token);
+
+    // Ordinary real-user named keys stay on the historical non-transactional path.
+    // Only the local-board principal shares the claim/CLI retirement lock so a
+    // concurrent POST /board-api-keys cannot mint past claim's revoke snapshot.
+    if (input.userId !== LOCAL_BOARD_USER_ID) {
+      const created = await db
+        .insert(boardApiKeys)
+        .values({
+          userId: input.userId,
+          name,
+          keyHash,
+          expiresAt,
+        })
+        .returning()
+        .then((rows) => rows[0]);
+
+      return {
+        id: created.id,
+        name: created.name,
+        token,
+        createdAt: created.createdAt,
+        lastUsedAt: created.lastUsedAt,
+        revokedAt: created.revokedAt,
+        expiresAt: created.expiresAt,
+      };
+    }
+
+    const created = await db.transaction(async (tx) => {
+      // Same lock order as claimBoardOwnership / local-board CLI approve:
+      // local-board admin row first, then insert. Refuse once the role is gone.
+      const lockedLocalBoardAdmin = await lockLocalBoardInstanceAdminForUpdate(tx as unknown as Db);
+      if (opts?.__testHoldAfterLocalBoardLock) {
+        await opts.__testHoldAfterLocalBoardLock();
+      }
+      if (!lockedLocalBoardAdmin) {
+        throw forbidden("Local board access has been retired");
+      }
+
+      return tx
+        .insert(boardApiKeys)
+        .values({
+          userId: input.userId,
+          name,
+          keyHash,
+          expiresAt,
+        })
+        .returning()
+        .then((rows) => rows[0]);
+    });
 
     return {
       id: created.id,
@@ -327,9 +382,39 @@ export function boardAuthService(db: Db) {
     };
   }
 
-  async function approveCliAuthChallenge(id: string, token: string, userId: string) {
-    const access = await resolveBoardAccess(userId);
+  async function approveCliAuthChallenge(
+    id: string,
+    token: string,
+    userId: string,
+    opts?: {
+      /**
+       * Test-only: await this after acquiring the local-board instance-admin row lock
+       * (still inside the approval transaction). Not accepted from HTTP routes.
+       */
+      __testHoldAfterLocalBoardLock?: () => Promise<void>;
+    },
+  ) {
+    // Non-local-board callers keep the historical pre-transaction access snapshot.
+    // local-board retirement is revalidated under the shared row lock inside the TX
+    // so concurrent board-claim demotion cannot race past a stale admin snapshot.
+    const preTxAccess = userId === LOCAL_BOARD_USER_ID ? null : await resolveBoardAccess(userId);
+
     return db.transaction(async (tx) => {
+      let isInstanceAdmin = Boolean(preTxAccess?.isInstanceAdmin);
+
+      if (userId === LOCAL_BOARD_USER_ID) {
+        // Same lock order as claimBoardOwnership: local-board admin row first,
+        // then the challenge row below. Refuse mint once the role is gone.
+        const lockedLocalBoardAdmin = await lockLocalBoardInstanceAdminForUpdate(tx as unknown as Db);
+        if (opts?.__testHoldAfterLocalBoardLock) {
+          await opts.__testHoldAfterLocalBoardLock();
+        }
+        if (!lockedLocalBoardAdmin) {
+          throw forbidden("Local board access has been retired");
+        }
+        isInstanceAdmin = true;
+      }
+
       await tx.execute(
         sql`select ${cliAuthChallenges.id} from ${cliAuthChallenges} where ${cliAuthChallenges.id} = ${id} for update`,
       );
@@ -347,7 +432,7 @@ export function boardAuthService(db: Db) {
       if (status === "expired") return { status, challenge };
       if (status === "cancelled") return { status, challenge };
 
-      if (challenge.requestedAccess === "instance_admin_required" && !access.isInstanceAdmin) {
+      if (challenge.requestedAccess === "instance_admin_required" && !isInstanceAdmin) {
         throw forbidden("Instance admin required");
       }
 

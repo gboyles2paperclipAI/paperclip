@@ -761,10 +761,15 @@ What it validates:
 Required permissions:
 
 - This script performs board-governed actions (create invite, approve join, wakeup another agent).
-- In authenticated mode, run with board auth via `PAPERCLIP_AUTH_HEADER` or `PAPERCLIP_COOKIE`.
+- In authenticated mode, prefer a board-capable `PAPERCLIP_API_KEY`. When an
+  agent or routine runs the smoke, inject that environment variable through a
+  Paperclip `secret_ref`; do not read the secret value from instance storage.
+- Existing operator invocations may still use `PAPERCLIP_AUTH_HEADER` or
+  `PAPERCLIP_COOKIE` for compatibility.
 
 Optional auth flags (for authenticated mode):
 
+- `PAPERCLIP_API_KEY` (board-capable API key; canonical non-session path)
 - `PAPERCLIP_AUTH_HEADER` (for example `Bearer ...`)
 - `PAPERCLIP_COOKIE` (session cookie header value)
 

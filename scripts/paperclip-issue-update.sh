@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib/paperclip-api-auth.sh
+source "$SCRIPT_DIR/lib/paperclip-api-auth.sh"
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -81,6 +85,8 @@ elif [[ ! -t 0 ]]; then
 fi
 
 require_command jq
+require_command curl
+require_command node
 
 payload="$(
   jq -nc \
@@ -97,14 +103,15 @@ if [[ "$dry_run" == "1" ]]; then
   exit 0
 fi
 
-if [[ -z "${PAPERCLIP_API_URL:-}" || -z "${PAPERCLIP_API_KEY:-}" || -z "${PAPERCLIP_RUN_ID:-}" ]]; then
-  printf 'Missing PAPERCLIP_API_URL, PAPERCLIP_API_KEY, or PAPERCLIP_RUN_ID.\n' >&2
+if [[ -z "${PAPERCLIP_API_URL:-}" || -z "${PAPERCLIP_RUN_ID:-}" ]]; then
+  printf 'Missing PAPERCLIP_API_URL or PAPERCLIP_RUN_ID.\n' >&2
   exit 1
 fi
+paperclip_require_api_key || exit 1
+paperclip_prepare_protected_auth || exit 1
+trap paperclip_cleanup_protected_auth EXIT
 
-curl -sS -X PATCH \
-  "$PAPERCLIP_API_URL/api/issues/$issue_id" \
-  -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
-  -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" \
-  -H 'Content-Type: application/json' \
-  --data-binary "$payload"
+paperclip_protected_curl "$PAPERCLIP_API_URL" "/api/issues/$issue_id" \
+  --method PATCH \
+  --run-id "$PAPERCLIP_RUN_ID" \
+  --json-data "$payload"

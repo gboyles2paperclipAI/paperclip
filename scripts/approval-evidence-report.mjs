@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import process from "node:process";
+import {
+  fetchPaperclipJson,
+  protectedPaperclipHeaders,
+} from "./lib/paperclip-api-auth.mjs";
 
 function parseArgs(argv) {
   const args = {
@@ -36,6 +40,7 @@ function usage() {
     "usage: node scripts/approval-evidence-report.mjs [--require-clean] [--health-url <url>] [--live-runs-url <url>]",
     "",
     "Prints machine-verifiable evidence for merge/deploy/runtime approval requests.",
+    "Protected live-runs reads use PAPERCLIP_API_KEY and require it in authenticated mode.",
     "Does not print secrets or environment variables.",
   ].join("\n");
 }
@@ -53,16 +58,17 @@ function run(command, args, options = {}) {
   }
 }
 
-async function fetchJson(url) {
+async function fetchJson(apiUrl, url, headers = { Accept: "application/json" }) {
   if (!url) return null;
-  const response = await fetch(url, {
-    headers: { Accept: "application/json" },
+  const { body, response } = await fetchPaperclipJson({
+    apiUrl,
+    requestUrl: url,
+    headers,
   });
   if (!response.ok) {
     return { ok: false, status: response.status, statusText: response.statusText };
   }
-  const json = await response.json();
-  return { ok: true, status: response.status, body: json };
+  return { ok: true, status: response.status, body };
 }
 
 function summarizeLiveRuns(response) {
@@ -120,8 +126,16 @@ async function main() {
   const aheadBehind = upstream ? parseAheadBehind(run("git", ["rev-list", "--left-right", "--count", `${upstream}...HEAD`])) : null;
   const dirtyTracked = trackedDirtyFiles();
   const changed = changedFiles();
-  const health = await fetchJson(args.healthUrl);
-  const liveRuns = summarizeLiveRuns(await fetchJson(args.liveRunsUrl));
+  const apiUrl = process.env.PAPERCLIP_API_URL ?? new URL(args.healthUrl).origin;
+  const health = await fetchJson(apiUrl, args.healthUrl);
+  const liveRunsHeaders = args.liveRunsUrl
+    ? protectedPaperclipHeaders({
+        health: health?.body,
+        apiUrl,
+        requestUrl: args.liveRunsUrl,
+      })
+    : undefined;
+  const liveRuns = summarizeLiveRuns(await fetchJson(apiUrl, args.liveRunsUrl, liveRunsHeaders));
 
   const report = {
     schemaVersion: 1,

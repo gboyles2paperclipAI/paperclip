@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import { access, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import {
+  deploymentModeFromHealth,
+  fetchPaperclipJson,
+  protectedPaperclipHeaders,
+} from "./lib/paperclip-api-auth.mjs";
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:3100";
 const DEFAULT_COMPANY_ID = "24c167fc-9271-4800-8834-97a660ffa3f4";
@@ -33,12 +38,16 @@ function parseArgs(argv) {
   return args;
 }
 
-async function fetchJson(baseUrl, route) {
-  const response = await fetch(new URL(route, baseUrl));
+async function fetchJson(baseUrl, route, headers = { Accept: "application/json" }) {
+  const { body, response } = await fetchPaperclipJson({
+    apiUrl: baseUrl,
+    requestUrl: route,
+    headers,
+  });
   if (!response.ok) {
     throw new Error(`${route} returned ${response.status}`);
   }
-  return response.json();
+  return body;
 }
 
 async function pathExists(value) {
@@ -166,14 +175,21 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const now = new Date();
   const nowMs = now.getTime();
+  const health = await fetchJson(args.baseUrl, "/api/health");
+  deploymentModeFromHealth(health);
+  const protectedHeaders = protectedPaperclipHeaders({
+    health,
+    apiUrl: args.baseUrl,
+    requestUrl: new URL(`/api/companies/${args.companyId}/dashboard`, args.baseUrl),
+  });
   const [dashboard, agents, liveRuns] = await Promise.all([
-    fetchJson(args.baseUrl, `/api/companies/${args.companyId}/dashboard`),
-    fetchJson(args.baseUrl, `/api/companies/${args.companyId}/agents`),
-    fetchJson(args.baseUrl, `/api/companies/${args.companyId}/live-runs?limit=200`),
+    fetchJson(args.baseUrl, `/api/companies/${args.companyId}/dashboard`, protectedHeaders),
+    fetchJson(args.baseUrl, `/api/companies/${args.companyId}/agents`, protectedHeaders),
+    fetchJson(args.baseUrl, `/api/companies/${args.companyId}/live-runs?limit=200`, protectedHeaders),
   ]);
   const details = await Promise.all(
     agents.map((agent) =>
-      fetchJson(args.baseUrl, `/api/agents/${agent.id}`)
+      fetchJson(args.baseUrl, `/api/agents/${agent.id}`, protectedHeaders)
         .catch((error) => ({ id: agent.id, fetchError: error.message })),
     ),
   );

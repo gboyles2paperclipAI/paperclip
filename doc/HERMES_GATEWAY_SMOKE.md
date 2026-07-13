@@ -48,8 +48,9 @@ and the non-loopback HTTP guard.
   Hermes config so non-interactive gateway/API runs do not wait for a manual
   execute-code approval prompt. Do not copy a host `~/.hermes` directory into
   the container to solve approval or provider setup.
-- Board/operator auth is required through `PAPERCLIP_AUTH_HEADER`,
-  `PAPERCLIP_COOKIE`, or a board-capable `PAPERCLIP_API_KEY`.
+- Board/operator auth should use a board-capable `PAPERCLIP_API_KEY` as the
+  canonical non-session path. `PAPERCLIP_AUTH_HEADER` and `PAPERCLIP_COOKIE`
+  remain supported for existing interactive operator invocations.
 - Diagnostic files are redacted before they are written, except the join output
   file intentionally contains the claimed Paperclip agent key and is written
   `chmod 600`.

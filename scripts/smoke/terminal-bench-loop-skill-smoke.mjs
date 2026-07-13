@@ -3,6 +3,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fetchPaperclipJson } from "../lib/paperclip-api-auth.mjs";
 
 const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
 
@@ -97,7 +98,7 @@ async function assertLocalSkillPackage() {
   }
 }
 
-function createApiClient({ apiUrl, apiKey, runId }) {
+export function createApiClient({ apiUrl, apiKey, runId }) {
   const baseUrl = apiUrl.replace(/\/+$/, "");
 
   return async function api(method, path, { body, ok } = {}) {
@@ -113,21 +114,23 @@ function createApiClient({ apiUrl, apiKey, runId }) {
       headers["X-Paperclip-Run-Id"] = runId;
     }
 
-    const response = await fetch(`${baseUrl}${path}`, {
-      method,
+    const { body: data, response } = await fetchPaperclipJson({
+      apiUrl,
+      requestUrl: `${baseUrl}${path}`,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      fetchOptions: {
+        method,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      },
     });
-    const text = await response.text();
-    const data = text ? JSON.parse(text) : null;
     if (!expectedStatuses.includes(response.status)) {
-      throw new Error(`${method} ${path} returned ${response.status}: ${text}`);
+      throw new Error(`${method} ${path} returned ${response.status}: ${JSON.stringify(data)}`);
     }
     return data;
   };
 }
 
-async function main() {
+export async function main() {
   const args = parseArgs(process.argv.slice(2));
   const apiUrl = requireEnv("PAPERCLIP_API_URL");
   const apiKey = requireEnv("PAPERCLIP_API_KEY");
@@ -355,7 +358,9 @@ async function main() {
   }, null, 2));
 }
 
-main().catch((error) => {
-  console.error(`terminal-bench-loop skill smoke failed: ${error.message}`);
-  process.exit(1);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(`terminal-bench-loop skill smoke failed: ${error.message}`);
+    process.exit(1);
+  });
+}

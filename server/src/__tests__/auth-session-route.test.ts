@@ -94,6 +94,70 @@ describe("actorMiddleware authenticated session profile", () => {
     });
   });
 
+  it("fail-closes authenticated mode when no session or bearer is present", async () => {
+    const app = express();
+    app.use(
+      actorMiddleware(createDb(), {
+        deploymentMode: "authenticated",
+        resolveSession: async () => null,
+      }),
+    );
+    app.get("/actor", (req, res) => {
+      res.json(req.actor);
+    });
+    app.get("/companies", (req, res) => {
+      if (req.actor.type === "none") {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      res.status(200).json([]);
+    });
+
+    const actorRes = await request(app).get("/actor");
+    expect(actorRes.status).toBe(200);
+    expect(actorRes.body).toMatchObject({ type: "none", source: "none" });
+
+    const companiesRes = await request(app).get("/companies");
+    expect(companiesRes.status).toBe(401);
+    expect(companiesRes.body).toMatchObject({ error: "Unauthorized" });
+  });
+
+  it("fail-closes authenticated mode on production companies routes without session or bearer", async () => {
+    // Uses the real companyRoutes + errorHandler from the production router
+    // surface (not a synthetic test-only handler) with authenticated actor
+    // middleware and no session/bearer resolution.
+    const { companyRoutes } = await import("../routes/companies.js");
+    const { errorHandler } = await import("../middleware/index.js");
+    const app = express();
+    app.use(express.json());
+    app.use(
+      actorMiddleware(createDb(), {
+        deploymentMode: "authenticated",
+        resolveSession: async () => null,
+      }),
+    );
+    app.use("/api/companies", companyRoutes({} as any));
+    app.use(errorHandler);
+
+    // Privileged list boundary: assertBoard rejects actor type "none".
+    const listRes = await request(app).get("/api/companies");
+    expect(listRes.status).toBe(403);
+    expect(listRes.body).toMatchObject({ error: "Board access required" });
+
+    // Privileged create/admin boundary: same fail-closed denial without promotion.
+    const createRes = await request(app)
+      .post("/api/companies")
+      .send({ name: "Should Not Create", issuePrefix: "SNC" });
+    expect(createRes.status).toBe(403);
+    expect(createRes.body).toMatchObject({ error: "Board access required" });
+
+    // Company-scoped access uses assertAuthenticated → 401 Unauthorized.
+    const companyId = "11111111-1111-4111-8111-111111111111";
+    const getRes = await request(app).get(`/api/companies/${companyId}`);
+    expect(getRes.status).toBe(401);
+    expect(getRes.body).toMatchObject({ error: "Unauthorized" });
+  });
+
   it("does not attach X-Paperclip-Run-Id to the local board actor", async () => {
     const app = express();
     app.use(

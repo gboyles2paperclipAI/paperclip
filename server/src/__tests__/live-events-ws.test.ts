@@ -120,4 +120,28 @@ describe("setupLiveEventsWebSocketServer", () => {
     expect(socket.listenerCount("close")).toBe(0);
     expect(socket.listenerCount("finish")).toBe(0);
   });
+
+  it("fail-closes authenticated private WebSocket subscriptions without a session or bearer", async () => {
+    const server = new EventEmitter();
+    setupLiveEventsWebSocketServer(server as never, {} as never, {
+      deploymentMode: "authenticated",
+      resolveSessionFromHeaders: async () => null,
+    });
+    const socket = new FakeUpgradeSocket();
+
+    server.emit(
+      "upgrade",
+      createUpgradeRequest({
+        url: "/api/companies/company-1/events/ws",
+        headers: {},
+      }),
+      socket as unknown as Duplex,
+      Buffer.alloc(0),
+    );
+    await flushPromises();
+    await flushPromises();
+
+    expect(socket.endedChunks[0]).toMatch(/403 Forbidden|401 Unauthorized/);
+    expect(socket.destroyed).toBe(true);
+  });
 });
