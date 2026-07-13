@@ -491,8 +491,7 @@ describeEmbeddedPostgres("Slack approval interactions", () => {
     return { company, agent, issue, approval };
   }
 
-  async function sendInteraction(app: express.Express, body: string, secret = "slack-secret") {
-    const timestamp = Math.floor(Date.now() / 1000);
+  async function sendInteraction(app: express.Express, body: string, secret = "slack-secret", timestamp = Math.floor(Date.now() / 1000)) {
     return request(app)
       .post("/api/integrations/slack/interactions")
       .set("content-type", "application/x-www-form-urlencoded")
@@ -585,9 +584,10 @@ describeEmbeddedPostgres("Slack approval interactions", () => {
     const { approval } = await seedApproval();
     const body = interactionBody({ approvalId: approval.id, action: "needs_changes" });
     const app = createApp(db);
+    const ts = Math.floor(Date.now() / 1000);
 
-    const first = await sendInteraction(app, body);
-    const second = await sendInteraction(app, body);
+    const first = await sendInteraction(app, body, "slack-secret", ts);
+    const second = await sendInteraction(app, body, "slack-secret", ts);
 
     expect(first.status).toBe(200);
     expect(second.status).toBe(422);
