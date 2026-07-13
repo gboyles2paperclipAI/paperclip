@@ -48,6 +48,7 @@ import type {
 import { normalizeAgentUrlKey, parseFrontmatterMarkdown } from "@paperclipai/shared";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 import { conflict, notFound, unprocessable } from "../errors.js";
+import { logger } from "../middleware/logger.js";
 import { ghFetch, gitHubApiBase, resolveRawGitHubUrl } from "./github-fetch.js";
 import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
@@ -287,6 +288,40 @@ type SkillActor = {
 type RuntimeSkillSourceResolution =
   | { status: "available"; source: string }
   | { status: "missing"; source: string; detail: string };
+
+/** Fail-closed signal when a partial refresh could not be rolled back to a prior complete snapshot. */
+class RuntimeSkillRestoreFailedError extends Error {
+  readonly code = "RUNTIME_SKILL_RESTORE_FAILED" as const;
+
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
+    this.name = "RuntimeSkillRestoreFailedError";
+  }
+}
+
+function isRuntimeSkillRestoreFailedError(error: unknown): error is RuntimeSkillRestoreFailedError {
+  return error instanceof RuntimeSkillRestoreFailedError
+    || (typeof error === "object"
+      && error !== null
+      && (error as { code?: unknown }).code === "RUNTIME_SKILL_RESTORE_FAILED");
+}
+
+function isEphemeralRuntimeSkillFile(relativePath: string): boolean {
+  const base = path.posix.basename(relativePath);
+  return base.startsWith(".") || base.includes(".publish-") || base.includes(".tmp-");
+}
+
+function summarizeRuntimeSkillError(error: unknown) {
+  if (error instanceof Error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return {
+      name: error.name,
+      message: error.message,
+      ...(code ? { code } : {}),
+    };
+  }
+  return { message: String(error) };
+}
 
 const skillInventoryRefreshPromises = new Map<string, Promise<void>>();
 /** Per-skill single-flight for reader-safe runtime materialization. */
@@ -4033,8 +4068,14 @@ export function companySkillService(db: Db) {
     return desired;
   }
 
-  async function materializedRuntimeSnapshotMatches(skillDir: string, desired: Map<string, string>) {
+  async function listDurableMaterializedFiles(skillDir: string): Promise<string[] | null> {
     const existingFiles = await listMaterializedFiles(skillDir);
+    if (!existingFiles) return null;
+    return existingFiles.filter((relativePath) => !isEphemeralRuntimeSkillFile(relativePath));
+  }
+
+  async function materializedRuntimeSnapshotMatches(skillDir: string, desired: Map<string, string>) {
+    const existingFiles = await listDurableMaterializedFiles(skillDir);
     if (!existingFiles || existingFiles.length !== desired.size) return false;
     for (const relativePath of existingFiles) {
       if (!desired.has(relativePath)) return false;
@@ -4044,6 +4085,31 @@ export function companySkillService(db: Db) {
       if (existingContent !== content) return false;
     }
     return true;
+  }
+
+  /**
+   * Capture the currently published complete tree (if any) so a failed refresh can
+   * restore the byte-identical prior snapshot. Requires a durable SKILL.md that
+   * still parses as skill markdown.
+   */
+  async function capturePublishedRuntimeSkillSnapshot(skillDir: string): Promise<Map<string, string> | null> {
+    const existingFiles = await listDurableMaterializedFiles(skillDir);
+    if (!existingFiles || existingFiles.length === 0) return null;
+    if (!existingFiles.includes("SKILL.md")) return null;
+
+    const snapshot = new Map<string, string>();
+    for (const relativePath of existingFiles) {
+      const content = await fs.readFile(path.resolve(skillDir, relativePath), "utf8").catch(() => null);
+      if (content === null) return null;
+      snapshot.set(relativePath, content);
+    }
+
+    try {
+      parseFrontmatterMarkdown(snapshot.get("SKILL.md")!);
+    } catch {
+      return null;
+    }
+    return snapshot;
   }
 
   async function publishRuntimeSkillFile(skillDir: string, relativePath: string, content: string) {
@@ -4097,6 +4163,29 @@ export function companySkillService(db: Db) {
     }
   }
 
+  /**
+   * Restore a previously published complete tree without deleting healthy live
+   * SKILL.md first. Auxiliaries are rewritten via atomic rename, then SKILL.md,
+   * then extras are pruned.
+   */
+  async function restorePublishedRuntimeSkillSnapshot(skillDir: string, snapshot: Map<string, string>) {
+    await fs.mkdir(skillDir, { recursive: true });
+    for (const [relativePath, content] of snapshot.entries()) {
+      if (relativePath === "SKILL.md") continue;
+      await publishRuntimeSkillFile(skillDir, relativePath, content);
+    }
+    const skillMarkdown = snapshot.get("SKILL.md");
+    if (skillMarkdown === undefined) {
+      throw new Error("prior runtime skill snapshot is missing SKILL.md");
+    }
+    await publishRuntimeSkillFile(skillDir, "SKILL.md", skillMarkdown);
+    await pruneStaleRuntimeSkillFiles(skillDir, snapshot);
+
+    if (!(await materializedRuntimeSnapshotMatches(skillDir, snapshot))) {
+      throw new Error("restored runtime skill snapshot does not match the prior complete snapshot");
+    }
+  }
+
   async function materializeRuntimeSkillFilesUnlocked(companyId: string, skill: CompanySkill) {
     const runtimeRoot = path.resolve(resolveManagedSkillsRoot(companyId), "__runtime__");
     const skillDir = path.resolve(runtimeRoot, buildSkillRuntimeName(skill.key, skill.slug));
@@ -4109,20 +4198,75 @@ export function companySkillService(db: Db) {
       return skillDir;
     }
 
-    await fs.mkdir(runtimeRoot, { recursive: true });
-    await fs.mkdir(skillDir, { recursive: true });
+    // Capture the last complete published tree before any live mutation so a failed
+    // refresh can restore the byte-identical previous snapshot.
+    const priorSnapshot = await capturePublishedRuntimeSkillSnapshot(skillDir);
+    let liveMutationStarted = false;
 
-    // Publish auxiliaries first, then SKILL.md via atomic rename. Never delete the live
-    // SKILL.md before its replacement is ready — concurrent heartbeat/list readers must
-    // always observe a complete file with valid content when one already existed.
-    for (const [relativePath, content] of desired.entries()) {
-      if (relativePath === "SKILL.md") continue;
-      await publishRuntimeSkillFile(skillDir, relativePath, content);
+    try {
+      await fs.mkdir(runtimeRoot, { recursive: true });
+      await fs.mkdir(skillDir, { recursive: true });
+
+      // Publish auxiliaries first, then SKILL.md via atomic rename. Never delete the live
+      // SKILL.md before its replacement is ready — concurrent heartbeat/list readers must
+      // always observe a complete file with valid content when one already existed.
+      for (const [relativePath, content] of desired.entries()) {
+        if (relativePath === "SKILL.md") continue;
+        liveMutationStarted = true;
+        await publishRuntimeSkillFile(skillDir, relativePath, content);
+      }
+      liveMutationStarted = true;
+      await publishRuntimeSkillFile(skillDir, "SKILL.md", desired.get("SKILL.md")!);
+      await pruneStaleRuntimeSkillFiles(skillDir, desired);
+
+      return skillDir;
+    } catch (error) {
+      logger.warn(
+        {
+          companyId,
+          skillId: skill.id,
+          skillKey: skill.key,
+          liveMutationStarted,
+          hadPriorSnapshot: priorSnapshot !== null,
+          err: summarizeRuntimeSkillError(error),
+        },
+        "runtime skill materialization refresh failed",
+      );
+
+      if (!priorSnapshot) {
+        throw error;
+      }
+
+      try {
+        await restorePublishedRuntimeSkillSnapshot(skillDir, priorSnapshot);
+        logger.warn(
+          {
+            companyId,
+            skillId: skill.id,
+            skillKey: skill.key,
+            err: summarizeRuntimeSkillError(error),
+          },
+          "runtime skill materialization restored prior complete snapshot after refresh failure",
+        );
+        // Prior complete tree is verified; advertise it as available.
+        return skillDir;
+      } catch (restoreError) {
+        logger.error(
+          {
+            companyId,
+            skillId: skill.id,
+            skillKey: skill.key,
+            err: summarizeRuntimeSkillError(restoreError),
+            refreshErr: summarizeRuntimeSkillError(error),
+          },
+          "runtime skill materialization failed to restore prior complete snapshot",
+        );
+        throw new RuntimeSkillRestoreFailedError(
+          `Company skill "${skill.name}" refresh failed and the previous complete runtime snapshot could not be restored safely.`,
+          { cause: restoreError },
+        );
+      }
     }
-    await publishRuntimeSkillFile(skillDir, "SKILL.md", desired.get("SKILL.md")!);
-    await pruneStaleRuntimeSkillFiles(skillDir, desired);
-
-    return skillDir;
   }
 
   async function materializeRuntimeSkillFiles(companyId: string, skill: CompanySkill) {
@@ -4259,8 +4403,17 @@ export function companySkillService(db: Db) {
     try {
       const materializedSource = await materializeRuntimeSkillFiles(companyId, skill);
       return { status: "available", source: materializedSource };
-    } catch {
-      // Failed refresh must leave the previous complete snapshot usable when present.
+    } catch (error) {
+      // A partial refresh that could not be rolled back must not be advertised as available.
+      if (isRuntimeSkillRestoreFailedError(error)) {
+        return {
+          status: "missing",
+          source: materializedPath,
+          detail: error.message,
+        };
+      }
+      // Pre-mutation failures (or first publish with no prior snapshot) leave any previous
+      // complete tree untouched when one existed; only advertise when SKILL.md is still present.
       const existing = await resolveExistingSkillDirectory(materializedPath);
       return existing ? { status: "available", source: existing } : null;
     }

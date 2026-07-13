@@ -383,12 +383,154 @@ describeEmbeddedPostgres("companySkillService runtime skill materialization", ()
     expect(writeSpy.mock.calls.some(([file]) => String(file).includes(".publish-"))).toBe(true);
     expect(listed).toHaveLength(1);
     expect(listed[0]!.source).toBe(skillPath);
+    expect(listed[0]!.sourceStatus).toBe("available");
 
     await expect(fs.readFile(path.join(skillPath, "SKILL.md"), "utf8")).resolves.toBe(before);
     await expect(fs.readFile(path.join(skillPath, "references", "guide.md"), "utf8")).resolves.toBe(beforeAux);
 
     const residue = await listRuntimeResidue(path.dirname(skillPath));
     expect(residue.every((filePath) => !path.basename(filePath).includes(".publish-"))).toBe(true);
+  });
+
+  it("restores the previous complete snapshot when a later live publish fails after an auxiliary publish", async () => {
+    const { companyId, skillId, key, markdown } = await insertSourceLessGithubSkill({
+      markdown: skillMarkdown("Runtime Coach", "Stable body."),
+      remoteFiles: {
+        "references/guide.md": "# Guide v1\n",
+        "references/extra.md": "# Extra v1\n",
+      },
+    });
+
+    const initial = filterOwnEntries(await svc.listRuntimeSkillEntries(companyId), new Set([key]));
+    expect(initial).toHaveLength(1);
+    const skillPath = initial[0]!.source;
+    const beforeSkill = await fs.readFile(path.join(skillPath, "SKILL.md"), "utf8");
+    const beforeGuide = await fs.readFile(path.join(skillPath, "references", "guide.md"), "utf8");
+    const beforeExtra = await fs.readFile(path.join(skillPath, "references", "extra.md"), "utf8");
+    expect(beforeSkill).toBe(markdown);
+    expect(beforeGuide).toBe("# Guide v1\n");
+    expect(beforeExtra).toBe("# Extra v1\n");
+
+    const nextMarkdown = skillMarkdown("Runtime Coach", "This partial update must not stick.");
+    remoteFiles.set("SKILL.md", nextMarkdown);
+    remoteFiles.set("references/guide.md", "# Guide v2\n");
+    remoteFiles.set("references/new.md", "# New must not remain\n");
+    remoteFiles.delete("references/extra.md");
+    await db.update(companySkills)
+      .set({
+        markdown: nextMarkdown,
+        fileInventory: [
+          { path: "SKILL.md", kind: "skill" },
+          { path: "references/guide.md", kind: "reference" },
+          { path: "references/new.md", kind: "reference" },
+        ],
+      })
+      .where(eq(companySkills.id, skillId));
+
+    const originalRename = fs.rename.bind(fs);
+    let successfulLiveAuxRenames = 0;
+    let forcedLaterPublishFailure = false;
+    const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+      const fromStr = String(from);
+      const toStr = String(to);
+      const isLivePublishRename =
+        fromStr.includes(".publish-")
+        && (toStr === skillPath || toStr.startsWith(`${skillPath}${path.sep}`));
+      if (isLivePublishRename && path.basename(toStr) !== "SKILL.md") {
+        // Allow the first live auxiliary publish into the tree, then fail exactly once on
+        // a later publish so restore renames can still succeed afterward.
+        if (successfulLiveAuxRenames >= 1 && !forcedLaterPublishFailure) {
+          forcedLaterPublishFailure = true;
+          throw new Error("forced later auxiliary publish failure");
+        }
+        if (!forcedLaterPublishFailure) {
+          await originalRename(from, to);
+          successfulLiveAuxRenames += 1;
+          return;
+        }
+      }
+      return originalRename(from, to);
+    });
+
+    const listed = filterOwnEntries(await svc.listRuntimeSkillEntries(companyId), new Set([key]));
+
+    expect(successfulLiveAuxRenames).toBeGreaterThanOrEqual(1);
+    expect(forcedLaterPublishFailure).toBe(true);
+    expect(renameSpy.mock.calls.length).toBeGreaterThan(0);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]!.source).toBe(skillPath);
+    expect(listed[0]!.sourceStatus).toBe("available");
+    expect(listed[0]!.missingDetail).toBeNull();
+
+    // Prior complete snapshot must be restored byte-identically — including files the
+    // failed refresh intended to change, add, or remove.
+    await expect(fs.readFile(path.join(skillPath, "SKILL.md"), "utf8")).resolves.toBe(beforeSkill);
+    await expect(fs.readFile(path.join(skillPath, "references", "guide.md"), "utf8")).resolves.toBe(beforeGuide);
+    await expect(fs.readFile(path.join(skillPath, "references", "extra.md"), "utf8")).resolves.toBe(beforeExtra);
+    await expect(fs.stat(path.join(skillPath, "references", "new.md"))).rejects.toMatchObject({ code: "ENOENT" });
+
+    const residue = await listRuntimeResidue(path.dirname(skillPath));
+    expect(residue.every((filePath) => !path.basename(filePath).includes(".publish-"))).toBe(true);
+  });
+
+  it("fails closed when a partial refresh cannot restore the prior complete snapshot", async () => {
+    const { companyId, skillId, key } = await insertSourceLessGithubSkill({
+      markdown: skillMarkdown("Runtime Coach", "Stable body."),
+      remoteFiles: {
+        "references/guide.md": "# Guide v1\n",
+        "references/extra.md": "# Extra v1\n",
+      },
+    });
+
+    const initial = filterOwnEntries(await svc.listRuntimeSkillEntries(companyId), new Set([key]));
+    const skillPath = initial[0]!.source;
+
+    const nextMarkdown = skillMarkdown("Runtime Coach", "Broken partial update.");
+    remoteFiles.set("SKILL.md", nextMarkdown);
+    remoteFiles.set("references/guide.md", "# Guide v2\n");
+    remoteFiles.set("references/new.md", "# New\n");
+    remoteFiles.delete("references/extra.md");
+    await db.update(companySkills)
+      .set({
+        markdown: nextMarkdown,
+        fileInventory: [
+          { path: "SKILL.md", kind: "skill" },
+          { path: "references/guide.md", kind: "reference" },
+          { path: "references/new.md", kind: "reference" },
+        ],
+      })
+      .where(eq(companySkills.id, skillId));
+
+    const originalRename = fs.rename.bind(fs);
+    let successfulLiveAuxRenames = 0;
+    let blockedAfterPartialPublish = false;
+    vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+      const fromStr = String(from);
+      const toStr = String(to);
+      const isLivePublishRename =
+        fromStr.includes(".publish-")
+        && (toStr === skillPath || toStr.startsWith(`${skillPath}${path.sep}`));
+      if (isLivePublishRename) {
+        if (!blockedAfterPartialPublish && path.basename(toStr) !== "SKILL.md" && successfulLiveAuxRenames < 1) {
+          await originalRename(from, to);
+          successfulLiveAuxRenames += 1;
+          return;
+        }
+        // Fail the later publish and every subsequent restore rename so restoration cannot complete.
+        blockedAfterPartialPublish = true;
+        throw new Error("forced later publish and restore failure");
+      }
+      return originalRename(from, to);
+    });
+
+    const listed = filterOwnEntries(await svc.listRuntimeSkillEntries(companyId), new Set([key]));
+
+    expect(successfulLiveAuxRenames).toBeGreaterThanOrEqual(1);
+    expect(blockedAfterPartialPublish).toBe(true);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]!.source).toBe(skillPath);
+    expect(listed[0]!.sourceStatus).toBe("missing");
+    expect(listed[0]!.missingDetail).toMatch(/could not be restored safely/i);
   });
 
   it("keeps published paths sandboxed under the skill directory", async () => {
