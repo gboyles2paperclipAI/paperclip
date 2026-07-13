@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=../lib/paperclip-api-auth.sh
+source "$SCRIPT_DIR/../lib/paperclip-api-auth.sh"
+
 log() {
   echo "[openclaw-gateway-e2e] $*"
 }
@@ -56,15 +60,7 @@ OPENCLAW_ADAPTER_WAIT_TIMEOUT_MS="${OPENCLAW_ADAPTER_WAIT_TIMEOUT_MS:-120000}"
 PAIRING_AUTO_APPROVE="${PAIRING_AUTO_APPROVE:-1}"
 PAYLOAD_TEMPLATE_MESSAGE_APPEND="${PAYLOAD_TEMPLATE_MESSAGE_APPEND:-}"
 
-AUTH_HEADERS=()
-if [[ -n "${PAPERCLIP_AUTH_HEADER:-}" ]]; then
-  AUTH_HEADERS+=( -H "Authorization: ${PAPERCLIP_AUTH_HEADER}" )
-fi
-if [[ -n "${PAPERCLIP_COOKIE:-}" ]]; then
-  AUTH_HEADERS+=( -H "Cookie: ${PAPERCLIP_COOKIE}" )
-  PAPERCLIP_BROWSER_ORIGIN="${PAPERCLIP_BROWSER_ORIGIN:-${PAPERCLIP_API_URL%/}}"
-  AUTH_HEADERS+=( -H "Origin: ${PAPERCLIP_BROWSER_ORIGIN}" -H "Referer: ${PAPERCLIP_BROWSER_ORIGIN}/" )
-fi
+PAPERCLIP_BROWSER_ORIGIN="${PAPERCLIP_BROWSER_ORIGIN:-${PAPERCLIP_API_URL%/}}"
 
 RESPONSE_CODE=""
 RESPONSE_BODY=""
@@ -87,28 +83,21 @@ api_request() {
   local tmp
   tmp="$(mktemp)"
 
-  local url
-  if [[ "$path" == http://* || "$path" == https://* ]]; then
-    url="$path"
-  elif [[ "$path" == /api/* ]]; then
-    url="${PAPERCLIP_API_URL%/}${path}"
-  else
-    url="${API_BASE}${path}"
+  local request_path="$path"
+  if [[ "$path" != http://* && "$path" != https://* && "$path" != /api/* ]]; then
+    request_path="/api${path}"
   fi
-
+  local -a request_options=(
+    --method "$method"
+    --output "$tmp"
+    --write-http-code
+    --browser-origin "$PAPERCLIP_BROWSER_ORIGIN"
+  )
   if [[ -n "$data" ]]; then
-    if (( ${#AUTH_HEADERS[@]} > 0 )); then
-      RESPONSE_CODE="$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "${AUTH_HEADERS[@]}" -H "Content-Type: application/json" "$url" --data "$data")"
-    else
-      RESPONSE_CODE="$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" -H "Content-Type: application/json" "$url" --data "$data")"
-    fi
-  else
-    if (( ${#AUTH_HEADERS[@]} > 0 )); then
-      RESPONSE_CODE="$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "${AUTH_HEADERS[@]}" "$url")"
-    else
-      RESPONSE_CODE="$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "$url")"
-    fi
+    request_options+=(--json-data "$data")
   fi
+  RESPONSE_CODE="$(paperclip_protected_curl "$PAPERCLIP_API_URL" "$request_path" "${request_options[@]}")" \
+    || fail "protected Paperclip API request failed"
 
   RESPONSE_BODY="$(cat "$tmp")"
   rm -f "$tmp"
@@ -174,9 +163,6 @@ assert_status() {
 }
 
 require_board_auth() {
-  if [[ ${#AUTH_HEADERS[@]} -eq 0 ]]; then
-    fail "board auth required. Set PAPERCLIP_COOKIE or PAPERCLIP_AUTH_HEADER."
-  fi
   api_request "GET" "/companies"
   if [[ "$RESPONSE_CODE" != "200" ]]; then
     echo "$RESPONSE_BODY" >&2
@@ -884,10 +870,11 @@ main() {
   mkdir -p "$OPENCLAW_DIAG_DIR"
   log "diagnostics dir: ${OPENCLAW_DIAG_DIR}"
 
-  wait_http_ready "${PAPERCLIP_API_URL%/}/api/health" 15 || fail "Paperclip API health endpoint not reachable"
-  api_request "GET" "/health"
-  assert_status "200"
-  log "paperclip health deploymentMode=$(jq -r '.deploymentMode // "unknown"' <<<"$RESPONSE_BODY") exposure=$(jq -r '.deploymentExposure // "unknown"' <<<"$RESPONSE_BODY")"
+  paperclip_public_health_preflight "$PAPERCLIP_API_URL" || fail "Paperclip API health endpoint is not ready"
+  log "paperclip health deploymentMode=${PAPERCLIP_DEPLOYMENT_MODE} exposure=${PAPERCLIP_DEPLOYMENT_EXPOSURE}"
+  paperclip_prepare_protected_auth || fail "protected Paperclip API auth could not be prepared"
+  paperclip_require_protected_auth_for_mode "$PAPERCLIP_DEPLOYMENT_MODE" \
+    || fail "protected Paperclip API auth is not configured"
 
   require_board_auth
   resolve_company_id
@@ -948,7 +935,11 @@ main() {
   log "caseB_issueId=${CASE_B_ISSUE_ID}"
   log "caseC_issueId=${CASE_C_ISSUE_ID}"
   log "caseC_createdIssueId=${CASE_C_CREATED_ISSUE_ID:-none}"
-  log "agentApiKeyPrefix=${AGENT_API_KEY:0:12}..."
 }
+
+cleanup_auth() {
+  paperclip_cleanup_protected_auth
+}
+trap cleanup_auth EXIT
 
 main "$@"

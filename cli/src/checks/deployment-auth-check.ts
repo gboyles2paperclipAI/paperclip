@@ -21,7 +21,10 @@ export function deploymentAuthCheck(config: PaperclipConfig): CheckResult {
     return {
       name: "Deployment/auth mode",
       status: "pass",
-      message: "local_trusted mode is configured for loopback-only access",
+      // Single-operator only: shared OS users, CI runners, and multi-agent hosts
+      // should use authenticated/private (loopback is fine) instead of local_trusted.
+      message:
+        "local_trusted mode is configured for loopback-only single-operator access (not for shared hosts/CI/multi-agent)",
     };
   }
 

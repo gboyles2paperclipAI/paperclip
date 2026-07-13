@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=../lib/paperclip-api-auth.sh
+source "$SCRIPT_DIR/../lib/paperclip-api-auth.sh"
+
 log() {
   echo "[hermes-gateway-join] $*"
 }
@@ -21,6 +25,7 @@ require_cmd() {
 
 require_cmd curl
 require_cmd jq
+require_cmd node
 
 PAPERCLIP_API_URL="${PAPERCLIP_API_URL:-http://localhost:3100}"
 API_BASE="${PAPERCLIP_API_URL%/}/api"
@@ -48,7 +53,7 @@ adapter config without printing raw secrets.
 
 Required:
   PAPERCLIP_API_URL=http://127.0.0.1:3100
-  PAPERCLIP_AUTH_HEADER='Bearer <board-token>'     # or PAPERCLIP_COOKIE
+  PAPERCLIP_API_KEY=<board-api-key>
   HERMES_GATEWAY_API_KEY=<API_SERVER_KEY>
 
 Common flags:
@@ -68,6 +73,8 @@ Notes:
 
   Raw API keys are redacted from logs. HERMES_JOIN_OUTPUT_FILE contains the
   claimed Paperclip agent API key and is written chmod 600.
+  PAPERCLIP_AUTH_HEADER and PAPERCLIP_COOKIE remain supported for existing
+  interactive operator invocations; PAPERCLIP_API_KEY is the canonical path.
 
 See doc/HERMES_GATEWAY_SMOKE.md for Docker Desktop, Linux, same-network,
 LAN/private-network, and reverse-proxy/TLS examples.
@@ -80,16 +87,6 @@ case "${1:-}" in
     exit 0
     ;;
 esac
-
-AUTH_HEADERS=()
-if [[ -n "${PAPERCLIP_AUTH_HEADER:-}" ]]; then
-  AUTH_HEADERS+=(-H "Authorization: ${PAPERCLIP_AUTH_HEADER}")
-elif [[ -n "${PAPERCLIP_API_KEY:-}" ]]; then
-  AUTH_HEADERS+=(-H "Authorization: Bearer ${PAPERCLIP_API_KEY}")
-fi
-if [[ -n "${PAPERCLIP_COOKIE:-}" ]]; then
-  AUTH_HEADERS+=(-H "Cookie: ${PAPERCLIP_COOKIE}")
-fi
 
 RESPONSE_CODE=""
 RESPONSE_BODY=""
@@ -130,20 +127,16 @@ api_request() {
   local tmp
   tmp="$(mktemp)"
 
-  local url
-  if [[ "$path" == http://* || "$path" == https://* ]]; then
-    url="$path"
-  elif [[ "$path" == /api/* ]]; then
-    url="${PAPERCLIP_API_URL%/}${path}"
-  else
-    url="${API_BASE}${path}"
+  local request_path="$path"
+  if [[ "$path" != http://* && "$path" != https://* && "$path" != /api/* ]]; then
+    request_path="/api${path}"
   fi
-
+  local -a request_options=(--method "$method" --output "$tmp" --write-http-code)
   if [[ -n "$data" ]]; then
-    RESPONSE_CODE="$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "${AUTH_HEADERS[@]}" -H "Content-Type: application/json" "$url" --data "$data")"
-  else
-    RESPONSE_CODE="$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "${AUTH_HEADERS[@]}" "$url")"
+    request_options+=(--json-data "$data")
   fi
+  RESPONSE_CODE="$(paperclip_protected_curl "$PAPERCLIP_API_URL" "$request_path" "${request_options[@]}")" \
+    || fail "protected Paperclip API request failed"
   RESPONSE_BODY="$(cat "$tmp")"
   rm -f "$tmp"
 }
@@ -174,6 +167,7 @@ fail_board_auth_required() {
 [hermes-gateway-join] ERROR: ${operation} requires board/operator auth.
 
 Provide one of:
+  PAPERCLIP_API_KEY="<board-api-key>"
   PAPERCLIP_AUTH_HEADER="Bearer <board-token>"
   PAPERCLIP_COOKIE="<board-session-cookie>"
 
@@ -277,10 +271,17 @@ probe_hermes_gateway() {
   fi
 }
 
+cleanup_auth() {
+  paperclip_cleanup_protected_auth
+}
+trap cleanup_auth EXIT
+
 log "checking Paperclip health"
-api_request "GET" "/health"
-assert_status "200"
-log "deployment mode=$(jq -r '.deploymentMode // "unknown"' <<<"$RESPONSE_BODY") exposure=$(jq -r '.deploymentExposure // "unknown"' <<<"$RESPONSE_BODY")"
+paperclip_public_health_preflight "$PAPERCLIP_API_URL" || fail "Paperclip API health endpoint is not ready"
+log "deployment mode=${PAPERCLIP_DEPLOYMENT_MODE} exposure=${PAPERCLIP_DEPLOYMENT_EXPOSURE}"
+paperclip_prepare_protected_auth || fail "protected Paperclip API auth could not be prepared"
+paperclip_require_protected_auth_for_mode "$PAPERCLIP_DEPLOYMENT_MODE" \
+  || fail "protected Paperclip API auth is not configured"
 
 resolve_company_id
 probe_hermes_gateway

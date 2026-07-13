@@ -18,16 +18,18 @@ Paperclip supports three deployment configurations, from zero-friction local to 
 ### Local Trusted (Default)
 
 - Loopback-only host binding (localhost)
-- No human login flow
+- No human login flow (implicit `local-board` operator)
 - Fastest local startup
-- Best for: solo development and experimentation
+- Best for: **single-operator** solo development and experimentation
+- **Not for shared OS users, CI runners, or multi-agent hosts** — any local process can act as the board
 
 ### Authenticated + Private
 
 - Login required via Better Auth
-- Binds to all interfaces for network access
+- Choose bind: `loopback` (recommended on shared multi-user hosts), or private network binds (`lan` / `tailnet`)
 - Auto base URL mode (lower friction)
-- Best for: team access over Tailscale or local network
+- Best for: shared hosts, multi-agent fleets, and team access over Tailscale or LAN
+- Board Chat remains unavailable until separately hardened for a real browser-session instance admin
 
 ### Authenticated + Public
 
@@ -38,8 +40,9 @@ Paperclip supports three deployment configurations, from zero-friction local to 
 
 ## Choosing a Mode
 
-- **Just trying Paperclip?** Use `local_trusted` (the default)
-- **Sharing with a team on private network?** Use `authenticated` + `private`
+- **Just trying Paperclip alone on your laptop?** Use `local_trusted` (the default)
+- **Shared host / CI / multi-agent machine?** Use `authenticated` + `private` on loopback (or a private bind), then complete the board-claim flow
+- **Sharing with a team on a private network?** Use `authenticated` + `private`
 - **Deploying to the cloud?** Use `authenticated` + `public` — see [AWS ECS Fargate guide](aws-ecs.md)
 
 Set the mode during onboarding:

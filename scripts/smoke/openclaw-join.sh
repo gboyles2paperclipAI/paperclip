@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=../lib/paperclip-api-auth.sh
+source "$SCRIPT_DIR/../lib/paperclip-api-auth.sh"
+
 if ! command -v curl >/dev/null 2>&1; then
   echo "curl is required" >&2
   exit 1
 fi
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq is required" >&2
+  exit 1
+fi
+if ! command -v node >/dev/null 2>&1; then
+  echo "node is required" >&2
   exit 1
 fi
 
@@ -21,14 +29,6 @@ SMOKE_IMAGE="${SMOKE_IMAGE:-paperclip-openclaw-smoke:local}"
 SMOKE_CONTAINER_NAME="${SMOKE_CONTAINER_NAME:-paperclip-openclaw-smoke}"
 SMOKE_PORT="${SMOKE_PORT:-19091}"
 SMOKE_TIMEOUT_SEC="${SMOKE_TIMEOUT_SEC:-45}"
-
-AUTH_HEADERS=()
-if [[ -n "${PAPERCLIP_AUTH_HEADER:-}" ]]; then
-  AUTH_HEADERS+=(-H "Authorization: ${PAPERCLIP_AUTH_HEADER}")
-fi
-if [[ -n "${PAPERCLIP_COOKIE:-}" ]]; then
-  AUTH_HEADERS+=(-H "Cookie: ${PAPERCLIP_COOKIE}")
-fi
 
 STARTED_CONTAINER=0
 RESPONSE_CODE=""
@@ -50,7 +50,8 @@ fail_board_auth_required() {
 [openclaw-smoke] ERROR: ${operation} requires board/operator auth.
 
 Provide one of:
-  PAPERCLIP_AUTH_HEADER=\"Bearer <board-token>\"
+  PAPERCLIP_API_KEY=\"<board-api-key>\"
+  PAPERCLIP_AUTH_HEADER=\"Bearer <board-token>\"  (legacy compatibility)
   PAPERCLIP_COOKIE=\"<board-session-cookie>\"
 
 Current auth context appears insufficient (HTTP ${RESPONSE_CODE}).
@@ -59,11 +60,19 @@ EOF
 }
 
 cleanup() {
+  paperclip_cleanup_protected_auth
   if [[ "$STARTED_CONTAINER" == "1" ]]; then
     docker rm -f "$SMOKE_CONTAINER_NAME" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
+
+log "checking Paperclip health"
+paperclip_public_health_preflight "$PAPERCLIP_API_URL" || fail "Paperclip API health endpoint is not ready"
+log "deployment mode=${PAPERCLIP_DEPLOYMENT_MODE} exposure=${PAPERCLIP_DEPLOYMENT_EXPOSURE}"
+paperclip_prepare_protected_auth || fail "protected Paperclip API auth could not be prepared"
+paperclip_require_protected_auth_for_mode "$PAPERCLIP_DEPLOYMENT_MODE" \
+  || fail "protected Paperclip API auth is not configured"
 
 api_request() {
   local method="$1"
@@ -71,20 +80,16 @@ api_request() {
   local data="${3-}"
   local tmp
   tmp="$(mktemp)"
-  local url
-  if [[ "$path" == http://* || "$path" == https://* ]]; then
-    url="$path"
-  elif [[ "$path" == /api/* ]]; then
-    url="${PAPERCLIP_API_URL%/}${path}"
-  else
-    url="${API_BASE}${path}"
+  local request_path="$path"
+  if [[ "$path" != http://* && "$path" != https://* && "$path" != /api/* ]]; then
+    request_path="/api${path}"
   fi
-
+  local -a request_options=(--method "$method" --output "$tmp" --write-http-code)
   if [[ -n "$data" ]]; then
-    RESPONSE_CODE="$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "${AUTH_HEADERS[@]}" -H "Content-Type: application/json" "$url" --data "$data")"
-  else
-    RESPONSE_CODE="$(curl -sS -o "$tmp" -w "%{http_code}" -X "$method" "${AUTH_HEADERS[@]}" "$url")"
+    request_options+=(--json-data "$data")
   fi
+  RESPONSE_CODE="$(paperclip_protected_curl "$PAPERCLIP_API_URL" "$request_path" "${request_options[@]}")" \
+    || fail "protected Paperclip API request failed"
   RESPONSE_BODY="$(cat "$tmp")"
   rm -f "$tmp"
 }
@@ -141,13 +146,6 @@ fi
 if [[ -z "$OPENCLAW_WEBHOOK_URL" ]]; then
   fail "OPENCLAW_WEBHOOK_URL must be set when USE_DOCKER_RECEIVER=0"
 fi
-
-log "checking Paperclip health"
-api_request "GET" "/health"
-assert_status "200"
-DEPLOYMENT_MODE="$(jq -r '.deploymentMode // "unknown"' <<<"$RESPONSE_BODY")"
-DEPLOYMENT_EXPOSURE="$(jq -r '.deploymentExposure // "unknown"' <<<"$RESPONSE_BODY")"
-log "deployment mode=${DEPLOYMENT_MODE} exposure=${DEPLOYMENT_EXPOSURE}"
 
 if [[ -z "$COMPANY_ID" ]]; then
   log "resolving company id"
@@ -289,7 +287,4 @@ log "agentId=${CREATED_AGENT_ID}"
 log "keyId=${KEY_ID}"
 if [[ -n "$RUN_ID" ]]; then
   log "runId=${RUN_ID}"
-fi
-if [[ -n "$AGENT_API_KEY" ]]; then
-  log "agentApiKeyPrefix=${AGENT_API_KEY:0:12}..."
 fi
