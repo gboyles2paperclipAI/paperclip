@@ -128,15 +128,19 @@ Run the browser suites only when your change touches them or when you are explic
 
 For normal issue work, run the smallest relevant verification first. Do not default to repo-wide typecheck/build/test on every heartbeat when a narrower check is enough to prove the change.
 
-Run this full check before claiming repo work done in a PR-ready hand-off, or when the change scope is broad enough that targeted checks are not sufficient:
+Before pushing, run focused tests for the changed area and typecheck the affected
+workspaces. The pull request CI is the authority for the full workspace
+typecheck, full Vitest suite, and full build:
 
 ```sh
-pnpm -r typecheck
-pnpm test:run
-pnpm build
+pnpm --filter <affected-workspace> typecheck
+pnpm exec vitest run <affected-test-files>
 ```
 
-If anything cannot be run, explicitly report what was not run and why.
+Run the full local gate (`pnpm -r typecheck`, `pnpm test:run`, and `pnpm build`)
+when CI is unavailable or when the change touches test infrastructure, build
+infrastructure, or the full-gate workflow itself. If anything cannot be run,
+explicitly report what was not run and why.
 
 ## 8. API and Auth Expectations
 
@@ -174,7 +178,7 @@ When creating a pull request (via `gh pr create` or any other method), you **mus
 A change is done when all are true:
 
 1. Behavior matches `doc/SPEC-implementation.md`
-2. Typecheck, tests, and build pass
+2. Focused local checks pass and the required full-gate PR CI is green
 3. Contracts are synced across db/shared/server/ui
 4. Docs updated when behavior or commands change
 5. PR description follows the [PR template](.github/PULL_REQUEST_TEMPLATE.md) with all sections filled in (including Model Used)
