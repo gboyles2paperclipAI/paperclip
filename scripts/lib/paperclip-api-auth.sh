@@ -33,6 +33,14 @@ paperclip__freeze_timeout_constant _PAPERCLIP_AUTH_HEALTH_TIMEOUT_SECONDS 30 || 
 paperclip__freeze_timeout_constant _PAPERCLIP_AUTH_REQUEST_TIMEOUT_SECONDS 300 || return 1
 unset -f paperclip__freeze_timeout_constant
 
+# Protected curl configuration state is helper-owned. Discard ambient values at
+# source time, and use the private path for both requests and cleanup so callers
+# cannot make the helper load or unlink an unrelated curl configuration.
+PAPERCLIP_PROTECTED_CURL_CONFIG=""
+_PAPERCLIP_PROTECTED_CURL_CONFIG_OWNED=""
+PAPERCLIP_HAS_PROTECTED_AUTH=0
+PAPERCLIP_PROTECTED_AUTH_PREPARED=0
+
 paperclip__trim_to_var() {
   local value="$1"
   local target="$2"
@@ -55,9 +63,10 @@ paperclip__escape_curl_config_to_var() {
 paperclip_cleanup_protected_auth() {
   local xtrace_was_enabled=0
   case "$-" in *x*) xtrace_was_enabled=1; set +x ;; esac
-  if [[ -n "${PAPERCLIP_PROTECTED_CURL_CONFIG:-}" ]]; then
-    rm -f -- "$PAPERCLIP_PROTECTED_CURL_CONFIG"
+  if [[ -n "${_PAPERCLIP_PROTECTED_CURL_CONFIG_OWNED:-}" ]]; then
+    rm -f -- "$_PAPERCLIP_PROTECTED_CURL_CONFIG_OWNED"
   fi
+  _PAPERCLIP_PROTECTED_CURL_CONFIG_OWNED=""
   PAPERCLIP_PROTECTED_CURL_CONFIG=""
   PAPERCLIP_HAS_PROTECTED_AUTH=0
   PAPERCLIP_PROTECTED_AUTH_PREPARED=0
@@ -78,8 +87,8 @@ paperclip_prepare_protected_auth() {
   local previous_umask=""
   local status=0
 
-  if [[ -n "${PAPERCLIP_PROTECTED_CURL_CONFIG:-}" ]]; then
-    rm -f -- "$PAPERCLIP_PROTECTED_CURL_CONFIG"
+  if [[ -n "${_PAPERCLIP_PROTECTED_CURL_CONFIG_OWNED:-}" ]]; then
+    rm -f -- "$_PAPERCLIP_PROTECTED_CURL_CONFIG_OWNED"
   fi
 
   paperclip__trim_to_var "$api_key" api_key
@@ -87,6 +96,7 @@ paperclip_prepare_protected_auth() {
   paperclip__trim_to_var "$cookie" cookie
 
   PAPERCLIP_PROTECTED_CURL_CONFIG=""
+  _PAPERCLIP_PROTECTED_CURL_CONFIG_OWNED=""
   PAPERCLIP_HAS_PROTECTED_AUTH=0
   PAPERCLIP_PROTECTED_AUTH_PREPARED=0
 
@@ -121,6 +131,7 @@ paperclip_prepare_protected_auth() {
   fi
 
   if (( status == 0 )) && [[ -n "$config_path" ]]; then
+    _PAPERCLIP_PROTECTED_CURL_CONFIG_OWNED="$config_path"
     PAPERCLIP_PROTECTED_CURL_CONFIG="$config_path"
     PAPERCLIP_HAS_PROTECTED_AUTH=1
   elif [[ -n "$config_path" ]]; then
@@ -285,23 +296,31 @@ paperclip_protected_curl() {
     printf '%s\n' 'Refusing an invalid protected Paperclip run id.' >&2
     return 1
   fi
+  local resolved_url=""
+  resolved_url="$(paperclip_resolve_api_url "$api_url" "$request_url")" || return 1
+
   if [[ -n "$browser_origin" ]]; then
+    local normalized_browser_origin=""
     if [[ "$browser_origin" == *$'\r'* || "$browser_origin" == *$'\n'* ]] \
-      || ! PAPERCLIP_AUTH_BROWSER_ORIGIN="$browser_origin" node -e '
+      || ! normalized_browser_origin="$(
+        PAPERCLIP_AUTH_BASE_URL="$api_url" PAPERCLIP_AUTH_BROWSER_ORIGIN="$browser_origin" node -e '
         try {
-          const url = new URL(process.env.PAPERCLIP_AUTH_BROWSER_ORIGIN);
-          if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) process.exit(2);
+          const base = new URL(process.env.PAPERCLIP_AUTH_BASE_URL);
+          const browser = new URL(process.env.PAPERCLIP_AUTH_BROWSER_ORIGIN);
+          if (!["http:", "https:"].includes(base.protocol) || base.username || base.password) process.exit(2);
+          if (!["http:", "https:"].includes(browser.protocol) || browser.username || browser.password) process.exit(2);
+          if (browser.origin !== base.origin) process.exit(3);
+          process.stdout.write(browser.origin);
         } catch {
           process.exit(2);
         }
-      '; then
+      '
+      )"; then
       printf '%s\n' 'Refusing an invalid protected Paperclip browser origin.' >&2
       return 1
     fi
+    browser_origin="$normalized_browser_origin"
   fi
-
-  local resolved_url=""
-  resolved_url="$(paperclip_resolve_api_url "$api_url" "$request_url")" || return 1
 
   local -a curl_args=(
     --disable
@@ -315,8 +334,8 @@ paperclip_protected_curl() {
   if (( write_http_code )); then
     curl_args+=(--write-out '%{http_code}')
   fi
-  if [[ -n "${PAPERCLIP_PROTECTED_CURL_CONFIG:-}" ]]; then
-    curl_args+=(--config "$PAPERCLIP_PROTECTED_CURL_CONFIG")
+  if [[ -n "${_PAPERCLIP_PROTECTED_CURL_CONFIG_OWNED:-}" ]]; then
+    curl_args+=(--config "$_PAPERCLIP_PROTECTED_CURL_CONFIG_OWNED")
   fi
   curl_args+=(
     --connect-timeout "$_PAPERCLIP_AUTH_CONNECT_TIMEOUT_SECONDS"

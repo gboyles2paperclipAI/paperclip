@@ -21,6 +21,10 @@ const evidenceScript = path.join(repoRoot, "scripts", "approval-evidence-report.
 const shellHelper = path.join(repoRoot, "scripts", "lib", "paperclip-api-auth.sh");
 const issueUpdateScript = path.join(repoRoot, "scripts", "paperclip-issue-update.sh");
 const pipelineSmokeScript = path.join(repoRoot, "scripts", "smoke", "pipelines-tutorial-smoke.sh");
+const joinScripts = [
+  path.join(repoRoot, "scripts", "smoke", "hermes-gateway-join.sh"),
+  path.join(repoRoot, "scripts", "smoke", "openclaw-join.sh"),
+];
 
 async function createFakeCurl(directory) {
   const fakeCurl = path.join(directory, "curl");
@@ -78,6 +82,9 @@ async function startPaperclipStub(input) {
     requests.push({
       path: request.url,
       authorization: request.headers.authorization ?? null,
+      cookie: request.headers.cookie ?? null,
+      origin: request.headers.origin ?? null,
+      referer: request.headers.referer ?? null,
     });
     if (request.url === "/api/health") {
       response.statusCode = options.healthStatus ?? 200;
@@ -488,6 +495,97 @@ paperclip_cleanup_protected_auth
     const result = spawnSync("bash", ["-c", script], { cwd: repoRoot, encoding: "utf8", env });
     assert.equal(result.status, 0, result.stderr);
     assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /unit-legacy/);
+  }
+});
+
+test("join callers preserve cookie mutations with a derived trusted Origin and Referer", async () => {
+  for (const joinScript of joinScripts) {
+    const source = await readFile(joinScript, "utf8");
+    const originDefault = source.match(/^PAPERCLIP_BROWSER_ORIGIN=.*$/m)?.[0] ?? "";
+    const apiRequest = source.match(/api_request\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+    assert.equal(
+      originDefault,
+      'PAPERCLIP_BROWSER_ORIGIN="${PAPERCLIP_BROWSER_ORIGIN:-${PAPERCLIP_API_URL%/}}"',
+    );
+    assert.match(apiRequest, /--browser-origin "\$PAPERCLIP_BROWSER_ORIGIN"/);
+
+    const stub = await startPaperclipStub("authenticated");
+    const script = `
+set -euo pipefail
+source "$AUTH_HELPER"
+${originDefault}
+RESPONSE_CODE=""
+RESPONSE_BODY=""
+fail() { printf '%s\n' "$*" >&2; return 1; }
+${apiRequest}
+trap paperclip_cleanup_protected_auth EXIT
+paperclip_prepare_protected_auth
+api_request POST "/companies" '{"unit":true}'
+[[ "$RESPONSE_CODE" == 200 ]]
+`;
+    const env = {
+      ...process.env,
+      AUTH_HELPER: shellHelper,
+      PAPERCLIP_API_URL: `${stub.baseUrl}/`,
+      PAPERCLIP_COOKIE: "session=unit-caller-cookie",
+    };
+    delete env.PAPERCLIP_API_KEY;
+    delete env.PAPERCLIP_AUTH_HEADER;
+    try {
+      const accepted = await runAsync("bash", ["-c", script], { env });
+      assert.equal(accepted.status, 0, accepted.stderr);
+      assert.equal(stub.requests.length, 1);
+      assert.equal(stub.requests[0].authorization, null);
+      assert.equal(stub.requests[0].cookie, "session=unit-caller-cookie");
+      assert.equal(stub.requests[0].origin, stub.baseUrl);
+      assert.equal(stub.requests[0].referer, `${stub.baseUrl}/`);
+
+      const beforeRejectedOrigin = stub.requests.length;
+      const rejected = await runAsync("bash", ["-c", script], {
+        env: { ...env, PAPERCLIP_BROWSER_ORIGIN: "https://evil.test" },
+      });
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.stderr, /browser origin/);
+      assert.equal(stub.requests.length, beforeRejectedOrigin);
+    } finally {
+      await stub.close();
+    }
+  }
+});
+
+test("shell auth cleanup never unlinks an ambient protected curl config", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "paperclip-ambient-auth-config-"));
+  const ambientConfig = path.join(directory, "ambient.curlrc");
+  const sentinel = "ambient config must survive\n";
+  await writeFile(ambientConfig, sentinel);
+  const script = `
+set -euo pipefail
+source "$AUTH_HELPER"
+[[ -z "$PAPERCLIP_PROTECTED_CURL_CONFIG" ]]
+[[ -e "$AMBIENT_CONFIG" ]]
+paperclip_prepare_protected_auth
+owned_config="$PAPERCLIP_PROTECTED_CURL_CONFIG"
+[[ -n "$owned_config" ]]
+[[ "$owned_config" != "$AMBIENT_CONFIG" ]]
+PAPERCLIP_PROTECTED_CURL_CONFIG="$AMBIENT_CONFIG"
+paperclip_cleanup_protected_auth
+[[ ! -e "$owned_config" ]]
+[[ -e "$AMBIENT_CONFIG" ]]
+`;
+  try {
+    const result = await runAsync("bash", ["-c", script], {
+      env: {
+        ...process.env,
+        AUTH_HELPER: shellHelper,
+        AMBIENT_CONFIG: ambientConfig,
+        PAPERCLIP_PROTECTED_CURL_CONFIG: ambientConfig,
+        PAPERCLIP_API_KEY: "unit-owned-config-key",
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(await readFile(ambientConfig, "utf8"), sentinel);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

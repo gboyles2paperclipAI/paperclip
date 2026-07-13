@@ -28,6 +28,7 @@ require_cmd jq
 require_cmd node
 
 PAPERCLIP_API_URL="${PAPERCLIP_API_URL:-http://localhost:3100}"
+PAPERCLIP_BROWSER_ORIGIN="${PAPERCLIP_BROWSER_ORIGIN:-${PAPERCLIP_API_URL%/}}"
 API_BASE="${PAPERCLIP_API_URL%/}/api"
 COMPANY_ID="${COMPANY_ID:-${PAPERCLIP_COMPANY_ID:-}}"
 COMPANY_SELECTOR="${COMPANY_SELECTOR:-}"
@@ -131,7 +132,12 @@ api_request() {
   if [[ "$path" != http://* && "$path" != https://* && "$path" != /api/* ]]; then
     request_path="/api${path}"
   fi
-  local -a request_options=(--method "$method" --output "$tmp" --write-http-code)
+  local -a request_options=(
+    --method "$method"
+    --output "$tmp"
+    --write-http-code
+    --browser-origin "$PAPERCLIP_BROWSER_ORIGIN"
+  )
   if [[ -n "$data" ]]; then
     request_options+=(--json-data "$data")
   fi
