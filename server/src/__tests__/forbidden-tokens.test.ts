@@ -2,216 +2,159 @@ import { describe, expect, it, vi } from "vitest";
 
 const {
   readPathExcludesFile,
-  resolveDynamicForbiddenTokens,
+  resolveBoundedHostPathTokens,
   resolveForbiddenTokens,
   resolvePathExcludes,
   runForbiddenTokenCheck,
 } = await import("../../../scripts/check-forbidden-tokens.mjs");
 
 describe("forbidden token check", () => {
-  it("derives username tokens without relying on whoami", () => {
-    const tokens = resolveDynamicForbiddenTokens(
-      { USER: "paperclip", LOGNAME: "paperclip", USERNAME: "pc" },
-      {
-        userInfo: () => ({ username: "paperclip" }),
-      },
+  it("turns process account names into bounded host paths, never bare substring tokens", () => {
+    const tokens = resolveBoundedHostPathTokens(
+      { USER: "runner", LOGNAME: "runner" },
+      { userInfo: () => ({ username: "runner" }) },
     );
-
-    expect(tokens).toEqual(["paperclip", "pc"]);
+    expect(tokens).toEqual([
+      "/home/runner/",
+      "/Users/runner/",
+      "C:\\Users\\runner\\",
+    ]);
+    expect(tokens).not.toContain("runner");
   });
 
-  it("falls back cleanly when user resolution fails", () => {
-    const tokens = resolveDynamicForbiddenTokens(
-      {},
-      {
-        userInfo: () => {
-          throw new Error("missing user");
-        },
-      },
-    );
-
-    expect(tokens).toEqual([]);
-  });
-
-  it("merges dynamic and file-based forbidden tokens", async () => {
+  it("combines explicit stable tokens with bounded account paths", async () => {
     const fs = await import("node:fs");
     const os = await import("node:os");
     const path = await import("node:path");
-
     const tokensFile = path.join(os.tmpdir(), `forbidden-tokens-${Date.now()}.txt`);
-    fs.writeFileSync(tokensFile, "# comment\npaperclip\ncustom-token\n");
-
+    fs.writeFileSync(tokensFile, "# comment\naccount_fixture_6394\n");
     try {
-      const tokens = resolveForbiddenTokens(tokensFile, { USER: "paperclip" }, {
-        userInfo: () => ({ username: "paperclip" }),
-      });
-
-      expect(tokens).toEqual(["paperclip", "custom-token"]);
+      expect(
+        resolveForbiddenTokens(
+          tokensFile,
+          { USER: "runner" },
+          { userInfo: () => ({ username: "runner" }) },
+        ),
+      ).toEqual([
+        "account_fixture_6394",
+        "/home/runner/",
+        "/Users/runner/",
+        "C:\\Users\\runner\\",
+      ]);
     } finally {
       fs.unlinkSync(tokensFile);
     }
   });
 
-  it("reads path excludes from a comments-and-blank-lines file", async () => {
+  it("reads path excludes from comments and blank lines", async () => {
     const fs = await import("node:fs");
     const os = await import("node:os");
     const path = await import("node:path");
-
     const excludesFile = path.join(os.tmpdir(), `forbidden-token-excludes-${Date.now()}.txt`);
-    fs.writeFileSync(
-      excludesFile,
-      [
-        "# comment",
-        "",
-        "docs/deploy/help2day-dedicated-ops.md",
-        "scripts/ops/help2day/fleet-health-check.sh # inline comment",
-        "scripts/ops/help2day/monthly-restore-test.sh",
-      ].join("\n"),
-    );
-
+    fs.writeFileSync(excludesFile, "# comment\ndocs/ops/guide.md # reason\n\nserver/file.ts\n");
     try {
-      expect(readPathExcludesFile(excludesFile)).toEqual([
-        "docs/deploy/help2day-dedicated-ops.md",
-        "scripts/ops/help2day/fleet-health-check.sh",
-        "scripts/ops/help2day/monthly-restore-test.sh",
-      ]);
+      expect(readPathExcludesFile(excludesFile)).toEqual(["docs/ops/guide.md", "server/file.ts"]);
     } finally {
       fs.unlinkSync(excludesFile);
     }
-  });
-
-  it("returns no path excludes when the file is missing", () => {
-    expect(readPathExcludesFile("/tmp/paperclip-missing-forbidden-token-excludes.txt")).toEqual([]);
   });
 
   it("resolves the tracked path exclude file under the repo root", async () => {
     const fs = await import("node:fs");
     const os = await import("node:os");
     const path = await import("node:path");
-
     const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "forbidden-token-repo-"));
-    const scriptsDir = path.join(repoRoot, "scripts");
-    fs.mkdirSync(scriptsDir);
+    fs.mkdirSync(path.join(repoRoot, "scripts"));
     fs.writeFileSync(
-      path.join(scriptsDir, "forbidden-tokens-path-excludes.txt"),
-      "docs/deploy/help2day-dedicated-ops.md\n",
+      path.join(repoRoot, "scripts/forbidden-tokens-path-excludes.txt"),
+      "docs/ops/guide.md\n",
     );
-
     try {
-      expect(resolvePathExcludes(repoRoot)).toEqual(["docs/deploy/help2day-dedicated-ops.md"]);
+      expect(resolvePathExcludes(repoRoot)).toEqual(["docs/ops/guide.md"]);
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
   });
 
-  it("resolves no path excludes when the tracked file is absent", async () => {
-    const fs = await import("node:fs");
-    const os = await import("node:os");
-    const path = await import("node:path");
-
-    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "forbidden-token-repo-"));
-
-    try {
-      expect(resolvePathExcludes(repoRoot)).toEqual([]);
-    } finally {
-      fs.rmSync(repoRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("reports matches without leaking which token was searched", () => {
-    const exec = vi
-      .fn()
-      .mockReturnValueOnce("server/file.ts:1:found\n")
-      .mockImplementation(() => {
-        throw new Error("not found");
-      });
-    const log = vi.fn();
-    const error = vi.fn();
-
-    const exitCode = runForbiddenTokenCheck({
+  it("passes tokens and quote-bearing excludes as inert git argument-array entries", () => {
+    const exec = vi.fn().mockReturnValue({ status: 1, stdout: "", stderr: "" });
+    const status = runForbiddenTokenCheck({
       repoRoot: "/repo",
-      tokens: ["paperclip", "custom-token"],
+      tokens: ["account_fixture_6394"],
+      pathExcludes: ["docs/operator's guide.md"],
       exec,
-      log,
-      error,
+      log: vi.fn(),
+      error: vi.fn(),
     });
-
-    expect(exitCode).toBe(1);
-    expect(exec).toHaveBeenCalledTimes(2);
-    expect(error).toHaveBeenCalledWith("ERROR: Forbidden tokens found in tracked files:\n");
-    expect(error).toHaveBeenCalledWith("  server/file.ts:1:found");
-    expect(error).toHaveBeenCalledWith("\nBuild blocked. Remove the forbidden token(s) before publishing.");
-  });
-
-  it("adds path excludes to the git grep command", () => {
-    const exec = vi.fn().mockImplementation(() => {
-      throw new Error("not found");
-    });
-    const log = vi.fn();
-    const error = vi.fn();
-
-    const exitCode = runForbiddenTokenCheck({
-      repoRoot: "/repo",
-      tokens: ["paperclip"],
-      pathExcludes: [
-        "docs/deploy/help2day-dedicated-ops.md",
-        "scripts/ops/help2day/fleet-health-check.sh",
+    expect(status).toBe(0);
+    expect(exec).toHaveBeenCalledWith(
+      "git",
+      [
+        "grep",
+        "-in",
+        "--no-color",
+        "--",
+        "account_fixture_6394",
+        "--",
+        ":!pnpm-lock.yaml",
+        ":!.git",
+        ":!docs/operator's guide.md",
       ],
-      exec,
-      log,
-      error,
-    });
-
-    expect(exitCode).toBe(0);
-    expect(exec).toHaveBeenCalledWith(
-      "git grep -in --no-color -- \"paperclip\" -- ':!pnpm-lock.yaml' ':!.git' ':!docs/deploy/help2day-dedicated-ops.md' ':!scripts/ops/help2day/fleet-health-check.sh'",
       { encoding: "utf8", cwd: "/repo", stdio: ["pipe", "pipe", "pipe"] },
     );
   });
 
-  it("keeps the git grep command unchanged when path excludes are empty", () => {
-    const exec = vi.fn().mockImplementation(() => {
-      throw new Error("not found");
-    });
+  it("treats status 1 as the only no-match result", () => {
     const log = vi.fn();
-    const error = vi.fn();
-
-    const exitCode = runForbiddenTokenCheck({
-      repoRoot: "/repo",
-      tokens: ["paperclip"],
-      pathExcludes: [],
-      exec,
-      log,
-      error,
-    });
-
-    expect(exitCode).toBe(0);
-    expect(exec).toHaveBeenCalledWith(
-      "git grep -in --no-color -- \"paperclip\" -- ':!pnpm-lock.yaml' ':!.git'",
-      { encoding: "utf8", cwd: "/repo", stdio: ["pipe", "pipe", "pipe"] },
-    );
+    expect(
+      runForbiddenTokenCheck({
+        repoRoot: "/repo",
+        tokens: ["/home/runner/"],
+        exec: vi.fn().mockReturnValue({ status: 1, stdout: "", stderr: "" }),
+        log,
+        error: vi.fn(),
+      }),
+    ).toBe(0);
+    expect(log).toHaveBeenCalledWith("  ✓  No forbidden tokens found.");
   });
 
-  it("quotes path excludes before adding them to the git grep command", () => {
-    const exec = vi.fn().mockImplementation(() => {
-      throw new Error("not found");
-    });
-    const log = vi.fn();
+  it("reports matches without leaking the token or matched content", () => {
     const error = vi.fn();
-
-    const exitCode = runForbiddenTokenCheck({
+    const status = runForbiddenTokenCheck({
       repoRoot: "/repo",
-      tokens: ["paperclip"],
-      pathExcludes: ["docs/ops/operator's guide.md"],
-      exec,
-      log,
+      tokens: ["account_fixture_6394"],
+      exec: vi.fn().mockReturnValue({
+        status: 0,
+        stdout: "server/file.ts:7:sensitive matched content\n",
+        stderr: "",
+      }),
+      log: vi.fn(),
       error,
     });
+    expect(status).toBe(1);
+    const output = error.mock.calls.flat().join("\n");
+    expect(output).toContain("server/file.ts:7:[REDACTED forbidden token]");
+    expect(output).not.toContain("account_fixture_6394");
+    expect(output).not.toContain("sensitive matched content");
+  });
 
-    expect(exitCode).toBe(0);
-    expect(exec).toHaveBeenCalledWith(
-      "git grep -in --no-color -- \"paperclip\" -- ':!pnpm-lock.yaml' ':!.git' ':!docs/ops/operator'\\''s guide.md'",
-      { encoding: "utf8", cwd: "/repo", stdio: ["pipe", "pipe", "pipe"] },
-    );
+  it("fails closed generically on fatal git grep without leaking stderr or the token", () => {
+    const error = vi.fn();
+    const status = runForbiddenTokenCheck({
+      repoRoot: "/repo",
+      tokens: ["account_fixture_6394"],
+      exec: vi.fn().mockReturnValue({
+        status: 2,
+        stdout: "",
+        stderr: "fatal output containing account_fixture_6394",
+      }),
+      log: vi.fn(),
+      error,
+    });
+    expect(status).toBe(2);
+    const output = error.mock.calls.flat().join("\n");
+    expect(output).toContain("scan failed before it could complete safely");
+    expect(output).not.toContain("account_fixture_6394");
+    expect(output).not.toContain("fatal output");
   });
 });

@@ -93,7 +93,7 @@ PR CI enforces this by checking changed release-enabled package manifests agains
 After the workflows are live:
 
 1. run a canary publish
-2. confirm npm publish succeeds without any `NPM_TOKEN`
+2. confirm npm registry publication succeeds without any `NPM_TOKEN`
 3. run a stable dry-run
 4. run one real stable publish
 

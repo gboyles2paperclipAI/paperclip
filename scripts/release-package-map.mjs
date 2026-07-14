@@ -109,7 +109,7 @@ function findUnpublishableWorkspaceEdges(packages) {
           `${pkg.name} (${pkg.dir}) is publishFromCi:true but declares a "${section}" workspace dependency on ${depName}, ` +
             `which is not publishFromCi:true. The release version rewrite would point ${depName} at the calver version, ` +
             `but that version is never published, so installs of ${pkg.name} would fail to resolve. ` +
-            `Enable publishFromCi for ${depName} (bootstrap its first npm publish if needed) or drop the workspace dependency.`,
+            `Enable publishFromCi for ${depName} (bootstrap its first npm registry publication if needed) or drop the workspace dependency.`,
         );
       }
     }

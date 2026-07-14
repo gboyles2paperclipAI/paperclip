@@ -5,6 +5,12 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 import { buildReleasePackagePlan } from "./release-package-map.mjs";
+import { releaseTarballSha256 } from "./npm-release-tarball.mjs";
+import {
+  cleanupReleaseStageRoot,
+  createReleaseStageRoot,
+  stageReleasePackages,
+} from "./stage-release-packages.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
@@ -21,7 +27,7 @@ function usage() {
       "",
       "Examples:",
       "  node scripts/bootstrap-npm-package.mjs @paperclipai/adapter-acpx-local",
-      "  node scripts/bootstrap-npm-package.mjs packages/adapters/acpx-local --publish",
+      "  node scripts/bootstrap-npm-package.mjs packages/adapters/acpx-local --publish --otp 123456",
       "",
     ].join("\n"),
   );
@@ -53,12 +59,21 @@ function parseArgs(argv) {
       continue;
     }
 
+    if (arg.startsWith("--otp=")) {
+      const value = arg.slice("--otp=".length);
+      if (!value) {
+        throw new Error("expected a one-time password after --otp");
+      }
+      otp = value;
+      continue;
+    }
+
     if (arg === "--help" || arg === "-h") {
       return { help: true, selector: null, publish: false, skipBuild: false, otp: null };
     }
 
     if (arg.startsWith("--")) {
-      throw new Error(`unknown option: ${arg}`);
+      throw new Error("unknown option provided");
     }
 
     if (selector) {
@@ -103,10 +118,6 @@ function runChecked(command, args, options = {}) {
   if (result.status !== 0) {
     throw new Error(`${command} ${args.join(" ")} failed with status ${result.status ?? "unknown"}`);
   }
-}
-
-function formatCommand(command, args) {
-  return `${command} ${args.join(" ")}`;
 }
 
 function ensureNpmAuth() {
@@ -187,8 +198,15 @@ function printNextSteps(pkg) {
   );
 }
 
-function buildPublishArgs(pkg, { dryRun = false, otp = null } = {}) {
-  const args = ["publish", pkg.dir, "--no-git-checks", "--access", "public"];
+function buildPublishArgs(tarballPath, { dryRun = false, otp = null } = {}) {
+  const args = [
+    "publish",
+    tarballPath,
+    "--ignore-scripts",
+    "--no-git-checks",
+    "--access",
+    "public",
+  ];
 
   if (dryRun) {
     args.push("--dry-run");
@@ -201,16 +219,38 @@ function buildPublishArgs(pkg, { dryRun = false, otp = null } = {}) {
   return args;
 }
 
-function publishPackage(pkg, otp) {
-  const publishArgs = buildPublishArgs(pkg, { otp });
+function verifyStagedTarball(staged) {
+  let actual;
+  try {
+    actual = releaseTarballSha256(staged.tarballPath);
+  } catch {
+    throw new Error("staged bootstrap tarball could not be re-read safely");
+  }
+  if (actual !== staged.sha256) {
+    throw new Error("staged bootstrap tarball changed after scanning");
+  }
+}
 
-  const result = runCommand("pnpm", publishArgs);
+function publishPackage(staged, otp, commandRunner = runCommand) {
+  verifyStagedTarball(staged);
+  const publishArgs = buildPublishArgs(staged.tarballPath, { otp });
+
+  let result;
+  try {
+    result = commandRunner("pnpm", publishArgs);
+  } catch {
+    throw new Error(
+      "npm package publication failed before completion. Command details were withheld because they may contain authentication material.",
+    );
+  }
+  if (!result || result.error) {
+    throw new Error(
+      "npm package publication failed before completion. Command details were withheld because they may contain authentication material.",
+    );
+  }
   const stdout = result.stdout ?? "";
   const stderr = result.stderr ?? "";
   const output = `${stdout}\n${stderr}`.trim();
-
-  if (stdout) process.stdout.write(stdout);
-  if (stderr) process.stderr.write(stderr);
 
   if (result.status === 0) {
     return;
@@ -219,13 +259,15 @@ function publishPackage(pkg, otp) {
   if (/\bEOTP\b|one-time password/i.test(output)) {
     throw new Error(
       [
-        "npm publish reached the publish-time 2FA check.",
-        "Complete the browser auth URL printed by npm and rerun the helper, or rerun with `--otp <code>` if your npm account uses authenticator-app codes.",
+        "npm package publication reached the publish-time 2FA check.",
+        "Complete npm authentication separately and rerun with a fresh `--otp <code>` if your account uses authenticator-app codes.",
       ].join(" "),
     );
   }
 
-  throw new Error(`${formatCommand("pnpm", publishArgs)} failed with status ${result.status ?? "unknown"}`);
+  throw new Error(
+    "npm package publication failed. Command output was withheld because it may contain authentication material.",
+  );
 }
 
 function main(argv) {
@@ -265,24 +307,34 @@ function main(argv) {
     runChecked("pnpm", ["--filter", pkg.name, "build"]);
   }
 
-  process.stdout.write(`Previewing publish payload for ${pkg.name}...\n`);
-  runChecked("pnpm", buildPublishArgs(pkg, { dryRun: true }));
+  let stageRoot;
+  try {
+    process.stdout.write(`Staging and scanning publish payload for ${pkg.name}...\n`);
+    stageRoot = createReleaseStageRoot();
+    const [staged] = stageReleasePackages({ stageRoot, packages: [pkg] });
 
-  if (!publish) {
-    process.stdout.write(
-      [
-        "",
-        "Dry run complete. To perform the first publish from an authenticated maintainer machine, run:",
-        `node scripts/bootstrap-npm-package.mjs ${pkg.name} --publish --otp <code>`,
-        "",
-      ].join("\n"),
-    );
-    return;
+    process.stdout.write(`Previewing immutable publish payload for ${pkg.name}...\n`);
+    verifyStagedTarball(staged);
+    runChecked("pnpm", buildPublishArgs(staged.tarballPath, { dryRun: true }));
+
+    if (!publish) {
+      process.stdout.write(
+        [
+          "",
+          "Dry run complete. To perform the first publish from an authenticated maintainer machine, run:",
+          `node scripts/bootstrap-npm-package.mjs ${pkg.name} --publish --otp <code>`,
+          "",
+        ].join("\n"),
+      );
+      return;
+    }
+
+    process.stdout.write(`Publishing ${pkg.name}...\n`);
+    publishPackage(staged, otp);
+    printNextSteps(pkg);
+  } finally {
+    if (stageRoot) cleanupReleaseStageRoot(stageRoot);
   }
-
-  process.stdout.write(`Publishing ${pkg.name}...\n`);
-  publishPackage(pkg, otp);
-  printNextSteps(pkg);
 }
 
 const isDirectRun = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -303,4 +355,5 @@ export {
   parseArgs,
   publishPackage,
   resolveTargetPackage,
+  verifyStagedTarball,
 };

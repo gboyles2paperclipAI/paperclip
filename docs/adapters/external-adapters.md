@@ -388,10 +388,13 @@ return { type, execute, testEnvironment, detectModel: () => detectModel() };
 
 ```sh
 npm run build
-npm publish
+npm pack
 ```
 
-Other Paperclip users can then install your adapter by package name from the UI or API.
+Inspect and scan the generated tarball, then publish that exact verified tarball
+through your package's registry/release pipeline with lifecycle scripts disabled.
+Do not publish directly from the working directory. Other Paperclip users can
+then install your adapter by package name from the UI or API.
 
 ## Security
 

@@ -8,7 +8,7 @@ description: >
 
 # Release Coordination Skill
 
-Run the full Paperclip maintainer release workflow, not just an npm publish.
+Run the full Paperclip maintainer release workflow, not just an npm registry upload.
 
 This skill coordinates:
 
@@ -37,7 +37,7 @@ Before proceeding, verify all of the following:
 3. There is at least one canary or candidate commit since the last stable tag.
 4. The candidate SHA has passed the verification gate or is about to.
 5. If manifests changed, the CI-owned `pnpm-lock.yaml` refresh is already merged on `master`.
-6. npm publish rights are available through GitHub trusted publishing, or through local npm auth for emergency/manual use.
+6. npm registry publication rights are available through GitHub trusted publishing, or through local npm auth for emergency/manual use.
 7. If running through Paperclip, you have issue context for status updates and follow-up task creation.
 
 If any precondition fails, stop and report the blocker.
@@ -220,7 +220,7 @@ If the canary is bad:
 
 - publish another canary, do not ship stable
 
-If stable npm publish succeeds but tag push or GitHub release creation fails:
+If stable npm registry publication succeeds but tag push or GitHub release creation fails:
 
 - fix the git/GitHub issue immediately from the same release result
 - do not republish the same version

@@ -46,6 +46,9 @@ jobs:
       - name: Test stable-runner shard partition
         run: node --test scripts/__tests__/run-vitest-stable-shard.test.mjs
 
+      - name: Test release registry and immutable-package guards
+        run: pnpm run test:release-registry
+
       - name: Check diff whitespace
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}

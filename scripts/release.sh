@@ -14,6 +14,7 @@ print_version_only=false
 tag_name=""
 
 cleanup_on_exit=false
+RELEASE_STAGE_DIR=""
 
 usage() {
   cat <<'EOF'
@@ -55,6 +56,10 @@ restore_publish_artifacts() {
 }
 
 cleanup_release_state() {
+  if [ -n "$RELEASE_STAGE_DIR" ]; then
+    cleanup_release_stage_dir "$RELEASE_STAGE_DIR" || true
+    RELEASE_STAGE_DIR=""
+  fi
   restore_publish_artifacts
 
   tracked_changes="$(git -C "$REPO_ROOT" diff --name-only; git -C "$REPO_ROOT" diff --cached --name-only)"
@@ -204,18 +209,18 @@ export PAPERCLIP_RELEASE_REUSE_UI_DIST=1
 
 if [ "$skip_verify" = false ]; then
   release_info ""
-  release_info "==> Step 1/7: Verification gate..."
+  release_info "==> Step 1/8: Verification gate..."
   cd "$REPO_ROOT"
   pnpm -r typecheck
   pnpm test:run
   pnpm build
 else
   release_info ""
-  release_info "==> Step 1/7: Verification gate skipped (--skip-verify)"
+  release_info "==> Step 1/8: Verification gate skipped (--skip-verify)"
 fi
 
 release_info ""
-release_info "==> Step 2/7: Building workspace artifacts..."
+release_info "==> Step 2/8: Building workspace artifacts..."
 cd "$REPO_ROOT"
 pnpm build
 node "$REPO_ROOT/scripts/build-standalone-public-packages.mjs"
@@ -229,13 +234,13 @@ done
 release_info "  ✓ Workspace build complete"
 
 release_info ""
-release_info "==> Step 3/7: Rewriting workspace versions..."
+release_info "==> Step 3/8: Rewriting workspace versions..."
 set_public_package_version "$TARGET_PUBLISH_VERSION"
 release_info "  ✓ Versioned workspace to $TARGET_PUBLISH_VERSION"
 
 release_info ""
-release_info "==> Step 4/7: Building publishable CLI bundle..."
-"$REPO_ROOT/scripts/build-npm.sh" --skip-checks --skip-typecheck
+release_info "==> Step 4/8: Building publishable CLI bundle..."
+"$REPO_ROOT/scripts/build-npm.sh" --skip-typecheck
 release_info "  ✓ CLI bundle ready"
 
 VERSIONED_PACKAGE_INFO="$(list_public_package_info)"
@@ -245,31 +250,39 @@ if [ "$VERSION_IN_CLI_PACKAGE" != "$TARGET_PUBLISH_VERSION" ]; then
 fi
 
 release_info ""
+release_info "==> Step 5/8: Staging and scanning immutable package tarballs..."
+RELEASE_STAGE_DIR="$(create_release_stage_dir)"
+STAGED_PACKAGE_INFO="$(node "$REPO_ROOT/scripts/stage-release-packages.mjs" stage "$RELEASE_STAGE_DIR")"
+STAGED_PACKAGE_COUNT="$(printf '%s\n' "$STAGED_PACKAGE_INFO" | awk 'NF { count += 1 } END { print count + 0 }')"
+EXPECTED_PACKAGE_COUNT="$(printf '%s\n' "$VERSIONED_PACKAGE_INFO" | awk 'NF { count += 1 } END { print count + 0 }')"
+[ "$STAGED_PACKAGE_COUNT" -gt 0 ] || release_fail "no publishable package tarballs were staged."
+[ "$STAGED_PACKAGE_COUNT" -eq "$EXPECTED_PACKAGE_COUNT" ] || release_fail "staged package count does not match the release plan."
+release_info "  ✓ Staged and scanned all $STAGED_PACKAGE_COUNT immutable package tarballs"
+
+release_info ""
 if [ "$dry_run" = true ]; then
-  release_info "==> Step 5/7: Previewing publish payloads (--dry-run)..."
-  while IFS=$'\t' read -r pkg_dir _pkg_name _pkg_version; do
+  release_info "==> Step 6/8: Previewing publish payloads (--dry-run)..."
+  while IFS=$'\t' read -r pkg_dir _pkg_name _pkg_version tarball_path tarball_sha256; do
     [ -z "$pkg_dir" ] && continue
     release_info "  --- $pkg_dir ---"
-    cd "$REPO_ROOT/$pkg_dir"
-    pnpm publish --dry-run --no-git-checks --tag "$DIST_TAG" 2>&1 | tail -3
-  done <<< "$VERSIONED_PACKAGE_INFO"
+    preview_package_to_npm "$DIST_TAG" "$tarball_path" "$tarball_sha256" 2>&1 | tail -3
+  done <<< "$STAGED_PACKAGE_INFO"
   release_info "  [dry-run] Would create git tag $tag_name on $CURRENT_SHA"
 else
-  release_info "==> Step 5/7: Publishing packages to npm..."
-  while IFS=$'\t' read -r pkg_dir pkg_name pkg_version; do
+  release_info "==> Step 6/8: Publishing packages to npm..."
+  while IFS=$'\t' read -r pkg_dir pkg_name pkg_version tarball_path tarball_sha256; do
     [ -z "$pkg_dir" ] && continue
     release_info "  Publishing $pkg_name@$pkg_version"
-    cd "$REPO_ROOT/$pkg_dir"
-    publish_package_to_npm "$DIST_TAG" "$pkg_name" "$pkg_version"
-  done <<< "$VERSIONED_PACKAGE_INFO"
+    publish_package_to_npm "$DIST_TAG" "$pkg_name" "$pkg_version" "$tarball_path" "$tarball_sha256"
+  done <<< "$STAGED_PACKAGE_INFO"
   release_info "  ✓ Published all packages under dist-tag $DIST_TAG"
 fi
 
 release_info ""
 if [ "$dry_run" = true ]; then
-  release_info "==> Step 6/7: Skipping npm verification in dry-run mode..."
+  release_info "==> Step 7/8: Skipping npm verification in dry-run mode..."
 else
-  release_info "==> Step 6/7: Confirming npm package availability and dist-tag integrity..."
+  release_info "==> Step 7/8: Confirming npm package availability and dist-tag integrity..."
   VERIFY_ATTEMPTS="${NPM_PUBLISH_VERIFY_ATTEMPTS:-12}"
   VERIFY_DELAY_SECONDS="${NPM_PUBLISH_VERIFY_DELAY_SECONDS:-5}"
   REGISTRY_STATE_VERIFY_ATTEMPTS="${NPM_REGISTRY_STATE_VERIFY_ATTEMPTS:-12}"
@@ -322,9 +335,9 @@ fi
 
 release_info ""
 if [ "$dry_run" = true ]; then
-  release_info "==> Step 7/7: Dry run complete..."
+  release_info "==> Step 8/8: Dry run complete..."
 else
-  release_info "==> Step 7/7: Creating git tag..."
+  release_info "==> Step 8/8: Creating git tag..."
   git -C "$REPO_ROOT" tag "$tag_name" "$CURRENT_SHA"
   release_info "  ✓ Created tag $tag_name on $CURRENT_SHA"
 fi

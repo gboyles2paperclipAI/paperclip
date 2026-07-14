@@ -50,7 +50,7 @@ if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 if [ "$dry_run" = false ] && ! npm whoami >/dev/null 2>&1; then
-  echo "Error: npm publish rights are required. Run 'npm login' first." >&2
+  echo "Error: npm registry publication rights are required. Run 'npm login' first." >&2
   exit 1
 fi
 
