@@ -75,6 +75,7 @@ import {
 import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { logActivity } from "./activity-log.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
+import type { ProviderCooldownService } from "./provider-cooldown.js";
 
 const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"];
 const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"];
@@ -605,6 +606,7 @@ export function routineService(
   deps: {
     heartbeat?: IssueAssignmentWakeupDeps;
     pluginWorkerManager?: PluginWorkerManager;
+    providerCooldownService?: ProviderCooldownService;
     runtimeEnv?: Record<string, string | undefined>;
   } = {},
 ) {
@@ -614,6 +616,7 @@ export function routineService(
   const runtimeEnv = deps.runtimeEnv ?? process.env;
   const heartbeat = deps.heartbeat ?? heartbeatService(db, {
     pluginWorkerManager: deps.pluginWorkerManager,
+    providerCooldownService: deps.providerCooldownService,
   });
 
   async function getRoutineById(id: string) {

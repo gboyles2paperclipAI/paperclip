@@ -197,6 +197,10 @@ export const issueExecutionMonitorPolicySchema = z.object({
   recoveryPolicy: z.enum(ISSUE_EXECUTION_MONITOR_RECOVERY_POLICIES).optional().nullable().default(null),
 });
 
+export const issueExecutionPolicyStandingSchema = z.object({
+  reason: z.string().max(500).optional(),
+});
+
 export const issueExecutionPolicySchema = z.object({
   mode: z.enum(ISSUE_EXECUTION_POLICY_MODES).optional().default("normal"),
   commentRequired: z.boolean().optional().default(true),
@@ -204,6 +208,7 @@ export const issueExecutionPolicySchema = z.object({
   monitor: issueExecutionMonitorPolicySchema.optional().nullable(),
   reviewPreset: lowTrustReviewPresetPolicySchema.optional(),
   authorizationPolicy: trustAuthorizationPolicySchema.optional(),
+  standing: issueExecutionPolicyStandingSchema.optional().nullable(),
 });
 
 export const issueExecutionMonitorStateSchema = z.object({
@@ -573,6 +578,15 @@ export const addIssueCommentSchema = z.object({
 });
 
 export type AddIssueComment = z.infer<typeof addIssueCommentSchema>;
+
+export const ISSUE_MARKER_KINDS = ["slack-notified"] as const;
+export type IssueMarkerKind = (typeof ISSUE_MARKER_KINDS)[number];
+
+export const addIssueMarkerSchema = z.object({
+  kind: z.enum(ISSUE_MARKER_KINDS),
+  body: z.string().trim().min(1).max(500),
+});
+export type AddIssueMarker = z.infer<typeof addIssueMarkerSchema>;
 
 export const issueThreadInteractionStatusSchema = z.enum(ISSUE_THREAD_INTERACTION_STATUSES);
 export const issueThreadInteractionKindSchema = z.enum(ISSUE_THREAD_INTERACTION_KINDS);
@@ -1139,6 +1153,11 @@ export const cancelIssueThreadInteractionSchema = z.object({
   reason: z.string().trim().max(4000).optional(),
 });
 export type CancelIssueThreadInteraction = z.infer<typeof cancelIssueThreadInteractionSchema>;
+
+export const dismissIssueThreadInteractionSchema = z.object({
+  reason: z.string().trim().max(4000).optional(),
+});
+export type DismissIssueThreadInteraction = z.infer<typeof dismissIssueThreadInteractionSchema>;
 
 export const respondIssueThreadInteractionSchema = z.object({
   answers: z.array(askUserQuestionsAnswerSchema).max(20),

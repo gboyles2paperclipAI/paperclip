@@ -66,6 +66,8 @@ import { conflict, HttpError, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
 import { normalizeResponsibleUserDenialCode } from "./responsible-user-denial-run-outcomes.js";
+import { LOCAL_BOARD_USER_ID } from "../local-board-retirement.js";
+import type { ProviderCooldownService } from "./provider-cooldown.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import { getServerAdapter, listAdapterModelProfiles, runningProcesses } from "../adapters/index.js";
 import type {
@@ -321,6 +323,8 @@ const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS = BOUNDED_TRANSIENT_HEARTBE
 export const INTERACTION_CONTINUATION_INFRA_RETRY_REASON = "interaction_continuation_infra_retry";
 export const INTERACTION_CONTINUATION_INFRA_WAKE_REASON = "interaction_continuation_infra_retry";
 const INTERACTION_CONTINUATION_INFRA_MAX_ATTEMPTS = 3;
+const ISSUE_CONTINUATION_WAITING_ON_INTERACTION_ERROR_CODE =
+  "issue_continuation_waiting_on_interaction";
 const RESOLVED_INTERACTION_CONTINUATION_STATUSES = new Set(["accepted", "answered", "rejected"]);
 const WORKSPACE_VALIDATION_FAILURE_CODE = "workspace_validation_failed";
 const WORKSPACE_VALIDATION_RECOVERY_CAUSE = "workspace_validation_failed";
@@ -2734,6 +2738,86 @@ function allowsIssueInteractionWake(
   return Boolean(deriveCommentId(contextSnapshot, null));
 }
 
+type PendingIssueInteractionSummary = {
+  id: string;
+  kind: string;
+  continuationPolicy: string;
+};
+
+async function findPendingIssueInteraction(
+  dbOrTx: Pick<Db, "select">,
+  companyId: string,
+  issueId: string,
+): Promise<PendingIssueInteractionSummary | null> {
+  return dbOrTx
+    .select({
+      id: issueThreadInteractions.id,
+      kind: issueThreadInteractions.kind,
+      continuationPolicy: issueThreadInteractions.continuationPolicy,
+    })
+    .from(issueThreadInteractions)
+    .where(
+      and(
+        eq(issueThreadInteractions.companyId, companyId),
+        eq(issueThreadInteractions.issueId, issueId),
+        eq(issueThreadInteractions.status, "pending"),
+        inArray(issueThreadInteractions.continuationPolicy, [
+          "wake_assignee",
+          "wake_assignee_on_accept",
+        ]),
+      ),
+    )
+    .orderBy(desc(issueThreadInteractions.createdAt), desc(issueThreadInteractions.id))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+}
+
+function isNoopContinuationSuppressionCandidate(input: {
+  invocationSource: string | null | undefined;
+  triggerDetail: string | null | undefined;
+  issueStatus: string;
+  issuePriority: string | null;
+  contextSnapshot: Record<string, unknown>;
+}) {
+  if (input.issueStatus !== "in_progress" || input.issuePriority === "critical") return false;
+  if (input.invocationSource !== "automation" || input.triggerDetail !== "system") return false;
+
+  const wakeReason = readNonEmptyString(input.contextSnapshot.wakeReason);
+  const retryReason = readNonEmptyString(input.contextSnapshot.retryReason);
+  if (wakeReason !== "issue_continuation_needed") return false;
+  if (retryReason && retryReason !== "issue_continuation_needed") return false;
+
+  if (deriveCommentId(input.contextSnapshot, null)) return false;
+  if (allowsIssueInteractionWake(input.contextSnapshot)) return false;
+  if (hasInteractionContinuationWakeContext(input.contextSnapshot)) return false;
+  if (input.contextSnapshot.resumeIntent === true || input.contextSnapshot.followUpRequested === true) {
+    return false;
+  }
+  if (
+    readNonEmptyString(input.contextSnapshot.approvalId) ||
+    readNonEmptyString(input.contextSnapshot.approvalStatus) ||
+    readNonEmptyString(input.contextSnapshot.blockerIssueId) ||
+    input.contextSnapshot.dependencyBlockedInteraction === true
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function pendingInteractionContinuationSuppressionPayload(input: {
+  issueId: string;
+  pendingInteraction: PendingIssueInteractionSummary;
+}) {
+  return {
+    code: ISSUE_CONTINUATION_WAITING_ON_INTERACTION_ERROR_CODE,
+    issueId: input.issueId,
+    pendingInteractionId: input.pendingInteraction.id,
+    pendingInteractionKind: input.pendingInteraction.kind,
+    continuationPolicy: input.pendingInteraction.continuationPolicy,
+  };
+}
+
 async function listUnresolvedBlockerSummaries(
   dbOrTx: Pick<Db, "select">,
   companyId: string,
@@ -5005,6 +5089,7 @@ export type HeartbeatEnvironmentRuntime = ReturnType<typeof environmentRuntimeSe
 
 export interface HeartbeatServiceOptions {
   pluginWorkerManager?: PluginWorkerManager;
+  providerCooldownService?: ProviderCooldownService;
   environmentRuntime?: HeartbeatEnvironmentRuntime;
   runtimeEnv?: Record<string, string | undefined>;
 }
@@ -5760,9 +5845,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (input.issueContext?.responsibleUserId) return input.issueContext.responsibleUserId;
     const parentResponsibleUserId = await resolveParentIssueResponsibleUserId(input.companyId, input.issueContext?.parentId);
     if (parentResponsibleUserId) return parentResponsibleUserId;
-    if (input.issueContext) return resolveCompanyDefaultResponsibleUserId(input.companyId);
+    if (input.issueContext) return await resolveCompanyDefaultResponsibleUserId(input.companyId) ?? LOCAL_BOARD_USER_ID;
     if (requestedUserId) return requestedUserId;
-    return resolveCompanyDefaultResponsibleUserId(input.companyId);
+    return await resolveCompanyDefaultResponsibleUserId(input.companyId) ?? LOCAL_BOARD_USER_ID;
   }
 
   async function resolveResponsibleUserIdForRun(input: {
@@ -7517,6 +7602,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         status: issues.status,
         assigneeAgentId: issues.assigneeAgentId,
         assigneeUserId: issues.assigneeUserId,
+        executionPolicy: issues.executionPolicy,
         executionState: issues.executionState,
         monitorNextCheckAt: issues.monitorNextCheckAt,
         projectId: issues.projectId,
@@ -8927,7 +9013,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           }
         : baseSchedule;
 
-    if (retryReason === INTERACTION_CONTINUATION_INFRA_RETRY_REASON) {
+    if (
+      retryReason === INTERACTION_CONTINUATION_INFRA_RETRY_REASON ||
+      retryReason === MAX_TURN_CONTINUATION_RETRY_REASON
+    ) {
       const gate = await evaluateScheduledRetryGate({
         run,
         agent,
@@ -9697,6 +9786,34 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           heartbeat.dailyBudgetCents,
       ),
     };
+  }
+
+  function readPremiumManagedGlobalCap() {
+    const raw = process.env.PAPERCLIP_PREMIUM_MAX_CONCURRENT_RUNS;
+    if (!raw) return null;
+    const parsed = Math.floor(Number(raw));
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  }
+
+  function isPremiumManagedAdapterType(adapterType: string | null | undefined) {
+    return adapterType === "claude_local" || adapterType === "codex_local" || adapterType === "gemini_local";
+  }
+
+  async function premiumManagedGlobalCapReached(runAgent: typeof agents.$inferSelect) {
+    const cap = readPremiumManagedGlobalCap();
+    if (cap === null || !isPremiumManagedAdapterType(runAgent.adapterType)) return false;
+    const rows = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .innerJoin(agents, eq(agents.id, heartbeatRuns.agentId))
+      .where(
+        and(
+          eq(heartbeatRuns.status, "running"),
+          inArray(agents.adapterType, ["claude_local", "codex_local", "gemini_local"]),
+        ),
+      )
+      .limit(cap + 1);
+    return rows.length >= cap;
   }
 
   function normalizeOptionalNonNegativeInteger(value: unknown) {
@@ -10905,6 +11022,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const runningCount = await countRunningRunsForAgent(agentId);
       const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
       if (availableSlots <= 0) return [];
+      if (await premiumManagedGlobalCapReached(agent)) return [];
 
       const queuedRuns = await db
         .select()
@@ -14089,6 +14207,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         return { kind: "released" as const };
       }
 
+      const issuePolicy = normalizeIssueExecutionPolicy(issue.executionPolicy ?? null);
+      if (issue.status === "in_progress" && issuePolicy?.standing) {
+        return { kind: "released" as const };
+      }
+
       if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) {
         return { kind: "released" as const };
       }
@@ -14099,6 +14222,71 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           issue,
           previousStatus: issue.status,
         };
+      }
+
+      const retryReason = issue.status === "todo" ? "assignment_recovery" : "issue_continuation_needed";
+      const recoveryReason = issue.status === "todo" ? "issue_assignment_recovery" : "issue_continuation_needed";
+      const recoverySource =
+        issue.status === "todo" ? "issue.assignment_recovery" : "issue.continuation_recovery";
+      const now = new Date();
+      const continuationSuppressionContext = {
+        issueId: issue.id,
+        taskId: issue.id,
+        wakeReason: recoveryReason,
+        retryReason,
+        source: recoverySource,
+        retryOfRunId: run.id,
+      };
+      const suppressionCandidate =
+        recoveryAgentInvokable &&
+        Boolean(recoveryAgent) &&
+        !isWorkspaceValidationFailedRun(run) &&
+        !isConfigurationIncompleteFailedRun(run) &&
+        isNoopContinuationSuppressionCandidate({
+          invocationSource: "automation",
+          triggerDetail: "system",
+          issueStatus: issue.status,
+          issuePriority: issue.priority,
+          contextSnapshot: continuationSuppressionContext,
+        });
+      const pendingInteraction = suppressionCandidate
+        ? await findPendingIssueInteraction(tx, issue.companyId, issue.id)
+        : null;
+      if (pendingInteraction) {
+        const suppression = pendingInteractionContinuationSuppressionPayload({
+          issueId: issue.id,
+          pendingInteraction,
+        });
+        await tx.insert(agentWakeupRequests).values({
+          companyId: issue.companyId,
+          agentId: recoveryAgent?.id ?? run.agentId,
+          source: "automation",
+          triggerDetail: "system",
+          reason: ISSUE_CONTINUATION_WAITING_ON_INTERACTION_ERROR_CODE,
+          payload: {
+            issueId: issue.id,
+            retryOfRunId: run.id,
+            continuationSuppression: suppression,
+          },
+          status: "skipped",
+          requestedByActorType: "system",
+          requestedByActorId: null,
+          error: "Automatic continuation suppressed because the issue is waiting on a pending interaction",
+          finishedAt: now,
+          updatedAt: now,
+        });
+        logger.info(
+          {
+            agentId: recoveryAgent?.id ?? run.agentId,
+            issueId: issue.id,
+            sourceRunId: run.id,
+            suppressionCode: ISSUE_CONTINUATION_WAITING_ON_INTERACTION_ERROR_CODE,
+            pendingInteractionId: pendingInteraction.id,
+            pendingInteractionKind: pendingInteraction.kind,
+          },
+          "releaseIssueExecutionAndPromote: suppressed no-op recovery while issue waits on interaction",
+        );
+        return { kind: "released" as const };
       }
 
       const shouldBlockImmediately =
@@ -14131,11 +14319,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         };
       }
 
-      const retryReason = issue.status === "todo" ? "assignment_recovery" : "issue_continuation_needed";
-      const recoveryReason = issue.status === "todo" ? "issue_assignment_recovery" : "issue_continuation_needed";
-      const recoverySource =
-        issue.status === "todo" ? "issue.assignment_recovery" : "issue.continuation_recovery";
-      const now = new Date();
       const recoveryContextSnapshot = withRecoveryModelProfileHint({
         issueId: issue.id,
         taskId: issue.id,
@@ -14584,6 +14767,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             companyId: issues.companyId,
             identifier: issues.identifier,
             status: issues.status,
+            priority: issues.priority,
             projectId: issues.projectId,
             projectWorkspaceId: issues.projectWorkspaceId,
             executionWorkspaceId: issues.executionWorkspaceId,
@@ -14636,6 +14820,48 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             idempotencyKey: opts.idempotencyKey ?? null,
             finishedAt: new Date(),
           });
+          return { kind: "skipped" as const };
+        }
+
+        const suppressionCandidate = isNoopContinuationSuppressionCandidate({
+          invocationSource: source,
+          triggerDetail,
+          issueStatus: issue.status,
+          issuePriority: issue.priority,
+          contextSnapshot: enrichedContextSnapshot,
+        });
+        const pendingInteraction = suppressionCandidate
+          ? await findPendingIssueInteraction(tx, issue.companyId, issue.id)
+          : null;
+        if (pendingInteraction) {
+          const suppression = pendingInteractionContinuationSuppressionPayload({
+            issueId: issue.id,
+            pendingInteraction,
+          });
+          await tx.insert(agentWakeupRequests).values({
+            companyId: agent.companyId,
+            agentId,
+            source,
+            triggerDetail,
+            reason: ISSUE_CONTINUATION_WAITING_ON_INTERACTION_ERROR_CODE,
+            payload: { issueId: issue.id, continuationSuppression: suppression },
+            status: "skipped",
+            requestedByActorType: opts.requestedByActorType ?? null,
+            requestedByActorId: opts.requestedByActorId ?? null,
+            idempotencyKey: opts.idempotencyKey ?? null,
+            error: "Automatic continuation suppressed because the issue is waiting on a pending interaction",
+            finishedAt: new Date(),
+          });
+          logger.info(
+            {
+              agentId,
+              issueId: issue.id,
+              suppressionCode: ISSUE_CONTINUATION_WAITING_ON_INTERACTION_ERROR_CODE,
+              pendingInteractionId: pendingInteraction.id,
+              pendingInteractionKind: pendingInteraction.kind,
+            },
+            "enqueueWakeup: suppressed no-op continuation while issue waits on interaction",
+          );
           return { kind: "skipped" as const };
         }
 

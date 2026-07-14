@@ -11,7 +11,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./test-embedded-postgres.js";
 
-const DERIVED_ATTRIBUTION_MIGRATION = "0132_issue_comment_derived_attribution_fast.sql";
+const DERIVED_ATTRIBUTION_MIGRATION = "0134_issue_comment_derived_attribution_fast.sql";
 
 const cleanups: Array<() => Promise<void>> = [];
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -135,13 +135,13 @@ if (!embeddedPostgresSupport.supported) {
 
 describeEmbeddedPostgres("issue comment derived attribution migration", () => {
   it(
-    "fresh installs include the relocated schema and no deleted 0126 migration",
+    "fresh installs include the historical 0126 migration and current relocated schema",
     async () => {
       const connectionString = await createTempDatabase();
       const state = await inspectMigrations(connectionString);
 
       expect(state.status).toBe("upToDate");
-      expect(state.availableMigrations).not.toContain("0126_issue_comment_derived_attribution.sql");
+      expect(state.availableMigrations).toContain("0126_issue_comment_derived_attribution.sql");
       expect(state.availableMigrations).toContain(DERIVED_ATTRIBUTION_MIGRATION);
 
       const sql = postgres(connectionString, { max: 1, onnotice: () => {} });

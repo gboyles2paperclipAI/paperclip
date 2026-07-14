@@ -79,6 +79,13 @@ const USER_SECRET_VALUE_UNIQUE_CONSTRAINT = "company_secrets_user_definition_own
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type SecretBindingDb = Pick<Db | DbTransaction, "select" | "delete" | "insert">;
 
+function envKeyFromConfigPath(configPath: string | null | undefined) {
+  if (!configPath) return null;
+  if (configPath.startsWith("env.")) return configPath.slice("env.".length);
+  const match = configPath.match(/(?:^|\.)env\.([A-Za-z_][A-Za-z0-9_]*)$/);
+  return match?.[1] ?? null;
+}
+
 function isUniqueConstraintViolation(error: unknown, constraintName: string) {
   const seen = new Set<unknown>();
   let current = error;
@@ -423,6 +430,9 @@ type SecretResolutionOptions = {
 type ResolveAdapterConfigForRuntimeOptions = {
   adapterType?: string | null;
   skipUserSecrets?: boolean;
+};
+type ResolveAdapterConfigContext = Omit<SecretBindingContext, "configPath"> & {
+  configPathPrefix?: string | null;
 };
 
 export type RuntimeSecretManifestEntry = {
@@ -1079,7 +1089,7 @@ export function secretService(db: Db) {
         value,
         manifestEntry: {
           configPath: configPath ?? "",
-          envKey: configPath?.startsWith("env.") ? configPath.slice("env.".length) : null,
+          envKey: envKeyFromConfigPath(configPath),
           secretId: secret.id,
           bindingId: binding?.id ?? null,
           secretKey: secret.key,
@@ -3815,7 +3825,7 @@ export function secretService(db: Db) {
     resolveEnvBindings: async (
       companyId: string,
       envValue: unknown,
-      context?: Omit<SecretBindingContext, "configPath">,
+      context?: ResolveAdapterConfigContext,
     ): Promise<{ env: Record<string, string>; secretKeys: Set<string>; manifest: RuntimeSecretManifestEntry[] }> => {
       const record = asRecord(envValue);
       if (!record) return { env: {} as Record<string, string>, secretKeys: new Set<string>(), manifest: [] };
@@ -4199,12 +4209,18 @@ export function secretService(db: Db) {
     resolveAdapterConfigForRuntime: async (
       companyId: string,
       adapterConfig: Record<string, unknown>,
-      context?: Omit<SecretBindingContext, "configPath">,
+      context?: ResolveAdapterConfigContext,
       opts?: ResolveAdapterConfigForRuntimeOptions,
     ): Promise<{ config: Record<string, unknown>; secretKeys: Set<string>; manifest: RuntimeSecretManifestEntry[] }> => {
       const resolved = { ...adapterConfig };
       const secretKeys = new Set<string>();
       const manifest: RuntimeSecretManifestEntry[] = [];
+      const envConfigPath = (key: string) => {
+        const prefix = typeof context?.configPathPrefix === "string" && context.configPathPrefix.trim().length > 0
+          ? context.configPathPrefix.trim().replace(/\.$/, "")
+          : "env";
+        return `${prefix}.${key}`;
+      };
       if (Object.prototype.hasOwnProperty.call(adapterConfig, "env")) {
         const record = asRecord(adapterConfig.env);
         if (!record) {
@@ -4223,14 +4239,15 @@ export function secretService(db: Db) {
             if (binding.type === "plain") {
               env[key] = binding.value;
             } else if (binding.type === "secret_ref") {
+              const configPath = envConfigPath(key);
               const secretResolution = await resolveSecretValueInternal(
                 companyId,
                 binding.secretId,
                 binding.version,
                 context
                   ? {
-                      bindingContext: { ...context, configPath: `env.${key}` },
-                      accessContext: { ...context, configPath: `env.${key}` },
+                      bindingContext: { ...context, configPath },
+                      accessContext: { ...context, configPath },
                     }
                   : undefined,
               );
@@ -4239,6 +4256,7 @@ export function secretService(db: Db) {
               secretKeys.add(key);
             } else {
               if (opts?.skipUserSecrets) continue;
+              const configPath = envConfigPath(key);
               const secretResolution = await secretService(db).resolveUserSecretValue(
                 companyId,
                 {
@@ -4250,7 +4268,7 @@ export function secretService(db: Db) {
                 context
                   ? {
                       ...context,
-                      configPath: `env.${key}`,
+                      configPath,
                       responsibleUserId: context.responsibleUserId ?? null,
                     }
                   : undefined,

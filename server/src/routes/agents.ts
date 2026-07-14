@@ -60,6 +60,7 @@ import {
   collectAgentAdapterWorkspaceCommandPaths,
 } from "./workspace-command-authz.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+import type { ProviderCooldownService } from "../services/provider-cooldown.js";
 import { environmentService } from "../services/environments.js";
 import { resolveEnvironmentExecutionTarget } from "../services/environment-execution-target.js";
 import { environmentRuntimeService } from "../services/environment-runtime.js";
@@ -138,7 +139,10 @@ function readRunIssueId(context: Record<string, unknown> | null) {
 
 export function agentRoutes(
   db: Db,
-  options: { pluginWorkerManager?: PluginWorkerManager } = {},
+  options: {
+    pluginWorkerManager?: PluginWorkerManager;
+    providerCooldownService?: ProviderCooldownService;
+  } = {},
 ) {
   // Legacy hardcoded maps — used as fallback when adapter module does not
   // declare capability flags explicitly.
@@ -189,6 +193,7 @@ export function agentRoutes(
   });
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
+    providerCooldownService: options.providerCooldownService,
   });
   const recovery = recoveryService(db, { enqueueWakeup: heartbeat.wakeup });
   const issueApprovalsSvc = issueApprovalService(db);
@@ -3370,8 +3375,20 @@ export function agentRoutes(
     if (!agent) {
       return;
     }
+    const creationSource =
+      req.actor.source === "local_implicit" ||
+      req.actor.source === "board_key" ||
+      req.actor.source === "cloud_tenant"
+        ? req.actor.source
+        : "session";
+    const responsibleUserId = req.actor.userId ?? null;
     const key = await svc.createApiKey(id, req.body.name, req.body.scope, {
-      responsibleUserId: req.actor.userId ?? null,
+      responsibleUserId,
+      creation: {
+        actorType: "user",
+        actorId: req.actor.userId ?? "board",
+        source: creationSource,
+      },
     });
 
     await logActivity(db, {
@@ -3385,7 +3402,8 @@ export function agentRoutes(
         keyId: key.id,
         name: key.name,
         scope: key.scope,
-        responsibleUserId: key.responsibleUserId,
+        responsibleUserId,
+        creation: key.creation,
       },
     });
 

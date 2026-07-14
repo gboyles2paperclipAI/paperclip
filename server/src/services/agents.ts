@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -23,6 +23,9 @@ import {
   normalizeAgentApiKeyScope,
   normalizeAgentUrlKey,
   type AgentEligibilityAgent,
+  type AgentApiKeyCreatorType,
+  type AgentApiKeyCreationSource,
+  type AgentApiKeyCreationProvenance,
   type AgentApiKeyScope,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
@@ -76,6 +79,71 @@ interface UpdateAgentOptions {
 
 interface CreateAgentOptions {
   allowBuiltInAgentMetadata?: boolean;
+}
+
+const AGENT_API_KEY_CREATOR_TYPES = new Set<AgentApiKeyCreatorType>([
+  "user",
+  "system",
+  "unknown",
+]);
+
+const AGENT_API_KEY_CREATION_SOURCES = new Set<AgentApiKeyCreationSource>([
+  "local_implicit",
+  "session",
+  "board_key",
+  "cloud_tenant",
+  "join_request_claim",
+  "unknown",
+]);
+
+const UNKNOWN_AGENT_API_KEY_CREATION: AgentApiKeyCreationProvenance = {
+  actorType: "unknown",
+  actorId: null,
+  source: "unknown",
+};
+
+export interface CreateAgentApiKeyOptions {
+  responsibleUserId?: string | null;
+  creation?: AgentApiKeyCreationProvenance;
+}
+
+function normalizeAgentApiKeyCreation(input: unknown): AgentApiKeyCreationProvenance {
+  const value = isPlainRecord(input) ? input : {};
+  const actorType = AGENT_API_KEY_CREATOR_TYPES.has(value.actorType as AgentApiKeyCreatorType)
+    ? value.actorType as AgentApiKeyCreatorType
+    : "unknown";
+  const source = AGENT_API_KEY_CREATION_SOURCES.has(value.source as AgentApiKeyCreationSource)
+    ? value.source as AgentApiKeyCreationSource
+    : "unknown";
+  const actorId = typeof value.actorId === "string" && value.actorId.trim().length > 0
+    ? value.actorId.trim()
+    : null;
+
+  return {
+    actorType,
+    actorId: actorType === "unknown" ? null : actorId,
+    source,
+  };
+}
+
+function agentApiKeyCreationFromActivity(row: {
+  action: string;
+  actorType: string;
+  actorId: string;
+  details: Record<string, unknown> | null;
+}): AgentApiKeyCreationProvenance {
+  const recorded = normalizeAgentApiKeyCreation(row.details?.creation);
+  const fallbackActorType = row.actorType === "user" || row.actorType === "system"
+    ? row.actorType
+    : "unknown";
+
+  return normalizeAgentApiKeyCreation({
+    actorType: recorded.actorType === "unknown" ? fallbackActorType : recorded.actorType,
+    actorId: recorded.actorId ?? row.actorId,
+    source: recorded.source === "unknown" && row.action === "agent_api_key.claimed"
+      ? "join_request_claim"
+      : recorded.source,
+  });
 }
 
 interface AgentShortnameRow {
@@ -883,7 +951,7 @@ export function agentService(db: Db) {
       id: string,
       name: string,
       scope: AgentApiKeyScope = { kind: "standard" },
-      options?: { responsibleUserId?: string | null },
+      options: CreateAgentApiKeyOptions = {},
     ) => {
       const existing = await getById(id);
       if (!existing) throw notFound("Agent not found");
@@ -896,6 +964,7 @@ export function agentService(db: Db) {
 
       const token = createToken();
       const keyHash = hashToken(token);
+      const normalizedCreation = normalizeAgentApiKeyCreation(options.creation);
       const created = await db
         .insert(agentApiKeys)
         .values({
@@ -903,7 +972,7 @@ export function agentService(db: Db) {
           companyId: existing.companyId,
           name,
           keyHash,
-          responsibleUserId: options?.responsibleUserId?.trim() || null,
+          responsibleUserId: options.responsibleUserId?.trim() || null,
           scopeConfig: scope.kind === "standard" ? null : scope,
         })
         .returning()
@@ -914,31 +983,80 @@ export function agentService(db: Db) {
         name: created.name,
         scope: normalizeAgentApiKeyScope(created.scopeConfig),
         responsibleUserId: created.responsibleUserId,
+        creation: normalizedCreation,
         token,
+        lastUsedAt: created.lastUsedAt,
+        revokedAt: created.revokedAt,
         createdAt: created.createdAt,
       };
     },
 
-    listKeys: (id: string) =>
-      db
+    listKeys: async (id: string) => {
+      const rows = await db
         .select({
           id: agentApiKeys.id,
+          companyId: agentApiKeys.companyId,
           name: agentApiKeys.name,
           responsibleUserId: agentApiKeys.responsibleUserId,
           scopeConfig: agentApiKeys.scopeConfig,
+          lastUsedAt: agentApiKeys.lastUsedAt,
           createdAt: agentApiKeys.createdAt,
           revokedAt: agentApiKeys.revokedAt,
         })
         .from(agentApiKeys)
-        .where(eq(agentApiKeys.agentId, id))
-        .then((rows) => rows.map((row) => ({
+        .where(eq(agentApiKeys.agentId, id));
+      if (rows.length === 0) return [];
+
+      const keyIds = rows.map((row) => row.id);
+      const detailsKeyId = sql<string>`${activityLog.details} ->> 'keyId'`;
+      const creationRows = await db
+        .select({
+          id: activityLog.id,
+          action: activityLog.action,
+          entityId: activityLog.entityId,
+          actorType: activityLog.actorType,
+          actorId: activityLog.actorId,
+          details: activityLog.details,
+        })
+        .from(activityLog)
+        .where(and(
+          eq(activityLog.companyId, rows[0]!.companyId),
+          or(
+            and(
+              eq(activityLog.action, "agent.key_created"),
+              eq(activityLog.entityType, "agent"),
+              eq(activityLog.entityId, id),
+              inArray(detailsKeyId, keyIds),
+            ),
+            and(
+              eq(activityLog.action, "agent_api_key.claimed"),
+              eq(activityLog.entityType, "agent_api_key"),
+              inArray(activityLog.entityId, keyIds),
+            ),
+          ),
+        ))
+        .orderBy(asc(activityLog.createdAt), asc(activityLog.id));
+
+      const creationByKeyId = new Map<string, AgentApiKeyCreationProvenance>();
+      for (const row of creationRows) {
+        const keyId = row.action === "agent.key_created"
+          ? typeof row.details?.keyId === "string" ? row.details.keyId : null
+          : row.entityId;
+        if (!keyId || creationByKeyId.has(keyId)) continue;
+        creationByKeyId.set(keyId, agentApiKeyCreationFromActivity(row));
+      }
+
+      return rows.map((row) => ({
           id: row.id,
           name: row.name,
           scope: normalizeAgentApiKeyScope(row.scopeConfig),
           responsibleUserId: row.responsibleUserId,
+          creation: creationByKeyId.get(row.id) ?? UNKNOWN_AGENT_API_KEY_CREATION,
+          lastUsedAt: row.lastUsedAt,
           createdAt: row.createdAt,
           revokedAt: row.revokedAt,
-        }))),
+        }));
+    },
 
     getKeyById: async (keyId: string) =>
       db

@@ -46,6 +46,7 @@ const apiPrefixes: Record<string, string> = {
   "secrets.ts": "/api",
   "sidebar-badges.ts": "/api",
   "sidebar-preferences.ts": "/api",
+  "slack-integrations.ts": "/api",
   "teams-catalog.ts": "/api",
   "user-profiles.ts": "/api",
 };

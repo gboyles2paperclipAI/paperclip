@@ -2469,6 +2469,7 @@ export function issueRoutes(
     pluginWorkerManager?: PluginWorkerManager;
     taskWatchdogEnqueueWakeup?: TaskWatchdogServiceDeps["enqueueWakeup"] | null;
     issueListDiagnostics?: IssueListDiagnostics;
+    deploymentMode?: "local_trusted" | "authenticated";
   } = {},
 ) {
   const router = Router();
@@ -3153,6 +3154,114 @@ export function issueRoutes(
         },
       });
     }
+  }
+
+  function parseStrictIsoDateQuery(value: unknown, field: string) {
+    if (value === undefined) return null;
+    if (typeof value !== "string" || value.trim().length === 0) {
+      throw unprocessable(`Invalid ${field} query value`);
+    }
+    const trimmed = value.trim();
+    const match = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/);
+    const parsed = new Date(trimmed);
+    if (!match || Number.isNaN(parsed.getTime())) {
+      throw unprocessable(`Invalid ${field} query value`);
+    }
+    if (
+      parsed.getUTCFullYear() !== Number(match[1])
+      || parsed.getUTCMonth() + 1 !== Number(match[2])
+      || parsed.getUTCDate() !== Number(match[3])
+    ) {
+      throw unprocessable(`Invalid ${field} query value`);
+    }
+    return parsed;
+  }
+
+  function parseInteractionAuditMultiValue(
+    value: unknown,
+    allowed: readonly string[],
+    field: string,
+  ) {
+    if (value === undefined) return undefined;
+    const rawValues = Array.isArray(value) ? value : String(value).split(",");
+    const values = rawValues
+      .map((entry) => String(entry).trim())
+      .filter((entry) => entry.length > 0);
+    if (values.some((entry) => !allowed.includes(entry))) {
+      throw unprocessable(`Invalid ${field} query value`);
+    }
+    return values;
+  }
+
+  function parseInteractionAuditPagination(req: Request, res: Response) {
+    const limit = req.query.limit === undefined ? 100 : Number(req.query.limit);
+    const offset = req.query.offset === undefined ? 0 : Number(req.query.offset);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      res.status(400).json({ error: "Invalid limit query value" });
+      return null;
+    }
+    if (!Number.isInteger(offset) || offset < 0 || offset > 10_000) {
+      res.status(400).json({ error: "Invalid offset query value" });
+      return null;
+    }
+    return { limit, offset };
+  }
+
+  function buildInteractionCreatedActivityDetails(
+    issue: { identifier?: string | null; title?: string | null },
+    interaction: {
+      id: string;
+      kind: string;
+      status: string;
+      continuationPolicy: string;
+      title?: string | null;
+      summary?: string | null;
+      createdByAgentId?: string | null;
+      payload?: unknown;
+    },
+  ) {
+    const payload = interaction.payload && typeof interaction.payload === "object" && !Array.isArray(interaction.payload)
+      ? interaction.payload as Record<string, unknown>
+      : null;
+    return {
+      interactionId: interaction.id,
+      interactionKind: interaction.kind,
+      interactionStatus: interaction.status,
+      continuationPolicy: interaction.continuationPolicy,
+      issueIdentifier: issue.identifier ?? null,
+      issueTitle: issue.title ?? null,
+      interactionTitle: interaction.title ?? null,
+      interactionSummary: interaction.summary ?? null,
+      prompt: typeof payload?.prompt === "string" ? payload.prompt : null,
+      createdByAgentId: interaction.createdByAgentId ?? null,
+    };
+  }
+
+  function localImplicitConfirmationResolutionRequiresTrustedMode(req: Request) {
+    return req.actor.type === "board" &&
+      req.actor.source === "local_implicit" &&
+      opts.deploymentMode !== "local_trusted";
+  }
+
+  async function rejectUntrustedLocalImplicitConfirmationResolution(
+    req: Request,
+    res: Response,
+    issueId: string,
+    interactionId: string,
+  ) {
+    if (!localImplicitConfirmationResolutionRequiresTrustedMode(req)) return false;
+    const interaction = await issueThreadInteractionService(db).getById(interactionId);
+    if (
+      interaction?.issueId === issueId &&
+      (
+        interaction.kind === "request_confirmation" ||
+        interaction.kind === "request_checkbox_confirmation"
+      )
+    ) {
+      res.status(403).json({ error: "Authenticated board access is required to resolve confirmation interactions" });
+      return true;
+    }
+    return false;
   }
 
   function parseDateQuery(value: unknown, field: string) {
@@ -4485,6 +4594,48 @@ export function issueRoutes(
     }
     const result = await getSearchService().search(companyId, query);
     res.json(result);
+  });
+
+  router.get("/companies/:companyId/interactions", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const pagination = parseInteractionAuditPagination(req, res);
+    if (!pagination) return;
+
+    const statuses = parseInteractionAuditMultiValue(
+      req.query.interactionStatus,
+      ["pending", "accepted", "rejected", "answered", "cancelled", "expired"],
+      "interactionStatus",
+    ) as Array<"pending" | "accepted" | "rejected" | "answered" | "cancelled" | "expired"> | undefined;
+    const issueStatuses = parseInteractionAuditMultiValue(
+      req.query.issueStatus,
+      ["backlog", "todo", "in_progress", "in_review", "done", "blocked", "cancelled"],
+      "issueStatus",
+    );
+    const method = req.query.method === undefined ? null : String(req.query.method);
+    if (
+      method !== null &&
+      method !== "ui_click" &&
+      method !== "api_explicit" &&
+      method !== "api_automated" &&
+      method !== "unknown"
+    ) {
+      throw unprocessable("Invalid method query value");
+    }
+
+    const rows = await issueThreadInteractionService(db).listForCompany({
+      companyId,
+      statuses,
+      issueStatuses,
+      createdAfter: parseStrictIsoDateQuery(req.query.createdAfter, "createdAfter"),
+      createdBefore: parseStrictIsoDateQuery(req.query.createdBefore, "createdBefore"),
+      updatedAfter: parseStrictIsoDateQuery(req.query.updatedAfter, "updatedAfter"),
+      resolvedAfter: parseStrictIsoDateQuery(req.query.resolvedAfter, "resolvedAfter"),
+      resolvedBefore: parseStrictIsoDateQuery(req.query.resolvedBefore, "resolvedBefore"),
+      method,
+      ...pagination,
+    });
+    res.json(rows);
   });
 
   router.get("/companies/:companyId/issues", async (req, res) => {
@@ -8977,12 +9128,7 @@ export function issueRoutes(
       action: "issue.thread_interaction_created",
       entityType: "issue",
       entityId: issue.id,
-      details: {
-        interactionId: interaction.id,
-        interactionKind: interaction.kind,
-        interactionStatus: interaction.status,
-        continuationPolicy: interaction.continuationPolicy,
-      },
+      details: buildInteractionCreatedActivityDetails(issue, interaction),
     });
 
     res.status(201).json(interaction);
@@ -9001,6 +9147,7 @@ export function issueRoutes(
       }
       assertCompanyAccess(req, issue.companyId);
       if (await rejectAgentIssueThreadInteractionResolution(req, res, issue)) return;
+      if (await rejectUntrustedLocalImplicitConfirmationResolution(req, res, issue.id, interactionId)) return;
       assertBoard(req);
 
       const actor = getActorInfo(req);
@@ -9109,6 +9256,7 @@ export function issueRoutes(
       }
       assertCompanyAccess(req, issue.companyId);
       if (await rejectAgentIssueThreadInteractionResolution(req, res, issue)) return;
+      if (await rejectUntrustedLocalImplicitConfirmationResolution(req, res, issue.id, interactionId)) return;
       assertBoard(req);
 
       const actor = getActorInfo(req);
@@ -9323,6 +9471,69 @@ export function issueRoutes(
         interaction,
         actor,
         source: "issue.interaction.cancel",
+      });
+
+      res.json(interaction);
+    },
+  );
+
+  router.post(
+    "/issues/:id/interactions/:interactionId/dismiss",
+    async (req, res) => {
+      const id = req.params.id as string;
+      const interactionId = req.params.interactionId as string;
+      const issue = await svc.getById(id);
+      if (!issue) {
+        res.status(404).json({ error: "Issue not found" });
+        return;
+      }
+      assertCompanyAccess(req, issue.companyId);
+
+      if (req.actor.type === "agent") {
+        if (!req.actor.agentId || issue.assigneeAgentId !== req.actor.agentId) {
+          res.status(403).json({ error: "Only the issue assignee can dismiss pending interactions" });
+          return;
+        }
+        if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+      } else {
+        assertBoard(req);
+      }
+
+      const actor = getActorInfo(req);
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : undefined;
+      const interaction = await issueThreadInteractionService(db).dismissInteraction(
+        issue,
+        interactionId,
+        reason === undefined ? {} : { reason },
+        {
+          agentId: actor.agentId,
+          userId: actor.actorType === "user" ? actor.actorId : null,
+        },
+      );
+
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.thread_interaction_dismissed",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          interactionId: interaction.id,
+          interactionKind: interaction.kind,
+          interactionStatus: interaction.status,
+          dismissalReason: reason?.trim() || null,
+        },
+      });
+
+      queueResolvedInteractionContinuationWakeup({
+        heartbeat,
+        issue,
+        interaction,
+        actor,
+        source: "issue.interaction.dismiss",
       });
 
       res.json(interaction);
