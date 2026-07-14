@@ -350,7 +350,7 @@ publish_package_to_npm() {
     return 1
   fi
 
-  release_warn "npm publish hit a duplicate Sigstore transparency-log entry for ${package_name}@${package_version}."
+  release_warn "npm package publication hit a duplicate Sigstore transparency-log entry for ${package_name}@${package_version}."
 
   if npm_package_version_exists "$package_name" "$package_version"; then
     release_warn "npm already exposes ${package_name}@${package_version}; continuing to registry verification."
@@ -439,14 +439,14 @@ require_npm_publish_auth() {
 
   if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
     if [ "${GITHUB_REPOSITORY:-}" = "paperclipai/paperclip" ]; then
-      release_info "  ✓ npm publish auth: GitHub Actions OIDC (trusted publishing configured for this repo)"
+      release_info "  ✓ npm publication auth: GitHub Actions OIDC (trusted publishing configured for this repo)"
       return
     else
-      release_fail "npm publish auth unavailable: OIDC trusted publishing is only configured for paperclipai/paperclip. Use npm login locally or configure an NPM_TOKEN for this repo."
+      release_fail "npm publication auth unavailable: OIDC trusted publishing is only configured for paperclipai/paperclip. Use npm login locally or configure an NPM_TOKEN for this repo."
     fi
   fi
 
-  release_fail "npm publish auth is not available. Use 'npm login' locally or run from GitHub Actions with trusted publishing."
+  release_fail "npm publication auth is not available. Use 'npm login' locally or run from GitHub Actions with trusted publishing."
 }
 
 list_public_package_info() {

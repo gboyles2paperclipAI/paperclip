@@ -59,12 +59,21 @@ function parseArgs(argv) {
       continue;
     }
 
+    if (arg.startsWith("--otp=")) {
+      const value = arg.slice("--otp=".length);
+      if (!value) {
+        throw new Error("expected a one-time password after --otp");
+      }
+      otp = value;
+      continue;
+    }
+
     if (arg === "--help" || arg === "-h") {
       return { help: true, selector: null, publish: false, skipBuild: false, otp: null };
     }
 
     if (arg.startsWith("--")) {
-      throw new Error(`unknown option: ${arg}`);
+      throw new Error("unknown option provided");
     }
 
     if (selector) {
@@ -231,12 +240,12 @@ function publishPackage(staged, otp, commandRunner = runCommand) {
     result = commandRunner("pnpm", publishArgs);
   } catch {
     throw new Error(
-      "npm publish failed before completion. Command details were withheld because they may contain authentication material.",
+      "npm package publication failed before completion. Command details were withheld because they may contain authentication material.",
     );
   }
   if (!result || result.error) {
     throw new Error(
-      "npm publish failed before completion. Command details were withheld because they may contain authentication material.",
+      "npm package publication failed before completion. Command details were withheld because they may contain authentication material.",
     );
   }
   const stdout = result.stdout ?? "";
@@ -250,14 +259,14 @@ function publishPackage(staged, otp, commandRunner = runCommand) {
   if (/\bEOTP\b|one-time password/i.test(output)) {
     throw new Error(
       [
-        "npm publish reached the publish-time 2FA check.",
+        "npm package publication reached the publish-time 2FA check.",
         "Complete npm authentication separately and rerun with a fresh `--otp <code>` if your account uses authenticator-app codes.",
       ].join(" "),
     );
   }
 
   throw new Error(
-    "npm publish failed. Command output was withheld because it may contain authentication material.",
+    "npm package publication failed. Command output was withheld because it may contain authentication material.",
   );
 }
 

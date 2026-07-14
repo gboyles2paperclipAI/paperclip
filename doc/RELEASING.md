@@ -221,7 +221,7 @@ Instead:
 3. wait for the next automatic canary
 4. rerun smoke testing
 
-### If stable npm publish succeeds but tag push or GitHub release creation fails
+### If stable npm registry publication succeeds but tag push or GitHub release creation fails
 
 This is a partial release. npm is already live.
 

@@ -28,7 +28,7 @@ server/check-*.mjs
 server/seed-*.mjs
 packages/db/seed-*.mjs
 
-# npm publish build artifacts
+# npm package-release build artifacts
 cli/package.dev.json
 
 # Build artifacts in src directories

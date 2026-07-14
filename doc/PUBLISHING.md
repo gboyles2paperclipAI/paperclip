@@ -243,7 +243,7 @@ The helper script:
 - only publishes the same hash-verified tarball with `pnpm publish <tarball> --ignore-scripts --no-git-checks --access public` when `--publish --otp <code>` is provided
 
 The helper intentionally uses `pnpm pack` for lifecycle/workspace normalization,
-then `pnpm publish` for the already-scanned tarball sent to the registry.
+then sends the already-scanned tarball through pnpm's registry publication path.
 
 For the real `--publish` step, the maintainer machine must already be authenticated to npm.
 If `npm whoami` returns `401`, first run `npm logout --registry=https://registry.npmjs.org/` to clear any stale local auth, then run `npm login` or `npm adduser` locally as an npm org member, and finally rerun the helper.

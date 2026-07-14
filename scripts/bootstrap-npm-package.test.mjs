@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -30,6 +31,24 @@ test("parseArgs accepts an explicit otp value", () => {
     skipBuild: false,
     otp: "123456",
   });
+});
+
+test("parseArgs safely supports equals-form otp and redacts unknown options", () => {
+  assert.deepEqual(
+    parseArgs(["packages/adapters/acpx-local", "--publish", "--otp=123456"]),
+    {
+      help: false,
+      selector: "packages/adapters/acpx-local",
+      publish: true,
+      skipBuild: false,
+      otp: "123456",
+    },
+  );
+  assert.throws(() => parseArgs(["--otp="]), /expected a one-time password/);
+  assert.throws(
+    () => parseArgs(["--credential=SECRET_SENTINEL"]),
+    (error) => error.message === "unknown option provided",
+  );
 });
 
 test("parseArgs leaves otp null when omitted", () => {
@@ -156,5 +175,26 @@ test("publish failures never expose the otp or raw command output", () => {
     }
   } finally {
     rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("top-level option failures never expose split, equals, missing, or unknown otp values", () => {
+  const script = new URL("./bootstrap-npm-package.mjs", import.meta.url).pathname;
+  const sentinel = "OTP_OPTION_SENTINEL_817263";
+  const cases = [
+    ["--publish", "--otp", sentinel],
+    ["--publish", "--otp"],
+    ["--publish", `--otp=${sentinel}`],
+    ["--publish", `--otp-${sentinel}`],
+  ];
+  for (const args of cases) {
+    const result = spawnSync(process.execPath, [script, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    assert.notEqual(result.status, 0);
+    const observable = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    assert.doesNotMatch(observable, new RegExp(sentinel));
+    assert.doesNotMatch(observable, /--otp[-=]OTP_OPTION_SENTINEL/);
   }
 });
