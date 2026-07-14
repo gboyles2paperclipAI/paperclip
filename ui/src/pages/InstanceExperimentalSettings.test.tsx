@@ -188,17 +188,13 @@ describe("InstanceExperimentalSettings — Conference Room Chat card (PAP-11233)
     expect(warning?.textContent).toContain("no compatibility guarantees");
   });
 
-  it("enables the Apps UI from experimental settings", async () => {
+  it("does not render the Apps experimental setting for now", async () => {
     await renderPage();
 
-    const toggle = container.querySelector<HTMLButtonElement>(APPS_TOGGLE_SELECTOR);
-    expect(toggle?.getAttribute("aria-checked")).toBe("false");
-
-    await act(() => toggle?.click());
-    await flushReact();
-
-    expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenCalledWith({ enableApps: true });
-    expect(container.querySelector(APPS_TOGGLE_SELECTOR)?.getAttribute("aria-checked")).toBe("true");
+    const headings = [...container.querySelectorAll("section h2")].map((h) => h.textContent);
+    expect(headings).not.toContain("Apps");
+    expect(container.querySelector(APPS_TOGGLE_SELECTOR)).toBeNull();
+    expect(mockInstanceSettingsApi.updateExperimental).not.toHaveBeenCalled();
   });
 
   it("does not render the Conference Room Chat experimental setting for now", async () => {
