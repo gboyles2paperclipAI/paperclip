@@ -44,7 +44,7 @@ jobs:
         run: node .github/scripts/check-help2day-mvp-guardrails.mjs
 
       - name: Test stable-runner shard partition
-        run: node --test scripts/__tests__/run-vitest-stable-shard.test.mjs
+        run: node --test scripts/__tests__/run-vitest-stable-shard.test.mjs scripts/__tests__/fixture-process-lifecycle.test.mjs
 
       - name: Test release registry and immutable-package guards
         run: pnpm run test:release-registry
