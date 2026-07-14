@@ -61,3 +61,29 @@ test("shard flags are rejected for the parallel workspace groups", () => {
   const result = dryRun(["--mode", "general", "--group", "general-workspaces-a", "--shard-index", "0", "--shard-count", "3"]);
   assert.notEqual(result.status, 0, "workspace groups must not accept shard flags");
 });
+
+test("fixture cleanup terminates detached localhost children owned by a test root", () => {
+  const result = spawnSync(process.execPath, [script, "--fixture-cleanup-self-test"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /fixture-cleanup-self-test (?:ok|skipped: linux-only)/);
+});
+
+test("fixture cleanup consumes shutdown rejection before reporting poller failure", () => {
+  const result = spawnSync(
+    process.execPath,
+    ["--unhandled-rejections=strict", script, "--fixture-cleanup-runner-settlement-target"],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      timeout: 10_000,
+    },
+  );
+
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stdout, /fixture-cleanup-runner-settlement-target ok/);
+  assert.doesNotMatch(result.stderr, /UnhandledPromiseRejection|injected shutdown rejection/);
+});
