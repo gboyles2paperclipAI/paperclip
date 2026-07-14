@@ -118,11 +118,11 @@ function canonicalLiteralFragments(source) {
 function findProgrammaticPackagePublishOffenses(filePath, content) {
   const offenses = [];
   const directChildProcessCall =
-    /\b(?:spawn(?:Sync)?|exec(?:File)?(?:Sync|Async)?|execa(?:Sync)?)\s*\(\s*([\s\S]{1,120}?)\s*,\s*\[\s*([\s\S]{1,120}?)(?:,|\])/g;
+    /\b(?:spawn(?:Sync)?|exec(?:File)?(?:Sync|Async)?|execa(?:Sync)?)\s*\(\s*([\s\S]{1,120}?)\s*,\s*\[([\s\S]{0,600}?)\]/g;
   for (const match of content.matchAll(directChildProcessCall)) {
     if (
       /^(?:npm|pnpm)$/.test(canonicalLiteralFragments(match[1]) ?? "") &&
-      canonicalLiteralFragments(match[2]) === "publish"
+      match[2].split(",").some((element) => canonicalLiteralFragments(element) === "publish")
     ) {
       const lineNumber = content.slice(0, match.index).split(/\r?\n/).length;
       offenses.push(`${filePath}:${lineNumber}`);
@@ -135,7 +135,7 @@ export function findDirectPackagePublishOffenses(filePath, content) {
   if (/(?:^|\/)__tests__(?:\/|$)|\.test\.[^.]+$/.test(filePath)) return [];
   const offenses = new Set(findProgrammaticPackagePublishOffenses(filePath, content));
   for (const { lineNumber, text } of logicalLines(content)) {
-    const canonicalText = text.replace(/["']/g, "");
+    const canonicalText = text.replace(/\\(.)/g, "$1").replace(/["']/g, "");
     const matches = [...canonicalText.matchAll(/\b(?:npm|pnpm)\b/gi)];
     let unsafe = false;
     for (const match of matches) {
@@ -175,7 +175,7 @@ export function trackedTextFiles(exec = spawnSync) {
   return files;
 }
 
-test("every tracked non-test package-publish line visibly uses a verified tarball", () => {
+test("tracked literal package-publish commands stay on the verified tarball boundary", () => {
   const offenses = trackedTextFiles().flatMap((file) =>
     findDirectPackagePublishOffenses(file, readFileSync(join(repoRoot, file), "utf8")),
   );
@@ -274,6 +274,8 @@ test("global options and shell continuations cannot hide a direct directory publ
     "m pub\\",
     "lish . --access public",
     'n"pm" pub"lish" . --access public',
+    "n\\pm publish . --access public",
+    "npm pub\\lish . --access public",
   ].join("\n");
   assert.deepEqual(findDirectPackagePublishOffenses("scripts/example.sh", unsafe), [
     "scripts/example.sh:1",
@@ -287,15 +289,23 @@ test("global options and shell continuations cannot hide a direct directory publ
     "scripts/example.sh:9",
     "scripts/example.sh:11",
     "scripts/example.sh:14",
+    "scripts/example.sh:15",
+    "scripts/example.sh:16",
   ]);
 });
 
-test("literal child-process publication calls cannot bypass the canonical helpers", () => {
+test("common literal spawn, exec, and execa publication forms stay behind canonical helpers", () => {
   const source = [
     'spawnSync("npm", ["publish", "."]);',
     'execFileSync("pnpm", ["publish", "."]);',
     'execa("n" + "pm", ["pub" + "lish", "verified.tgz", "--ignore-scripts"]);',
     'spawn("pnpm", ["publish", "verified.tgz", "--ignore-scripts"]);',
+    'spawnSync("npm", ["--prefix", "cli", "publish", "."]);',
+    'execFileSync("pnpm", ["--filter=paperclipai", "publish", "."]);',
+    'execa("pnpm", ["-C", "cli", "publish", "."]);',
+    'execSync("npm publish .");',
+    'exec("pnpm publish .", callback);',
+    'execaCommand("npm publish .");',
     'spawnSync("npm", ["view", "paperclipai"]);',
     'spawnSync(command, args);',
     'commandRunner("pnpm", publishArgs);',
@@ -305,6 +315,12 @@ test("literal child-process publication calls cannot bypass the canonical helper
     "scripts/example.mjs:2",
     "scripts/example.mjs:3",
     "scripts/example.mjs:4",
+    "scripts/example.mjs:5",
+    "scripts/example.mjs:6",
+    "scripts/example.mjs:7",
+    "scripts/example.mjs:8",
+    "scripts/example.mjs:9",
+    "scripts/example.mjs:10",
   ]);
 });
 
