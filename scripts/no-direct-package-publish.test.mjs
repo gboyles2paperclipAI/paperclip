@@ -17,14 +17,43 @@ function unquote(token) {
   return token;
 }
 
+function tokenizeCommand(command) {
+  return command.match(/"[^"]*"|'[^']*'|\S+/g)?.map(unquote) ?? [];
+}
+
+function isPublishToken(token) {
+  return /^publish(?:["',.:-])?$/i.test(token ?? "");
+}
+
+function findPublishSubcommand(tokens) {
+  if (!/^(?:npm|pnpm)["']?$/i.test(tokens[0] ?? "")) return -1;
+  for (let index = 1; index < tokens.length; ) {
+    const token = tokens[index];
+    if (isPublishToken(token)) return index;
+    if (token === "--") {
+      index += 1;
+      continue;
+    }
+    if (!token.startsWith("-")) return -1;
+
+    if (token.includes("=") || tokens[index + 1]?.startsWith("-")) {
+      index += 1;
+      continue;
+    }
+    if (tokens[index + 1] && !isPublishToken(tokens[index + 1])) {
+      index += 2;
+      continue;
+    }
+    index += 1;
+  }
+  return -1;
+}
+
 function isVerifiedTarballPublishCommand(command) {
-  const prefix = command.match(/^\s*(?:npm|pnpm)\s+publish\b/i);
-  if (!prefix) return false;
-  const tokens = command
-    .slice(prefix[0].length)
-    .match(/"[^"]*"|'[^']*'|\S+/g)
-    ?.map(unquote) ?? [];
-  const operand = tokens.shift();
+  const tokens = tokenizeCommand(command);
+  const publishIndex = findPublishSubcommand(tokens);
+  if (publishIndex === -1) return null;
+  const operand = tokens[publishIndex + 1];
   if (
     !operand ||
     !(
@@ -39,7 +68,7 @@ function isVerifiedTarballPublishCommand(command) {
   const booleanOptions = new Set(["--dry-run", "--ignore-scripts", "--no-git-checks"]);
   const valueOptions = new Set(["--access", "--tag"]);
   let disablesLifecycle = false;
-  for (let index = 0; index < tokens.length; index += 1) {
+  for (let index = publishIndex + 2; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (booleanOptions.has(token)) {
       if (token === "--ignore-scripts") disablesLifecycle = true;
@@ -54,33 +83,48 @@ function isVerifiedTarballPublishCommand(command) {
   }
   return disablesLifecycle;
 }
+
+function logicalLines(content) {
+  const physicalLines = content.split(/\r?\n/);
+  const lines = [];
+  for (let index = 0; index < physicalLines.length; index += 1) {
+    const lineNumber = index + 1;
+    let text = physicalLines[index];
+    while (text.endsWith("\\") && index + 1 < physicalLines.length) {
+      text = `${text.slice(0, -1)} ${physicalLines[index + 1]}`;
+      index += 1;
+    }
+    lines.push({ lineNumber, text });
+  }
+  return lines;
+}
+
 export function findDirectPackagePublishOffenses(filePath, content) {
   if (/(?:^|\/)__tests__(?:\/|$)|\.test\.[^.]+$/.test(filePath)) return [];
   const offenses = [];
-  for (const [index, line] of content.split(/\r?\n/).entries()) {
-    const matches = [...line.matchAll(/\b(?:npm|pnpm)\s+publish\b/gi)];
+  for (const { lineNumber, text } of logicalLines(content)) {
+    const matches = [...text.matchAll(/\b(?:npm|pnpm)\b/gi)];
     let unsafe = false;
-    for (const [matchIndex, match] of matches.entries()) {
-      const nextPublishIndex = matches[matchIndex + 1]?.index ?? line.length;
-      const remaining = line.slice(match.index, nextPublishIndex);
-      const separatorIndex = remaining.search(/&&|\|\||[|&;#`]|\s\d*>/);
+    for (const match of matches) {
+      const remaining = text.slice(match.index);
+      const separatorIndex = remaining.search(/&&|\|\||[|&;#`)]|\s\d*>/);
       const command = separatorIndex === -1 ? remaining : remaining.slice(0, separatorIndex);
-      if (!isVerifiedTarballPublishCommand(command)) {
+      if (isVerifiedTarballPublishCommand(command) === false) {
         unsafe = true;
         break;
       }
     }
     if (unsafe) {
-      offenses.push(`${filePath}:${index + 1}`);
+      offenses.push(`${filePath}:${lineNumber}`);
     }
   }
   return offenses;
 }
 
-export function trackedFilesContainingPackagePublish(exec = spawnSync) {
+export function trackedTextFilesContainingPackageClient(exec = spawnSync) {
   const result = exec(
     "git",
-    ["grep", "-Ilz", "-E", "(npm|pnpm)[[:space:]]+publish", "--", "."],
+    ["grep", "-Ilz", "-E", "(npm|pnpm)", "--", "."],
     { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   );
   if (result?.error || result?.signal || ![0, 1].includes(result?.status)) {
@@ -95,7 +139,7 @@ export function trackedFilesContainingPackagePublish(exec = spawnSync) {
 }
 
 test("every tracked non-test package-publish line visibly uses a verified tarball", () => {
-  const offenses = trackedFilesContainingPackagePublish().flatMap((file) =>
+  const offenses = trackedTextFilesContainingPackageClient().flatMap((file) =>
     findDirectPackagePublishOffenses(file, readFileSync(join(repoRoot, file), "utf8")),
   );
   assert.deepEqual(offenses, []);
@@ -140,6 +184,8 @@ test("guard catches direct shell, documentation, and generated-output publish in
 test("guard permits verified tarball helpers and non-command prose", () => {
   const safe = [
     'pnpm publish "$tarball_path" --ignore-scripts --access public',
+    "pnpm --dir cli publish verified.tgz --ignore-scripts --access public",
+    '"pnpm" publish verified.tgz --ignore-scripts',
     "`pnpm publish <tarball> --ignore-scripts --access public`",
   ].join("\n");
   assert.deepEqual(findDirectPackagePublishOffenses("doc/example.md", safe), []);
@@ -175,11 +221,37 @@ test("pipes, background commands, option values, and extra operands cannot mimic
   ]);
 });
 
-test("tracked-file enumeration treats only git-grep status 1 as an empty set", () => {
+test("global options and shell continuations cannot hide a direct directory publish", () => {
+  const unsafe = [
+    "npm --prefix cli publish --access public",
+    "pnpm --dir cli publish --access public",
+    "pnpm -C cli publish --access public",
+    "pnpm --filter paperclipai publish --access public",
+    "npm -- publish . --access public",
+    "pnpm -- publish . --access public",
+    '\"npm\" publish . --access public',
+    "'pnpm' publish . --access public",
+    "npm \\",
+    "publish . --access public",
+  ].join("\n");
+  assert.deepEqual(findDirectPackagePublishOffenses("scripts/example.sh", unsafe), [
+    "scripts/example.sh:1",
+    "scripts/example.sh:2",
+    "scripts/example.sh:3",
+    "scripts/example.sh:4",
+    "scripts/example.sh:5",
+    "scripts/example.sh:6",
+    "scripts/example.sh:7",
+    "scripts/example.sh:8",
+    "scripts/example.sh:9",
+  ]);
+});
+
+test("tracked-text enumeration treats only git-grep status 1 as an empty set", () => {
   const options = { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] };
-  const args = ["grep", "-Ilz", "-E", "(npm|pnpm)[[:space:]]+publish", "--", "."];
+  const args = ["grep", "-Ilz", "-E", "(npm|pnpm)", "--", "."];
   assert.deepEqual(
-    trackedFilesContainingPackagePublish((command, actualArgs, actualOptions) => {
+    trackedTextFilesContainingPackageClient((command, actualArgs, actualOptions) => {
       assert.equal(command, "git");
       assert.deepEqual(actualArgs, args);
       assert.deepEqual(actualOptions, options);
@@ -189,7 +261,7 @@ test("tracked-file enumeration treats only git-grep status 1 as an empty set", (
   );
   assert.throws(
     () =>
-      trackedFilesContainingPackagePublish(() => ({
+      trackedTextFilesContainingPackageClient(() => ({
         status: 2,
         stdout: "",
         stderr: "fatal detail that must not be surfaced",
@@ -198,7 +270,7 @@ test("tracked-file enumeration treats only git-grep status 1 as an empty set", (
   );
   assert.throws(
     () =>
-      trackedFilesContainingPackagePublish(() => ({
+      trackedTextFilesContainingPackageClient(() => ({
         status: 0,
         stdout: "",
         stderr: "",
