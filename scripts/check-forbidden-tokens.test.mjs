@@ -9,6 +9,7 @@ import {
   runForbiddenTokenCheck,
   runForbiddenTokenFileCheck,
 } from "./check-forbidden-tokens.mjs";
+import { getReleasePackages } from "./release-package-map.mjs";
 
 const forbidden = "account_fixture_6394";
 
@@ -99,7 +100,8 @@ test("publishable README content containing a case-varied forbidden reference fa
 test("publishable file names containing a forbidden account reference fail closed", () => {
   const fixture = makePackageFixture();
   try {
-    writeFileSync(join(fixture.packageDir, "dist", `${forbidden}.js`), "export {};\n");
+    const rawRelativePath = `package/dist/${forbidden}-diagnostic.js`;
+    writeFileSync(join(fixture.packageDir, "dist", `${forbidden}-diagnostic.js`), "export {};\n");
     const files = resolveNpmPackageFiles(fixture.packageDir);
     const errors = [];
     const status = runForbiddenTokenFileCheck({
@@ -110,8 +112,10 @@ test("publishable file names containing a forbidden account reference fail close
       error: (message) => errors.push(message),
     });
     assert.equal(status, 1);
-    assert.match(errors.join("\n"), /\[REDACTED publishable path\]/);
-    assert.doesNotMatch(errors.join("\n"), new RegExp(forbidden, "i"));
+    const output = errors.join("\n");
+    assert.match(output, /\[REDACTED publishable path\]/);
+    assert.doesNotMatch(output, new RegExp(forbidden, "i"));
+    assert.doesNotMatch(output, new RegExp(rawRelativePath, "i"));
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -157,6 +161,23 @@ test("tracked-tree scanner reports locations without echoing matched values", ()
   assert.doesNotMatch(errors.join("\n"), new RegExp(forbidden, "i"));
 });
 
+test("tracked-tree scanner redacts token-bearing diagnostic paths", () => {
+  const rawPath = `docs/${forbidden}-evidence.txt`;
+  const errors = [];
+  const status = runForbiddenTokenCheck({
+    repoRoot: "/tmp/example",
+    tokens: [forbidden],
+    exec: () => `${rawPath}:7:/home/${forbidden}/runtime\n`,
+    log: () => {},
+    error: (message) => errors.push(message),
+  });
+  assert.equal(status, 1);
+  const output = errors.join("\n");
+  assert.match(output, /\[REDACTED tracked path\]:7:\[REDACTED forbidden token\]/);
+  assert.doesNotMatch(output, new RegExp(forbidden, "i"));
+  assert.doesNotMatch(output, new RegExp(rawPath, "i"));
+});
+
 test("canonical release path preserves the publishable-package forbidden-token gate", () => {
   const releaseScript = readFileSync(join(import.meta.dirname, "release.sh"), "utf8");
   const buildInvocations = releaseScript
@@ -165,4 +186,32 @@ test("canonical release path preserves the publishable-package forbidden-token g
 
   assert.deepEqual(buildInvocations, ['"$REPO_ROOT/scripts/build-npm.sh" --skip-typecheck']);
   assert.doesNotMatch(releaseScript, /build-npm\.sh[^\n]*--skip-checks/);
+});
+
+test("canonical release scans every enabled package before any publish command", () => {
+  const releasePackages = getReleasePackages();
+  assert.equal(releasePackages.length, 30);
+  assert.equal(releasePackages.filter((pkg) => pkg.dir !== "cli").length, 29);
+
+  const releaseScript = readFileSync(join(import.meta.dirname, "release.sh"), "utf8");
+  const versionedInfoIndex = releaseScript.indexOf(
+    'VERSIONED_PACKAGE_INFO="$(list_public_package_info)"',
+  );
+  const scanInvocation =
+    'node "$REPO_ROOT/scripts/check-forbidden-tokens.mjs" --npm-package-dir "$REPO_ROOT/$pkg_dir"';
+  const scanIndex = releaseScript.indexOf(scanInvocation);
+  const scanLoopEndIndex = releaseScript.indexOf('done <<< "$VERSIONED_PACKAGE_INFO"', scanIndex);
+
+  assert.notEqual(versionedInfoIndex, -1);
+  assert.ok(scanIndex > versionedInfoIndex);
+  assert.ok(scanLoopEndIndex > scanIndex);
+
+  const publishCommands = [
+    ...releaseScript.matchAll(/\bpnpm publish\b|\bpublish_package_to_npm\b/g),
+  ];
+  assert.ok(publishCommands.length > 0);
+  assert.ok(
+    publishCommands.every((match) => match.index > scanLoopEndIndex),
+    "every dry-run or real publish must occur after the complete package-scan loop",
+  );
 });

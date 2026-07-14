@@ -63,6 +63,11 @@ export function resolvePathExcludes(repoRoot) {
   return readPathExcludesFile(join(repoRoot, "scripts/forbidden-tokens-path-excludes.txt"));
 }
 
+function redactDiagnosticPath(path, normalizedTokens, fallback) {
+  const normalizedPath = path.toLocaleLowerCase("en-US");
+  return normalizedTokens.some((token) => normalizedPath.includes(token)) ? fallback : path;
+}
+
 export function runForbiddenTokenCheck({
   repoRoot,
   tokens,
@@ -76,6 +81,7 @@ export function runForbiddenTokenCheck({
     return 0;
   }
 
+  const normalizedTokens = tokens.map((token) => token.toLocaleLowerCase("en-US"));
   let found = false;
 
   for (const token of tokens) {
@@ -95,8 +101,11 @@ export function runForbiddenTokenCheck({
         const lines = result.trim().split("\n");
         for (const line of lines) {
           const match = line.match(/^(.+?):(\d+):/);
+          const displayPath = match
+            ? redactDiagnosticPath(match[1], normalizedTokens, "[REDACTED tracked path]")
+            : "tracked file";
           error(
-            `  ${match ? `${match[1]}:${match[2]}` : "tracked file"}:[REDACTED forbidden token]`,
+            `  ${match ? `${displayPath}:${match[2]}` : displayPath}:[REDACTED forbidden token]`,
           );
         }
       }
@@ -186,10 +195,12 @@ export function runForbiddenTokenFileCheck({
 
   for (const file of files) {
     const displayPath = relative(displayRoot, file) || file;
-    const pathContainsToken = normalizedTokens.some((token) =>
-      displayPath.toLocaleLowerCase("en-US").includes(token),
+    const safeDisplayPath = redactDiagnosticPath(
+      displayPath,
+      normalizedTokens,
+      "[REDACTED publishable path]",
     );
-    const safeDisplayPath = pathContainsToken ? "[REDACTED publishable path]" : displayPath;
+    const pathContainsToken = safeDisplayPath !== displayPath;
     if (pathContainsToken) {
       if (!found) error("ERROR: Forbidden tokens found in publishable package files:\n");
       found = true;

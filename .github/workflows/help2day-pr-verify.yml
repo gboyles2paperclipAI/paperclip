@@ -46,6 +46,9 @@ jobs:
       - name: Test stable-runner shard partition
         run: node --test scripts/__tests__/run-vitest-stable-shard.test.mjs
 
+      - name: Test package scanner and canonical release guards
+        run: node --test scripts/check-forbidden-tokens.test.mjs
+
       - name: Check diff whitespace
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}

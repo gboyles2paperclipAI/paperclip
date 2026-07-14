@@ -36,14 +36,16 @@ Run:
 
 This script:
 
-1. runs the forbidden token check unless `--skip-checks` is supplied
-2. runs `pnpm -r typecheck`
-3. bundles the CLI entrypoint with esbuild into `cli/dist/index.js`
-4. verifies the bundled entrypoint with `node --check`
-5. rewrites `cli/package.json` into a publishable npm manifest and stores the dev copy as `cli/package.dev.json`
-6. copies the repo `README.md` into `cli/README.md` for npm metadata
+1. runs `pnpm -r typecheck`
+2. bundles the CLI entrypoint with esbuild into `cli/dist/index.js`
+3. verifies the bundled entrypoint with `node --check`
+4. rewrites `cli/package.json` into a publishable npm manifest and stores the dev copy as `cli/package.dev.json`
+5. copies the repo `README.md` into `cli/README.md` for npm metadata
+6. derives the exact CLI file manifest from `npm pack --dry-run --json --ignore-scripts` and scans every listed file for forbidden tokens unless `--skip-checks` is supplied
 
 After the release script exits, the dev manifest and temporary files are restored automatically.
+The canonical [`scripts/release.sh`](../scripts/release.sh) path does not pass
+`--skip-checks`.
 
 ## Package discovery and versioning
 
@@ -63,6 +65,19 @@ The version rewrite step now uses [`scripts/release-package-map.mjs`](../scripts
 - updates the CLI's displayed version string
 
 Those rewrites are temporary. The working tree is restored after publish or dry-run.
+
+After all workspace artifacts are built, versions are rewritten, and the CLI's
+publish manifest is assembled, the canonical release flow derives and scans the
+npm file manifest for every package with `publishFromCi: true`. The scan loop
+finishes before the first dry-run or real `pnpm publish` command. An unsafe,
+empty, or unresolvable manifest, or a forbidden token in any listed file or
+path, stops the release before any package is published. The current manifest
+contains 30 release-enabled packages, including the CLI and 29 non-CLI
+packages; future enabled packages enter the same loop automatically.
+
+The required `help2day/main` pull-request workflow runs the package-scanner
+regressions, including the guard that prevents the canonical release path from
+bypassing or reordering these checks.
 
 ## `@paperclipai/ui` packaging
 
