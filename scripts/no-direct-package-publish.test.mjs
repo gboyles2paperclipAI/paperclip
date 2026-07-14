@@ -91,7 +91,7 @@ function logicalLines(content) {
     const lineNumber = index + 1;
     let text = physicalLines[index];
     while (text.endsWith("\\") && index + 1 < physicalLines.length) {
-      text = `${text.slice(0, -1)} ${physicalLines[index + 1]}`;
+      text = `${text.slice(0, -1)}${physicalLines[index + 1]}`;
       index += 1;
     }
     lines.push({ lineNumber, text });
@@ -121,10 +121,10 @@ export function findDirectPackagePublishOffenses(filePath, content) {
   return offenses;
 }
 
-export function trackedTextFilesContainingPackageClient(exec = spawnSync) {
+export function trackedTextFiles(exec = spawnSync) {
   const result = exec(
     "git",
-    ["grep", "-Ilz", "-E", "(npm|pnpm)", "--", "."],
+    ["grep", "-Ilz", "-e", "", "--", "."],
     { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   );
   if (result?.error || result?.signal || ![0, 1].includes(result?.status)) {
@@ -139,7 +139,7 @@ export function trackedTextFilesContainingPackageClient(exec = spawnSync) {
 }
 
 test("every tracked non-test package-publish line visibly uses a verified tarball", () => {
-  const offenses = trackedTextFilesContainingPackageClient().flatMap((file) =>
+  const offenses = trackedTextFiles().flatMap((file) =>
     findDirectPackagePublishOffenses(file, readFileSync(join(repoRoot, file), "utf8")),
   );
   assert.deepEqual(offenses, []);
@@ -233,6 +233,9 @@ test("global options and shell continuations cannot hide a direct directory publ
     "'pnpm' publish . --access public",
     "npm \\",
     "publish . --access public",
+    "np\\",
+    "m pub\\",
+    "lish . --access public",
   ].join("\n");
   assert.deepEqual(findDirectPackagePublishOffenses("scripts/example.sh", unsafe), [
     "scripts/example.sh:1",
@@ -244,14 +247,15 @@ test("global options and shell continuations cannot hide a direct directory publ
     "scripts/example.sh:7",
     "scripts/example.sh:8",
     "scripts/example.sh:9",
+    "scripts/example.sh:11",
   ]);
 });
 
 test("tracked-text enumeration treats only git-grep status 1 as an empty set", () => {
   const options = { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] };
-  const args = ["grep", "-Ilz", "-E", "(npm|pnpm)", "--", "."];
+  const args = ["grep", "-Ilz", "-e", "", "--", "."];
   assert.deepEqual(
-    trackedTextFilesContainingPackageClient((command, actualArgs, actualOptions) => {
+    trackedTextFiles((command, actualArgs, actualOptions) => {
       assert.equal(command, "git");
       assert.deepEqual(actualArgs, args);
       assert.deepEqual(actualOptions, options);
@@ -261,7 +265,7 @@ test("tracked-text enumeration treats only git-grep status 1 as an empty set", (
   );
   assert.throws(
     () =>
-      trackedTextFilesContainingPackageClient(() => ({
+      trackedTextFiles(() => ({
         status: 2,
         stdout: "",
         stderr: "fatal detail that must not be surfaced",
@@ -270,7 +274,7 @@ test("tracked-text enumeration treats only git-grep status 1 as an empty set", (
   );
   assert.throws(
     () =>
-      trackedTextFilesContainingPackageClient(() => ({
+      trackedTextFiles(() => ({
         status: 0,
         stdout: "",
         stderr: "",
