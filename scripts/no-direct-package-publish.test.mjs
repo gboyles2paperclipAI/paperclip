@@ -99,14 +99,47 @@ function logicalLines(content) {
   return lines;
 }
 
+function canonicalLiteralFragments(source) {
+  const text = source.trim();
+  const fragments = [...text.matchAll(/(["'`])([^"'`]*)\1/g)];
+  if (fragments.length === 0) return null;
+  let offset = 0;
+  let value = "";
+  for (const fragment of fragments) {
+    const separator = text.slice(offset, fragment.index);
+    if (offset === 0 ? separator.trim() : !/^\s*\+\s*$/.test(separator)) return null;
+    value += fragment[2];
+    offset = fragment.index + fragment[0].length;
+  }
+  if (text.slice(offset).trim()) return null;
+  return value.toLowerCase();
+}
+
+function findProgrammaticPackagePublishOffenses(filePath, content) {
+  const offenses = [];
+  const directChildProcessCall =
+    /\b(?:spawn(?:Sync)?|exec(?:File)?(?:Sync|Async)?|execa(?:Sync)?)\s*\(\s*([\s\S]{1,120}?)\s*,\s*\[\s*([\s\S]{1,120}?)(?:,|\])/g;
+  for (const match of content.matchAll(directChildProcessCall)) {
+    if (
+      /^(?:npm|pnpm)$/.test(canonicalLiteralFragments(match[1]) ?? "") &&
+      canonicalLiteralFragments(match[2]) === "publish"
+    ) {
+      const lineNumber = content.slice(0, match.index).split(/\r?\n/).length;
+      offenses.push(`${filePath}:${lineNumber}`);
+    }
+  }
+  return offenses;
+}
+
 export function findDirectPackagePublishOffenses(filePath, content) {
   if (/(?:^|\/)__tests__(?:\/|$)|\.test\.[^.]+$/.test(filePath)) return [];
-  const offenses = [];
+  const offenses = new Set(findProgrammaticPackagePublishOffenses(filePath, content));
   for (const { lineNumber, text } of logicalLines(content)) {
-    const matches = [...text.matchAll(/\b(?:npm|pnpm)\b/gi)];
+    const canonicalText = text.replace(/["']/g, "");
+    const matches = [...canonicalText.matchAll(/\b(?:npm|pnpm)\b/gi)];
     let unsafe = false;
     for (const match of matches) {
-      const remaining = text.slice(match.index);
+      const remaining = canonicalText.slice(match.index);
       const separatorIndex = remaining.search(/&&|\|\||[|&;#`)]|\s\d*>/);
       const command = separatorIndex === -1 ? remaining : remaining.slice(0, separatorIndex);
       if (isVerifiedTarballPublishCommand(command) === false) {
@@ -115,10 +148,14 @@ export function findDirectPackagePublishOffenses(filePath, content) {
       }
     }
     if (unsafe) {
-      offenses.push(`${filePath}:${lineNumber}`);
+      offenses.add(`${filePath}:${lineNumber}`);
     }
   }
-  return offenses;
+  return [...offenses].sort((left, right) => {
+    const leftLine = Number(left.slice(left.lastIndexOf(":") + 1));
+    const rightLine = Number(right.slice(right.lastIndexOf(":") + 1));
+    return leftLine - rightLine;
+  });
 }
 
 export function trackedTextFiles(exec = spawnSync) {
@@ -236,6 +273,7 @@ test("global options and shell continuations cannot hide a direct directory publ
     "np\\",
     "m pub\\",
     "lish . --access public",
+    'n"pm" pub"lish" . --access public',
   ].join("\n");
   assert.deepEqual(findDirectPackagePublishOffenses("scripts/example.sh", unsafe), [
     "scripts/example.sh:1",
@@ -248,6 +286,25 @@ test("global options and shell continuations cannot hide a direct directory publ
     "scripts/example.sh:8",
     "scripts/example.sh:9",
     "scripts/example.sh:11",
+    "scripts/example.sh:14",
+  ]);
+});
+
+test("literal child-process publication calls cannot bypass the canonical helpers", () => {
+  const source = [
+    'spawnSync("npm", ["publish", "."]);',
+    'execFileSync("pnpm", ["publish", "."]);',
+    'execa("n" + "pm", ["pub" + "lish", "verified.tgz", "--ignore-scripts"]);',
+    'spawn("pnpm", ["publish", "verified.tgz", "--ignore-scripts"]);',
+    'spawnSync("npm", ["view", "paperclipai"]);',
+    'spawnSync(command, args);',
+    'commandRunner("pnpm", publishArgs);',
+  ].join("\n");
+  assert.deepEqual(findDirectPackagePublishOffenses("scripts/example.mjs", source), [
+    "scripts/example.mjs:1",
+    "scripts/example.mjs:2",
+    "scripts/example.mjs:3",
+    "scripts/example.mjs:4",
   ]);
 });
 
