@@ -9,10 +9,21 @@ export function findDirectPackagePublishOffenses(filePath, content) {
   if (/(?:^|\/)__tests__(?:\/|$)|\.test\.[^.]+$/.test(filePath)) return [];
   const offenses = [];
   for (const [index, line] of content.split(/\r?\n/).entries()) {
-    if (!/\b(?:npm|pnpm)\s+publish\b/i.test(line)) continue;
-    const usesTarball = /(?:<tarball>|\$\{?tarball|[\w./-]+\.tgz\b)/i.test(line);
-    const disablesLifecycle = /--ignore-scripts\b/.test(line);
-    if (!usesTarball || !disablesLifecycle) {
+    const matches = [...line.matchAll(/\b(?:npm|pnpm)\s+publish\b/gi)];
+    let unsafe = false;
+    for (const [matchIndex, match] of matches.entries()) {
+      const nextPublishIndex = matches[matchIndex + 1]?.index ?? line.length;
+      const remaining = line.slice(match.index, nextPublishIndex);
+      const separatorIndex = remaining.search(/&&|\|\||;|#/);
+      const command = separatorIndex === -1 ? remaining : remaining.slice(0, separatorIndex);
+      const usesTarball = /(?:<tarball>|\$\{?tarball|[\w./-]+\.tgz\b)/i.test(command);
+      const disablesLifecycle = /--ignore-scripts\b/.test(command);
+      if (!usesTarball || !disablesLifecycle) {
+        unsafe = true;
+        break;
+      }
+    }
+    if (unsafe) {
       offenses.push(`${filePath}:${index + 1}`);
     }
   }
@@ -29,7 +40,11 @@ export function trackedFilesContainingPackagePublish(exec = spawnSync) {
     throw new Error("tracked package-publication scan failed before completion");
   }
   if (result.status === 1) return [];
-  return result.stdout.split("\0").filter(Boolean);
+  const files = result.stdout.split("\0").filter(Boolean);
+  if (files.length === 0) {
+    throw new Error("tracked package-publication scan returned an invalid successful result");
+  }
+  return files;
 }
 
 test("every tracked non-test package-publish line visibly uses a verified tarball", () => {
@@ -83,6 +98,19 @@ test("guard permits verified tarball helpers and non-command prose", () => {
   assert.deepEqual(findDirectPackagePublishOffenses("doc/example.md", safe), []);
 });
 
+test("a safe command or comment cannot launder an unsafe publish on the same line", () => {
+  const camouflaged = [
+    "npm publish .; pnpm publish verified.tgz --ignore-scripts",
+    "npm publish . || pnpm publish verified.tgz --ignore-scripts",
+    "npm publish . # pnpm publish verified.tgz --ignore-scripts",
+  ].join("\n");
+  assert.deepEqual(findDirectPackagePublishOffenses("scripts/example.sh", camouflaged), [
+    "scripts/example.sh:1",
+    "scripts/example.sh:2",
+    "scripts/example.sh:3",
+  ]);
+});
+
 test("tracked-file enumeration treats only git-grep status 1 as an empty set", () => {
   const options = { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] };
   const args = ["grep", "-Ilz", "-E", "(npm|pnpm)[[:space:]]+publish", "--", "."];
@@ -103,5 +131,14 @@ test("tracked-file enumeration treats only git-grep status 1 as an empty set", (
         stderr: "fatal detail that must not be surfaced",
       })),
     /scan failed before completion/,
+  );
+  assert.throws(
+    () =>
+      trackedFilesContainingPackagePublish(() => ({
+        status: 0,
+        stdout: "",
+        stderr: "",
+      })),
+    /invalid successful result/,
   );
 });
