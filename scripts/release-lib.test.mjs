@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,9 +17,13 @@ function runPublishHelper({ pnpmMode, npmVersionExists = false, distTag = "canar
   const binDir = join(fixtureDir, "bin");
   const stateDir = join(fixtureDir, "state");
   const callLog = join(fixtureDir, "calls.log");
+  const tarballPath = join(fixtureDir, "paperclipai-example-1.2.3.tgz");
+  const tarballBytes = "fake package tarball";
+  const tarballSha256 = createHash("sha256").update(tarballBytes).digest("hex");
   mkdirSync(binDir);
   mkdirSync(stateDir);
   writeFileSync(callLog, "");
+  writeFileSync(tarballPath, tarballBytes);
 
   writeExecutable(
     join(binDir, "pnpm"),
@@ -79,7 +84,7 @@ exit 1
   const script = `
 ${shellOptions}
 source "${repoRoot}/scripts/release-lib.sh"
-publish_package_to_npm ${distTag} @paperclipai/example 1.2.3
+publish_package_to_npm ${distTag} @paperclipai/example 1.2.3 "${tarballPath}" ${tarballSha256}
 `;
 
   let status = 0;
@@ -115,7 +120,10 @@ test("publish_package_to_npm returns after a successful pnpm publish", () => {
   const result = runPublishHelper({ pnpmMode: "success" });
 
   assert.equal(result.status, 0);
-  assert.match(result.calls, /^pnpm publish --no-git-checks --tag canary --access public$/m);
+  assert.match(
+    result.calls,
+    /^pnpm publish .+paperclipai-example-1\.2\.3\.tgz --ignore-scripts --no-git-checks --tag canary --access public$/m,
+  );
   assert.doesNotMatch(result.calls, /npm view/);
   assert.doesNotMatch(result.calls, /--provenance=false/);
 });
@@ -127,7 +135,7 @@ test("publish_package_to_npm retries duplicate tlog failures without provenance"
   assert.match(result.calls, /^npm view @paperclipai\/example@1\.2\.3 version$/m);
   assert.match(
     result.calls,
-    /^pnpm publish --no-git-checks --tag canary --access public --provenance=false$/m,
+    /^pnpm publish .+paperclipai-example-1\.2\.3\.tgz --ignore-scripts --no-git-checks --tag canary --access public --provenance=false$/m,
   );
 });
 

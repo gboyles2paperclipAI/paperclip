@@ -36,15 +36,15 @@ Committed source changes:
 
 Live packaged runtime changes:
 
-- `/home/paperclipadmin/.local/share/node/node-v22.22.3-linux-x64/lib/node_modules/@paperclipai/server/dist/services/heartbeat.js`
-- `/home/paperclipadmin/.local/share/node/node-v22.22.3-linux-x64/lib/node_modules/@paperclipai/server/ui-dist`
-- `/home/paperclipadmin/.local/share/node/node-v22.22.3-linux-x64/lib/node_modules/@paperclipai/shared/dist/validators/issue.js`
+- `[REDACTED_FORBIDDEN_TOKEN]/.local/share/node/node-v22.22.3-linux-x64/lib/node_modules/@paperclipai/server/dist/services/heartbeat.js`
+- `[REDACTED_FORBIDDEN_TOKEN]/.local/share/node/node-v22.22.3-linux-x64/lib/node_modules/@paperclipai/server/ui-dist`
+- `[REDACTED_FORBIDDEN_TOKEN]/.local/share/node/node-v22.22.3-linux-x64/lib/node_modules/@paperclipai/shared/dist/validators/issue.js`
 
 Backups:
 
-- `/home/paperclipadmin/.local/share/node/node-v22.22.3-linux-x64/lib/node_modules/@paperclipai/server/dist/services/heartbeat.js.backup-concurrency-20260702T2324Z`
-- `/home/paperclipadmin/.local/share/node/node-v22.22.3-linux-x64/lib/node_modules/@paperclipai/server/ui-dist.backup-inbox-all-20260702T233441Z`
-- `/home/paperclipadmin/.local/share/node/node-v22.22.3-linux-x64/lib/node_modules/@paperclipai/shared/dist/validators/issue.js.backup-request-confirmation-20260702T233930Z`
+- `[REDACTED_FORBIDDEN_TOKEN]/.local/share/node/node-v22.22.3-linux-x64/lib/node_modules/@paperclipai/server/dist/services/heartbeat.js.backup-concurrency-20260702T2324Z`
+- `[REDACTED_FORBIDDEN_TOKEN]/.local/share/node/node-v22.22.3-linux-x64/lib/node_modules/@paperclipai/server/ui-dist.backup-inbox-all-20260702T233441Z`
+- `[REDACTED_FORBIDDEN_TOKEN]/.local/share/node/node-v22.22.3-linux-x64/lib/node_modules/@paperclipai/shared/dist/validators/issue.js.backup-request-confirmation-20260702T233930Z`
 
 ## Commits
 
@@ -104,7 +104,7 @@ Active/open issues:
 
 No Node fatal report exists in `/var/lib/paperclip-node-diagnostics`, so OOM/leak classification remains `unknown/no report yet`. The leak is not declared fixed. Existing OOM evidence helper/runbook remains:
 
-- `/home/paperclipadmin/paperclip-src/scripts/collect-paperclip-oom-evidence-20260702.sh`
+- `[REDACTED_FORBIDDEN_TOKEN]/paperclip-src/scripts/collect-paperclip-oom-evidence-20260702.sh`
 
 ## Remaining Risks
 
