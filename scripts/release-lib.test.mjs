@@ -84,7 +84,7 @@ publish_package_to_npm ${distTag} @paperclipai/example 1.2.3
   let status = 0;
   let output = "";
   try {
-    output = execFileSync("bash", ["-lc", script], {
+    output = execFileSync("bash", ["-c", script], {
       cwd: fixtureDir,
       encoding: "utf8",
       env: {

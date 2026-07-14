@@ -235,7 +235,7 @@ release_info "  ✓ Versioned workspace to $TARGET_PUBLISH_VERSION"
 
 release_info ""
 release_info "==> Step 4/7: Building publishable CLI bundle..."
-"$REPO_ROOT/scripts/build-npm.sh" --skip-checks --skip-typecheck
+"$REPO_ROOT/scripts/build-npm.sh" --skip-typecheck
 release_info "  ✓ CLI bundle ready"
 
 VERSIONED_PACKAGE_INFO="$(list_public_package_info)"
