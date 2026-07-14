@@ -10,6 +10,7 @@ import {
   updateAgentInstructionsBundleSchema,
   upsertAgentInstructionsFileSchema,
   createAgentKeySchema,
+  agentApiKeyScopeSchema,
   wakeAgentSchema,
   resetAgentSessionSchema,
   agentSkillSyncSchema,
@@ -508,6 +509,33 @@ const environmentCustomImageTemplateRollbackResultSchema = z.object({
   supersededTemplate: environmentCustomImageTemplateSchema,
 }).strict();
 
+const agentApiKeyCreationProvenanceResponseSchema = z.object({
+  actorType: z.enum(["user", "system", "unknown"]),
+  actorId: z.string().nullable(),
+  source: z.enum([
+    "local_implicit",
+    "session",
+    "board_key",
+    "cloud_tenant",
+    "join_request_claim",
+    "unknown",
+  ]),
+}).strict();
+
+const agentApiKeyInventoryResponseSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  scope: agentApiKeyScopeSchema,
+  creation: agentApiKeyCreationProvenanceResponseSchema,
+  createdAt: z.string().datetime(),
+  lastUsedAt: z.string().datetime().nullable(),
+  revokedAt: z.string().datetime().nullable(),
+}).strict();
+
+const agentApiKeyCreatedResponseSchema = agentApiKeyInventoryResponseSchema.extend({
+  token: z.string().min(1),
+}).strict();
+
 function paramsSchemaFromPath(routePath: string): z.ZodObject<z.ZodRawShape> | undefined {
   const names = [...routePath.matchAll(/\{([A-Za-z0-9_]+)\}/g)].map((match) => match[1]);
   if (names.length === 0) return undefined;
@@ -620,6 +648,9 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/board-api-keys",
   "POST /api/board-api-keys",
   "DELETE /api/board-api-keys/{keyId}",
+  "GET /api/agents/{id}/keys",
+  "POST /api/agents/{id}/keys",
+  "DELETE /api/agents/{id}/keys/{keyId}",
   "POST /api/bootstrap/claim",
   "GET /api/companies/{companyId}/resource-memberships/me",
   "PUT /api/companies/{companyId}/resource-memberships/me/agents/{agentId}",
@@ -1306,8 +1337,14 @@ registry.registerPath({
   path: "/api/agents/{id}/keys",
   tags: ["agents"],
   summary: "List agent API keys",
+  description: "Returns board-authorized key metadata, including last-use and bounded creation provenance, without plaintext tokens or stored key hashes.",
   request: { params: z.object({ id: z.string() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized },
+  responses: {
+    200: r.ok(z.array(agentApiKeyInventoryResponseSchema)),
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
 });
 
 registry.registerPath({
@@ -1319,7 +1356,13 @@ registry.registerPath({
     params: z.object({ id: z.string() }),
     body: jsonBody(createAgentKeySchema),
   },
-  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+  responses: {
+    201: r.ok(agentApiKeyCreatedResponseSchema),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
 });
 
 registry.registerPath({

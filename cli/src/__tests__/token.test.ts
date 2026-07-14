@@ -85,11 +85,22 @@ describe("token commands", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(agentResponse()), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify([{ id: "key-1", name: "external-worker", createdAt: "2026-05-23T00:00:00.000Z", revokedAt: null }]), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{
+        id: "key-1",
+        name: "external-worker",
+        createdAt: "2026-05-23T00:00:00.000Z",
+        lastUsedAt: "2026-05-24T01:02:03.000Z",
+        creation: {
+          actorType: "user",
+          actorId: "board-user-1",
+          source: "board_key",
+        },
+        revokedAt: null,
+      }]), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(agentResponse()), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, keyId: "key-1" }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
-    vi.spyOn(console, "log").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
     await createProgram().parseAsync([
       "token", "agent", "list",
@@ -110,6 +121,10 @@ describe("token commands", () => {
     expect(fetchMock.mock.calls[1]?.[0]).toBe(`http://localhost:3100/api/agents/${AGENT_ID}/keys`);
     expect(fetchMock.mock.calls[3]?.[0]).toBe(`http://localhost:3100/api/agents/${AGENT_ID}/keys/key-1`);
     expect(fetchMock.mock.calls[3]?.[1]?.method).toBe("DELETE");
+    expect(String(log.mock.calls[0]?.[0])).toContain("lastUsedAt=2026-05-24T01:02:03.000Z");
+    expect(String(log.mock.calls[0]?.[0])).toContain("creationActor=user:board-user-1");
+    expect(String(log.mock.calls[0]?.[0])).toContain("creationSource=board_key");
+    expect(String(log.mock.calls[0]?.[0])).not.toContain("pcp_");
   });
 
   it("resolves agent token commands by agent id without the reference lookup query", async () => {

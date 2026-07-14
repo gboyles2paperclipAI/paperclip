@@ -318,7 +318,7 @@ pnpm paperclipai agent local-cli claudecoder --company-id <company-id>
 
 ## Token Commands
 
-Agent API keys are scoped to one company and one agent. Plaintext tokens are printed once at creation.
+Agent API keys are scoped to one company and one agent. Plaintext tokens are printed once at creation. The list command reports each key's last-use timestamp and bounded creation actor/source metadata; it never returns plaintext tokens or stored key hashes. Older keys created before provenance tracking report an unknown origin.
 
 ```sh
 pnpm paperclipai token agent create --company-id <company-id> --agent <agent-id-or-name> --name external-worker

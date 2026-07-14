@@ -35,6 +35,11 @@ interface AgentKeyRow {
   id: string;
   name: string;
   createdAt: string;
+  creation?: {
+    actorType: "user" | "system" | "unknown";
+    actorId: string | null;
+    source: "local_implicit" | "session" | "board_key" | "cloud_tenant" | "join_request_claim" | "unknown";
+  };
   lastUsedAt?: string | null;
   revokedAt?: string | null;
 }
@@ -108,7 +113,17 @@ export function registerTokenCommands(program: Command): void {
             return;
           }
           for (const key of keys) {
-            console.log(formatInlineRecord({ id: key.id, name: key.name, createdAt: key.createdAt, revokedAt: key.revokedAt ?? null }));
+            console.log(formatInlineRecord({
+              id: key.id,
+              name: key.name,
+              createdAt: key.createdAt,
+              lastUsedAt: key.lastUsedAt ?? null,
+              creationActor: key.creation?.actorId
+                ? `${key.creation.actorType}:${key.creation.actorId}`
+                : key.creation?.actorType ?? "unknown",
+              creationSource: key.creation?.source ?? "unknown",
+              revokedAt: key.revokedAt ?? null,
+            }));
           }
           if (keys.length === 0) printOutput([], { json: false });
         } catch (err) {

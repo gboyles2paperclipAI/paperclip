@@ -4364,9 +4364,20 @@ export function accessRoutes(
         .then((rows) => rows[0] ?? null);
       if (!consumed) throw conflict("Claim secret already used");
 
+      const responsibleUserId =
+        joinRequest.approvedByUserId ?? joinRequest.requestingUserId ?? null;
       const created = await agents.createApiKey(
         joinRequest.createdAgentId,
-        "initial-join-key"
+        "initial-join-key",
+        { kind: "standard" },
+        {
+          responsibleUserId,
+          creation: {
+            actorType: "system",
+            actorId: "join-claim",
+            source: "join_request_claim",
+          },
+        },
       );
 
       await logActivity(db, {
@@ -4378,7 +4389,10 @@ export function accessRoutes(
         entityId: created.id,
         details: {
           agentId: joinRequest.createdAgentId,
-          joinRequestId: requestId
+          joinRequestId: requestId,
+          keyId: created.id,
+          responsibleUserId,
+          creation: created.creation,
         }
       });
 

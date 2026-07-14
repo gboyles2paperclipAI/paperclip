@@ -119,12 +119,34 @@ export interface AgentDetail extends Agent {
 
 export type ClearAgentErrorResponse = Agent;
 
-export interface AgentKeyCreated {
+export type AgentApiKeyCreatorType = "user" | "system" | "unknown";
+
+export type AgentApiKeyCreationSource =
+  | "local_implicit"
+  | "session"
+  | "board_key"
+  | "cloud_tenant"
+  | "join_request_claim"
+  | "unknown";
+
+export interface AgentApiKeyCreationProvenance {
+  actorType: AgentApiKeyCreatorType;
+  actorId: string | null;
+  source: AgentApiKeyCreationSource;
+}
+
+export interface AgentApiKey {
   id: string;
   name: string;
   scope: AgentApiKeyScope;
-  token: string;
+  creation: AgentApiKeyCreationProvenance;
+  lastUsedAt: Date | null;
+  revokedAt: Date | null;
   createdAt: Date;
+}
+
+export interface AgentKeyCreated extends AgentApiKey {
+  token: string;
 }
 
 export interface AgentConfigRevision {

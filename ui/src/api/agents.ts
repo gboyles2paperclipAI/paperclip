@@ -15,6 +15,7 @@ import type {
   Approval,
   AgentConfigRevision,
   ClearAgentErrorResponse,
+  AgentApiKey,
   AgentApiKeyScope,
 } from "@paperclipai/shared";
 import type {
@@ -24,12 +25,25 @@ import type {
 import { isUuidLike, normalizeAgentUrlKey } from "@paperclipai/shared";
 import { ApiError, api } from "./client";
 
-export interface AgentKey {
-  id: string;
-  name: string;
-  scope: AgentApiKeyScope;
-  createdAt: Date;
-  revokedAt: Date | null;
+export type AgentKey = AgentApiKey;
+
+type AgentKeyWire = Omit<AgentApiKey, "creation" | "lastUsedAt"> & {
+  creation?: AgentApiKey["creation"] | null;
+  lastUsedAt?: Date | null;
+};
+
+const UNKNOWN_AGENT_KEY_CREATION: AgentApiKey["creation"] = {
+  actorType: "unknown",
+  actorId: null,
+  source: "unknown",
+};
+
+export function normalizeAgentKey(key: AgentKeyWire): AgentKey {
+  return {
+    ...key,
+    creation: key.creation ?? UNKNOWN_AGENT_KEY_CREATION,
+    lastUsedAt: key.lastUsedAt ?? null,
+  };
 }
 
 export interface AdapterModel {
@@ -175,7 +189,10 @@ export const agentsApi = {
   approve: (id: string, companyId?: string) => api.post<Agent>(agentPath(id, companyId, "/approve"), {}),
   terminate: (id: string, companyId?: string) => api.post<Agent>(agentPath(id, companyId, "/terminate"), {}),
   remove: (id: string, companyId?: string) => api.delete<{ ok: true }>(agentPath(id, companyId)),
-  listKeys: (id: string, companyId?: string) => api.get<AgentKey[]>(agentPath(id, companyId, "/keys")),
+  listKeys: async (id: string, companyId?: string) => {
+    const keys = await api.get<AgentKeyWire[]>(agentPath(id, companyId, "/keys"));
+    return keys.map(normalizeAgentKey);
+  },
   skills: (id: string, companyId?: string) =>
     api.get<AgentSkillSnapshot>(agentPath(id, companyId, "/skills")),
   syncSkills: (id: string, desiredSkills: Array<string | AgentDesiredSkillEntry>, companyId?: string) =>

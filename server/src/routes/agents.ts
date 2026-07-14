@@ -3324,7 +3324,21 @@ export function agentRoutes(
     if (!agent) {
       return;
     }
-    const key = await svc.createApiKey(id, req.body.name, req.body.scope);
+    const creationSource =
+      req.actor.source === "local_implicit" ||
+      req.actor.source === "board_key" ||
+      req.actor.source === "cloud_tenant"
+        ? req.actor.source
+        : "session";
+    const responsibleUserId = req.actor.userId ?? null;
+    const key = await svc.createApiKey(id, req.body.name, req.body.scope, {
+      responsibleUserId,
+      creation: {
+        actorType: "user",
+        actorId: req.actor.userId ?? "board",
+        source: creationSource,
+      },
+    });
 
     await logActivity(db, {
       companyId: agent.companyId,
@@ -3333,7 +3347,13 @@ export function agentRoutes(
       action: "agent.key_created",
       entityType: "agent",
       entityId: agent.id,
-      details: { keyId: key.id, name: key.name, scope: key.scope },
+      details: {
+        keyId: key.id,
+        name: key.name,
+        scope: key.scope,
+        responsibleUserId,
+        creation: key.creation,
+      },
     });
 
     res.status(201).json(key);

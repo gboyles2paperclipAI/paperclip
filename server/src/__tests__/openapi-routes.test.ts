@@ -158,6 +158,28 @@ describe("openapi routes", () => {
         name: { type: "string" },
       },
     });
+    const keyInventorySchema = res.body.paths["/api/agents/{id}/keys"].get.responses["200"].content["application/json"].schema;
+    expect(keyInventorySchema).toMatchObject({
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          creation: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              actorType: { type: "string", enum: ["user", "system", "unknown"] },
+              actorId: { type: "string", nullable: true },
+            },
+          },
+          lastUsedAt: { type: "string", format: "date-time", nullable: true },
+        },
+      },
+    });
+    expect(keyInventorySchema.items.properties).not.toHaveProperty("token");
+    expect(keyInventorySchema.items.properties).not.toHaveProperty("keyHash");
+    expect(res.body.paths["/api/agents/{id}/keys"].post.responses["201"]).toBeDefined();
   });
 
   it("covers the mounted server routes exactly", () => {
@@ -186,6 +208,18 @@ describe("openapi routes", () => {
       actor: "board",
       instanceAdmin: true,
     });
+    for (const operation of [
+      spec.paths["/api/agents/{id}/keys"].get,
+      spec.paths["/api/agents/{id}/keys"].post,
+      spec.paths["/api/agents/{id}/keys/{keyId}"].delete,
+    ]) {
+      expect(operation.security).toEqual([
+        { BoardSessionAuth: [] },
+        { BoardApiKeyAuth: [] },
+      ]);
+      expect(operation.security).not.toContainEqual({ AgentBearerAuth: [] });
+      expect(operation["x-paperclip-authorization"]).toEqual({ actor: "board" });
+    }
     expect(spec.paths["/api/companies/{companyId}/cost-events"].post.responses["201"]).toBeDefined();
     expect(spec.paths["/api/companies/{companyId}/cost-events"].post.responses["403"]).toBeDefined();
     expect(spec.paths["/api/instance/database-backups"].post.responses["201"]).toBeDefined();

@@ -395,6 +395,94 @@ describe.sequential("agent cross-tenant route authorization", () => {
     expect(mockAgentService.revokeKey).not.toHaveBeenCalled();
   });
 
+  it("returns only safe key inventory metadata", async () => {
+    const creation = {
+      actorType: "user",
+      actorId: "local-board",
+      source: "local_implicit",
+    } as const;
+    mockAgentService.listKeys.mockResolvedValueOnce([{
+      id: keyId,
+      name: "automation",
+      scope: { kind: "standard" },
+      creation,
+      createdAt: baseKey.createdAt,
+      lastUsedAt: new Date("2026-04-11T00:04:00.000Z"),
+      revokedAt: null,
+    }]);
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      companyIds: [companyId],
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    });
+
+    const listed = await requestApp(app, (baseUrl) =>
+      request(baseUrl).get(`/api/agents/${agentId}/keys`),
+    );
+    expect(listed.status).toBe(200);
+    expect(listed.body).toEqual([expect.objectContaining({
+      id: keyId,
+      lastUsedAt: "2026-04-11T00:04:00.000Z",
+      creation,
+    })]);
+    expect(JSON.stringify(listed.body)).not.toContain("token");
+    expect(JSON.stringify(listed.body)).not.toContain("keyHash");
+  });
+
+  it.each([
+    { actorSource: "local_implicit", userId: "local-board", expectedSource: "local_implicit" },
+    { actorSource: "session", userId: "session-user", expectedSource: "session" },
+    { actorSource: "board_key", userId: "board-key-user", expectedSource: "board_key" },
+    { actorSource: "cloud_tenant", userId: "cloud-user", expectedSource: "cloud_tenant" },
+  ] as const)("records bounded $expectedSource key creation provenance", async ({
+    actorSource,
+    userId,
+    expectedSource,
+  }) => {
+    currentAccessCanUser = true;
+    const creation = {
+      actorType: "user",
+      actorId: userId,
+      source: expectedSource,
+    } as const;
+    mockAgentService.createApiKey.mockResolvedValueOnce({
+      id: keyId,
+      name: "automation",
+      scope: { kind: "standard" },
+      creation,
+      token: "pcp_test_token",
+      createdAt: baseKey.createdAt,
+      lastUsedAt: null,
+      revokedAt: null,
+    });
+    const app = await createApp({
+      type: "board",
+      userId,
+      companyIds: [companyId],
+      source: actorSource,
+      isInstanceAdmin: actorSource === "local_implicit",
+    });
+    const created = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post(`/api/agents/${agentId}/keys`).send({ name: "automation" }),
+    );
+    expect(created.status).toBe(201);
+    expect(mockAgentService.createApiKey).toHaveBeenCalledWith(
+      agentId,
+      "automation",
+      { kind: "standard" },
+      { responsibleUserId: userId, creation },
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "agent.key_created",
+      details: expect.objectContaining({ responsibleUserId: userId, creation }),
+    }));
+    const activityPayload = JSON.stringify(mockLogActivity.mock.calls.at(-1));
+    expect(activityPayload).not.toContain("pcp_test_token");
+    expect(activityPayload).not.toContain("keyHash");
+  });
+
   it("requires board access before clearing an agent error", async () => {
     const app = await createApp({
       type: "agent",

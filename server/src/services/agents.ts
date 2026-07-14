@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -22,6 +22,9 @@ import {
   isUuidLike,
   normalizeAgentApiKeyScope,
   normalizeAgentUrlKey,
+  type AgentApiKeyCreationProvenance,
+  type AgentApiKeyCreationSource,
+  type AgentApiKeyCreatorType,
   type AgentEligibilityAgent,
   type AgentApiKeyScope,
 } from "@paperclipai/shared";
@@ -37,6 +40,77 @@ function hashToken(token: string) {
 
 function createToken() {
   return `pcp_${randomBytes(24).toString("hex")}`;
+}
+
+const AGENT_API_KEY_CREATOR_TYPES = new Set<AgentApiKeyCreatorType>([
+  "user",
+  "system",
+  "unknown",
+]);
+
+const AGENT_API_KEY_CREATION_SOURCES = new Set<AgentApiKeyCreationSource>([
+  "local_implicit",
+  "session",
+  "board_key",
+  "cloud_tenant",
+  "join_request_claim",
+  "unknown",
+]);
+
+const UNKNOWN_AGENT_API_KEY_CREATION: AgentApiKeyCreationProvenance = {
+  actorType: "unknown",
+  actorId: null,
+  source: "unknown",
+};
+
+export interface CreateAgentApiKeyOptions {
+  /**
+   * Accepted alongside creation provenance so the upstream responsible-user
+   * persistence can merge without changing or overloading the fourth argument.
+   * This branch has no responsible_user_id column; route audit details retain
+   * the value until that independently governed schema change is integrated.
+   */
+  responsibleUserId?: string | null;
+  creation?: AgentApiKeyCreationProvenance;
+}
+
+function normalizeAgentApiKeyCreation(input: unknown): AgentApiKeyCreationProvenance {
+  const value = isPlainRecord(input) ? input : {};
+  const actorType = AGENT_API_KEY_CREATOR_TYPES.has(value.actorType as AgentApiKeyCreatorType)
+    ? value.actorType as AgentApiKeyCreatorType
+    : "unknown";
+  const source = AGENT_API_KEY_CREATION_SOURCES.has(value.source as AgentApiKeyCreationSource)
+    ? value.source as AgentApiKeyCreationSource
+    : "unknown";
+  const actorId = typeof value.actorId === "string" && value.actorId.trim().length > 0
+    ? value.actorId.trim()
+    : null;
+
+  return {
+    actorType,
+    actorId: actorType === "unknown" ? null : actorId,
+    source,
+  };
+}
+
+function agentApiKeyCreationFromActivity(row: {
+  action: string;
+  actorType: string;
+  actorId: string;
+  details: Record<string, unknown> | null;
+}): AgentApiKeyCreationProvenance {
+  const recorded = normalizeAgentApiKeyCreation(row.details?.creation);
+  const fallbackActorType = row.actorType === "user" || row.actorType === "system"
+    ? row.actorType
+    : "unknown";
+
+  return normalizeAgentApiKeyCreation({
+    actorType: recorded.actorType === "unknown" ? fallbackActorType : recorded.actorType,
+    actorId: recorded.actorId ?? row.actorId,
+    source: recorded.source === "unknown" && row.action === "agent_api_key.claimed"
+      ? "join_request_claim"
+      : recorded.source,
+  });
 }
 
 const CONFIG_REVISION_FIELDS = [
@@ -758,7 +832,12 @@ export function agentService(db: Db) {
       });
     },
 
-    createApiKey: async (id: string, name: string, scope: AgentApiKeyScope = { kind: "standard" }) => {
+    createApiKey: async (
+      id: string,
+      name: string,
+      scope: AgentApiKeyScope = { kind: "standard" },
+      options: CreateAgentApiKeyOptions = {},
+    ) => {
       const existing = await getById(id);
       if (!existing) throw notFound("Agent not found");
       if (existing.status === "pending_approval") {
@@ -770,6 +849,7 @@ export function agentService(db: Db) {
 
       const token = createToken();
       const keyHash = hashToken(token);
+      const normalizedCreation = normalizeAgentApiKeyCreation(options.creation);
       const created = await db
         .insert(agentApiKeys)
         .values({
@@ -786,29 +866,80 @@ export function agentService(db: Db) {
         id: created.id,
         name: created.name,
         scope: normalizeAgentApiKeyScope(created.scopeConfig),
+        creation: normalizedCreation,
         token,
+        lastUsedAt: created.lastUsedAt,
+        revokedAt: created.revokedAt,
         createdAt: created.createdAt,
       };
     },
 
-    listKeys: (id: string) =>
-      db
+    listKeys: async (id: string) => {
+      const rows = await db
         .select({
           id: agentApiKeys.id,
+          companyId: agentApiKeys.companyId,
           name: agentApiKeys.name,
           scopeConfig: agentApiKeys.scopeConfig,
+          lastUsedAt: agentApiKeys.lastUsedAt,
           createdAt: agentApiKeys.createdAt,
           revokedAt: agentApiKeys.revokedAt,
         })
         .from(agentApiKeys)
-        .where(eq(agentApiKeys.agentId, id))
-        .then((rows) => rows.map((row) => ({
+        .where(eq(agentApiKeys.agentId, id));
+      if (rows.length === 0) return [];
+
+      const keyIds = rows.map((row) => row.id);
+      const detailsKeyId = sql<string>`${activityLog.details} ->> 'keyId'`;
+      const creationRows = await db
+        .select({
+          id: activityLog.id,
+          action: activityLog.action,
+          entityId: activityLog.entityId,
+          actorType: activityLog.actorType,
+          actorId: activityLog.actorId,
+          details: activityLog.details,
+        })
+        .from(activityLog)
+        .where(and(
+          eq(activityLog.companyId, rows[0]!.companyId),
+          or(
+            and(
+              eq(activityLog.action, "agent.key_created"),
+              eq(activityLog.entityType, "agent"),
+              eq(activityLog.entityId, id),
+              inArray(detailsKeyId, keyIds),
+            ),
+            and(
+              eq(activityLog.action, "agent_api_key.claimed"),
+              eq(activityLog.entityType, "agent_api_key"),
+              inArray(activityLog.entityId, keyIds),
+            ),
+          ),
+        ))
+        .orderBy(asc(activityLog.createdAt), asc(activityLog.id));
+
+      const creationByKeyId = new Map<string, AgentApiKeyCreationProvenance>();
+      // Creation provenance is immutable inventory metadata. If duplicate audit
+      // rows exist, the earliest timestamp wins and the UUID is the stable tie-breaker.
+      for (const row of creationRows) {
+        const keyId = row.action === "agent.key_created"
+          ? typeof row.details?.keyId === "string" ? row.details.keyId : null
+          : row.entityId;
+        if (!keyId || creationByKeyId.has(keyId)) continue;
+        creationByKeyId.set(keyId, agentApiKeyCreationFromActivity(row));
+      }
+
+      return rows.map((row) => ({
           id: row.id,
           name: row.name,
           scope: normalizeAgentApiKeyScope(row.scopeConfig),
+          creation: creationByKeyId.get(row.id) ?? UNKNOWN_AGENT_API_KEY_CREATION,
+          lastUsedAt: row.lastUsedAt,
           createdAt: row.createdAt,
           revokedAt: row.revokedAt,
-        }))),
+        }));
+    },
 
     getKeyById: async (keyId: string) =>
       db
@@ -818,6 +949,7 @@ export function agentService(db: Db) {
           companyId: agentApiKeys.companyId,
           name: agentApiKeys.name,
           scopeConfig: agentApiKeys.scopeConfig,
+          lastUsedAt: agentApiKeys.lastUsedAt,
           createdAt: agentApiKeys.createdAt,
           revokedAt: agentApiKeys.revokedAt,
         })
