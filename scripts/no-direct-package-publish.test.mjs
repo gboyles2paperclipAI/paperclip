@@ -5,6 +5,55 @@ import { join } from "node:path";
 import test from "node:test";
 
 const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+
+function unquote(token) {
+  if (
+    token.length >= 2 &&
+    ((token.startsWith('"') && token.endsWith('"')) ||
+      (token.startsWith("'") && token.endsWith("'")))
+  ) {
+    return token.slice(1, -1);
+  }
+  return token;
+}
+
+function isVerifiedTarballPublishCommand(command) {
+  const prefix = command.match(/^\s*(?:npm|pnpm)\s+publish\b/i);
+  if (!prefix) return false;
+  const tokens = command
+    .slice(prefix[0].length)
+    .match(/"[^"]*"|'[^']*'|\S+/g)
+    ?.map(unquote) ?? [];
+  const operand = tokens.shift();
+  if (
+    !operand ||
+    !(
+      operand === "<tarball>" ||
+      /^(?:\$tarball(?:_path)?|\$\{tarball(?:_path)?\})$/i.test(operand) ||
+      (!operand.startsWith("-") && /(?:^|\/)[^/\s]+\.tgz$/i.test(operand))
+    )
+  ) {
+    return false;
+  }
+
+  const booleanOptions = new Set(["--dry-run", "--ignore-scripts", "--no-git-checks"]);
+  const valueOptions = new Set(["--access", "--tag"]);
+  let disablesLifecycle = false;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (booleanOptions.has(token)) {
+      if (token === "--ignore-scripts") disablesLifecycle = true;
+      continue;
+    }
+    if (token === "--provenance=false") continue;
+    if (valueOptions.has(token) && tokens[index + 1] && !tokens[index + 1].startsWith("--")) {
+      index += 1;
+      continue;
+    }
+    return false;
+  }
+  return disablesLifecycle;
+}
 export function findDirectPackagePublishOffenses(filePath, content) {
   if (/(?:^|\/)__tests__(?:\/|$)|\.test\.[^.]+$/.test(filePath)) return [];
   const offenses = [];
@@ -14,11 +63,9 @@ export function findDirectPackagePublishOffenses(filePath, content) {
     for (const [matchIndex, match] of matches.entries()) {
       const nextPublishIndex = matches[matchIndex + 1]?.index ?? line.length;
       const remaining = line.slice(match.index, nextPublishIndex);
-      const separatorIndex = remaining.search(/&&|\|\||;|#/);
+      const separatorIndex = remaining.search(/&&|\|\||[|&;#`]|\s\d*>/);
       const command = separatorIndex === -1 ? remaining : remaining.slice(0, separatorIndex);
-      const usesTarball = /(?:<tarball>|\$\{?tarball|[\w./-]+\.tgz\b)/i.test(command);
-      const disablesLifecycle = /--ignore-scripts\b/.test(command);
-      if (!usesTarball || !disablesLifecycle) {
+      if (!isVerifiedTarballPublishCommand(command)) {
         unsafe = true;
         break;
       }
@@ -108,6 +155,23 @@ test("a safe command or comment cannot launder an unsafe publish on the same lin
     "scripts/example.sh:1",
     "scripts/example.sh:2",
     "scripts/example.sh:3",
+  ]);
+});
+
+test("pipes, background commands, option values, and extra operands cannot mimic a tarball operand", () => {
+  const camouflaged = [
+    "npm publish . | echo verified.tgz --ignore-scripts",
+    "npm publish . & echo verified.tgz --ignore-scripts",
+    "npm publish . --tag verified.tgz --ignore-scripts",
+    "npm publish --tag=verified.tgz --ignore-scripts",
+    "pnpm publish verified.tgz . --ignore-scripts",
+  ].join("\n");
+  assert.deepEqual(findDirectPackagePublishOffenses("scripts/example.sh", camouflaged), [
+    "scripts/example.sh:1",
+    "scripts/example.sh:2",
+    "scripts/example.sh:3",
+    "scripts/example.sh:4",
+    "scripts/example.sh:5",
   ]);
 });
 
