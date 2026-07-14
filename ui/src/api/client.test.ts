@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { __inflightGetCount, api } from "./client";
+import { ApiError, __inflightGetCount, api } from "./client";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -21,6 +21,15 @@ function jsonResponse(body: unknown) {
   return { ok: true, status: 200, json: async () => body } as unknown as Response;
 }
 
+function errorResponse(status: number, body: unknown, headers?: HeadersInit) {
+  return {
+    ok: false,
+    status,
+    headers: new Headers(headers),
+    json: async () => body,
+  } as unknown as Response;
+}
+
 const fetchMock = vi.fn();
 
 beforeEach(() => {
@@ -33,6 +42,19 @@ afterEach(() => {
 });
 
 describe("in-tab GET coalescing", () => {
+  it("preserves response headers on API errors", async () => {
+    fetchMock.mockResolvedValue(errorResponse(429, { error: "Rate limited" }, { "Retry-After": "7" }));
+
+    try {
+      await api.get("/rate-limited");
+      throw new Error("Expected request to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as ApiError).status).toBe(429);
+      expect((error as ApiError).headers.get("Retry-After")).toBe("7");
+    }
+  });
+
   it("shares one underlying fetch for identical in-flight GETs", async () => {
     const d = deferred<Response>();
     fetchMock.mockReturnValue(d.promise);

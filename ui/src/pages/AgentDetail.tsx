@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link, Navigate, useBeforeUnload, type NavigateF
 import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
   agentsApi,
+  normalizeAgentKey,
   type AgentKey,
   type ClaudeLoginResult,
   type AgentPermissionUpdate,
@@ -4041,7 +4042,29 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
 
 /* ---- Keys Tab ---- */
 
-function KeysTab({ agentId, companyId }: { agentId: string; companyId?: string }) {
+const agentKeyCreationSourceLabels: Record<AgentKey["creation"]["source"], string> = {
+  local_implicit: "local implicit setup",
+  session: "board session",
+  board_key: "board key",
+  cloud_tenant: "cloud tenant",
+  join_request_claim: "join request claim",
+  unknown: "unknown source",
+};
+
+function formatAgentKeyCreation(key: AgentKey) {
+  if (key.creation.actorType === "unknown" && key.creation.source === "unknown") {
+    return "Creation provenance unavailable";
+  }
+  const source = agentKeyCreationSourceLabels[key.creation.source] ?? key.creation.source;
+  const actor = key.creation.actorId ? `${key.creation.actorType} ${key.creation.actorId}` : key.creation.actorType;
+  return `Created by ${actor} via ${source}`;
+}
+
+function formatAgentKeyLastUse(key: AgentKey) {
+  return key.lastUsedAt ? `Last used ${formatDate(key.lastUsedAt)}` : "Never used";
+}
+
+export function KeysTab({ agentId, companyId }: { agentId: string; companyId?: string }) {
   const queryClient = useQueryClient();
   const [newKeyName, setNewKeyName] = useState("");
   const [newToken, setNewToken] = useState<string | null>(null);
@@ -4077,8 +4100,9 @@ function KeysTab({ agentId, companyId }: { agentId: string; companyId?: string }
     setTimeout(() => setCopied(false), 2000);
   }
 
-  const activeKeys = (keys ?? []).filter((k: AgentKey) => !k.revokedAt);
-  const revokedKeys = (keys ?? []).filter((k: AgentKey) => k.revokedAt);
+  const normalizedKeys = (keys ?? []).map(normalizeAgentKey);
+  const activeKeys = normalizedKeys.filter((k: AgentKey) => !k.revokedAt);
+  const revokedKeys = normalizedKeys.filter((k: AgentKey) => k.revokedAt);
 
   return (
     <div className="space-y-6">
@@ -4165,12 +4189,18 @@ function KeysTab({ agentId, companyId }: { agentId: string; companyId?: string }
           </h3>
           <div className="border border-border rounded-lg divide-y divide-border">
             {activeKeys.map((key: AgentKey) => (
-              <div key={key.id} className="flex items-center justify-between px-4 py-2.5">
-                <div>
-                  <span className="text-sm font-medium">{key.name}</span>
-                  <span className="text-xs text-muted-foreground ml-3">
-                    Created {formatDate(key.createdAt)}
-                  </span>
+              <div key={key.id} className="flex items-center justify-between gap-4 px-4 py-2.5">
+                <div className="min-w-0">
+                  <div>
+                    <span className="text-sm font-medium">{key.name}</span>
+                    <span className="text-xs text-muted-foreground ml-3">
+                      Created {formatDate(key.createdAt)}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                    <span>{formatAgentKeyCreation(key)}</span>
+                    <span>{formatAgentKeyLastUse(key)}</span>
+                  </div>
                 </div>
                 <Button
                   variant="ghost"
@@ -4195,12 +4225,18 @@ function KeysTab({ agentId, companyId }: { agentId: string; companyId?: string }
           </h3>
           <div className="border border-border rounded-lg divide-y divide-border opacity-50">
             {revokedKeys.map((key: AgentKey) => (
-              <div key={key.id} className="flex items-center justify-between px-4 py-2.5">
-                <div>
-                  <span className="text-sm line-through">{key.name}</span>
-                  <span className="text-xs text-muted-foreground ml-3">
-                    Revoked {key.revokedAt ? formatDate(key.revokedAt) : ""}
-                  </span>
+              <div key={key.id} className="flex items-center justify-between gap-4 px-4 py-2.5">
+                <div className="min-w-0">
+                  <div>
+                    <span className="text-sm line-through">{key.name}</span>
+                    <span className="text-xs text-muted-foreground ml-3">
+                      Revoked {key.revokedAt ? formatDate(key.revokedAt) : ""}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                    <span>{formatAgentKeyCreation(key)}</span>
+                    <span>{formatAgentKeyLastUse(key)}</span>
+                  </div>
                 </div>
               </div>
             ))}

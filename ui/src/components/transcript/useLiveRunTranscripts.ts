@@ -289,11 +289,11 @@ export function useLiveRunTranscripts({
 
     let cancelled = false;
 
-    const readRunLog = async (run: RunTranscriptSource) => {
+    const readRunLog = async (run: RunTranscriptSource, options?: { initial?: boolean }) => {
       if (missingTerminalLogRunIdsRef.current.has(run.id)) {
         return;
       }
-      if (!isTerminalStatus(run.status) && enableRealtimeUpdates && run.hasStoredOutput !== true && runKnownLogBytes(run) === null) {
+      if (!options?.initial && !isTerminalStatus(run.status) && enableRealtimeUpdates && run.hasStoredOutput !== true && runKnownLogBytes(run) === null) {
         return;
       }
       const retryAt = retryAtMsByRunRef.current.get(run.id);
@@ -349,7 +349,7 @@ export function useLiveRunTranscripts({
     };
 
     const readAll = async () => {
-      await Promise.all(normalizedRuns.map((run) => readRunLog(run)));
+      await Promise.all(normalizedRuns.map((run) => readRunLog(run, { initial: true })));
     };
 
     void readAll();
@@ -364,7 +364,7 @@ export function useLiveRunTranscripts({
       cancelled = true;
       if (interval !== null) window.clearInterval(interval);
     };
-  }, [logPollIntervalMs, logReadLimitBytes, normalizedRuns, runIdsKey]);
+  }, [enableRealtimeUpdates, logPollIntervalMs, logReadLimitBytes, normalizedRuns, runIdsKey]);
 
   useEffect(() => {
     if (!enableRealtimeUpdates) return;

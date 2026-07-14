@@ -5,12 +5,14 @@ const BASE = "/api";
 export class ApiError extends Error {
   status: number;
   body: unknown;
+  headers: Headers;
 
-  constructor(message: string, status: number, body: unknown) {
+  constructor(message: string, status: number, body: unknown, headers?: HeadersInit) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.body = body;
+    this.headers = new Headers(headers);
   }
 }
 
@@ -55,6 +57,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       (errorBody as { error?: string } | null)?.error ?? `Request failed: ${res.status}`,
       res.status,
       errorBody,
+      res.headers,
     );
   }
   if (res.status === 204) return undefined as T;
