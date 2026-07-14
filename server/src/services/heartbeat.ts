@@ -464,6 +464,8 @@ const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set(["approval_approve
 const SAME_ISSUE_WAKE_COALESCE_WINDOW_MS = 90 * 1000;
 const BLOCKED_ISSUE_WAKE_SUPPRESSION_MS = 20 * 60 * 1000;
 const URGENT_WAKE_REASON_RE = /\b(urgent|security|incident|prod|production[-_\s]?down|sev[0-2])\b/i;
+const ISSUE_CONTINUATION_WAITING_ON_INTERACTION_ERROR_CODE =
+  "issue_continuation_waiting_on_interaction";
 const SESSIONED_LOCAL_ADAPTERS = new Set([
   "claude_local",
   "codex_local",
@@ -2557,6 +2559,86 @@ function allowsIssueInteractionWake(
   const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
   if (!wakeReason || !ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS.has(wakeReason)) return false;
   return Boolean(deriveCommentId(contextSnapshot, null));
+}
+
+type PendingIssueInteractionSummary = {
+  id: string;
+  kind: string;
+  continuationPolicy: string;
+};
+
+async function findPendingIssueInteraction(
+  dbOrTx: Pick<Db, "select">,
+  companyId: string,
+  issueId: string,
+): Promise<PendingIssueInteractionSummary | null> {
+  return dbOrTx
+    .select({
+      id: issueThreadInteractions.id,
+      kind: issueThreadInteractions.kind,
+      continuationPolicy: issueThreadInteractions.continuationPolicy,
+    })
+    .from(issueThreadInteractions)
+    .where(
+      and(
+        eq(issueThreadInteractions.companyId, companyId),
+        eq(issueThreadInteractions.issueId, issueId),
+        eq(issueThreadInteractions.status, "pending"),
+        inArray(issueThreadInteractions.continuationPolicy, [
+          "wake_assignee",
+          "wake_assignee_on_accept",
+        ]),
+      ),
+    )
+    .orderBy(desc(issueThreadInteractions.createdAt), desc(issueThreadInteractions.id))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+}
+
+function isNoopContinuationSuppressionCandidate(input: {
+  invocationSource: string | null | undefined;
+  triggerDetail: string | null | undefined;
+  issueStatus: string;
+  issuePriority: string | null;
+  contextSnapshot: Record<string, unknown>;
+}) {
+  if (input.issueStatus !== "in_progress" || input.issuePriority === "critical") return false;
+  if (input.invocationSource !== "automation" || input.triggerDetail !== "system") return false;
+
+  const wakeReason = readNonEmptyString(input.contextSnapshot.wakeReason);
+  const retryReason = readNonEmptyString(input.contextSnapshot.retryReason);
+  if (wakeReason !== "issue_continuation_needed") return false;
+  if (retryReason && retryReason !== "issue_continuation_needed") return false;
+
+  if (deriveCommentId(input.contextSnapshot, null)) return false;
+  if (allowsIssueInteractionWake(input.contextSnapshot)) return false;
+  if (hasInteractionContinuationWakeContext(input.contextSnapshot)) return false;
+  if (input.contextSnapshot.resumeIntent === true || input.contextSnapshot.followUpRequested === true) {
+    return false;
+  }
+  if (
+    readNonEmptyString(input.contextSnapshot.approvalId) ||
+    readNonEmptyString(input.contextSnapshot.approvalStatus) ||
+    readNonEmptyString(input.contextSnapshot.blockerIssueId) ||
+    input.contextSnapshot.dependencyBlockedInteraction === true
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function pendingInteractionContinuationSuppressionPayload(input: {
+  issueId: string;
+  pendingInteraction: PendingIssueInteractionSummary;
+}) {
+  return {
+    code: ISSUE_CONTINUATION_WAITING_ON_INTERACTION_ERROR_CODE,
+    issueId: input.issueId,
+    pendingInteractionId: input.pendingInteraction.id,
+    pendingInteractionKind: input.pendingInteraction.kind,
+    continuationPolicy: input.pendingInteraction.continuationPolicy,
+  };
 }
 
 async function listUnresolvedBlockerSummaries(
@@ -13088,6 +13170,72 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         };
       }
 
+      const retryReason = issue.status === "todo" ? "assignment_recovery" : "issue_continuation_needed";
+      const recoveryReason = issue.status === "todo" ? "issue_assignment_recovery" : "issue_continuation_needed";
+      const recoverySource =
+        issue.status === "todo" ? "issue.assignment_recovery" : "issue.continuation_recovery";
+      const now = new Date();
+      const continuationSuppressionContext = {
+        issueId: issue.id,
+        taskId: issue.id,
+        wakeReason: recoveryReason,
+        retryReason,
+        source: recoverySource,
+        retryOfRunId: run.id,
+      };
+      const suppressionCandidate =
+        recoveryAgentInvokable &&
+        Boolean(recoveryAgent) &&
+        !isWorkspaceValidationFailedRun(run) &&
+        !isConfigurationIncompleteFailedRun(run) &&
+        isNoopContinuationSuppressionCandidate({
+          invocationSource: "automation",
+          triggerDetail: "system",
+          issueStatus: issue.status,
+          issuePriority: issue.priority,
+          contextSnapshot: continuationSuppressionContext,
+        });
+      const pendingInteraction = suppressionCandidate
+        ? await findPendingIssueInteraction(tx, issue.companyId, issue.id)
+        : null;
+      if (pendingInteraction) {
+        const suppression = pendingInteractionContinuationSuppressionPayload({
+          issueId: issue.id,
+          pendingInteraction,
+        });
+        await tx.insert(agentWakeupRequests).values({
+          companyId: issue.companyId,
+          agentId: recoveryAgent?.id ?? run.agentId,
+          source: "automation",
+          triggerDetail: "system",
+          reason: ISSUE_CONTINUATION_WAITING_ON_INTERACTION_ERROR_CODE,
+          payload: {
+            issueId: issue.id,
+            retryOfRunId: run.id,
+            continuationSuppression: suppression,
+          },
+          status: "skipped",
+          requestedByActorType: "system",
+          requestedByActorId: null,
+          error:
+            "Automatic continuation suppressed because the issue is waiting on a pending interaction",
+          finishedAt: now,
+          updatedAt: now,
+        });
+        logger.info(
+          {
+            agentId: recoveryAgent?.id ?? run.agentId,
+            issueId: issue.id,
+            sourceRunId: run.id,
+            suppressionCode: ISSUE_CONTINUATION_WAITING_ON_INTERACTION_ERROR_CODE,
+            pendingInteractionId: pendingInteraction.id,
+            pendingInteractionKind: pendingInteraction.kind,
+          },
+          "releaseIssueExecutionAndPromote: suppressed no-op recovery while issue waits on interaction",
+        );
+        return { kind: "released" as const };
+      }
+
       const shouldBlockImmediately =
         !recoveryAgentInvokable ||
         !recoveryAgent ||
@@ -13118,11 +13266,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         };
       }
 
-      const retryReason = issue.status === "todo" ? "assignment_recovery" : "issue_continuation_needed";
-      const recoveryReason = issue.status === "todo" ? "issue_assignment_recovery" : "issue_continuation_needed";
-      const recoverySource =
-        issue.status === "todo" ? "issue.assignment_recovery" : "issue.continuation_recovery";
-      const now = new Date();
       const wakeupRequest = await tx
         .insert(agentWakeupRequests)
         .values({
@@ -13631,6 +13774,49 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             idempotencyKey: opts.idempotencyKey ?? null,
             finishedAt: new Date(),
           });
+          return { kind: "skipped" as const };
+        }
+
+        const suppressionCandidate = isNoopContinuationSuppressionCandidate({
+          invocationSource: source,
+          triggerDetail,
+          issueStatus: issue.status,
+          issuePriority: issue.priority,
+          contextSnapshot: enrichedContextSnapshot,
+        });
+        const pendingInteraction = suppressionCandidate
+          ? await findPendingIssueInteraction(tx, issue.companyId, issue.id)
+          : null;
+        if (pendingInteraction) {
+          const suppression = pendingInteractionContinuationSuppressionPayload({
+            issueId: issue.id,
+            pendingInteraction,
+          });
+          await tx.insert(agentWakeupRequests).values({
+            companyId: agent.companyId,
+            agentId,
+            source,
+            triggerDetail,
+            reason: ISSUE_CONTINUATION_WAITING_ON_INTERACTION_ERROR_CODE,
+            payload: { issueId: issue.id, continuationSuppression: suppression },
+            status: "skipped",
+            requestedByActorType: opts.requestedByActorType ?? null,
+            requestedByActorId: opts.requestedByActorId ?? null,
+            idempotencyKey: opts.idempotencyKey ?? null,
+            error:
+              "Automatic continuation suppressed because the issue is waiting on a pending interaction",
+            finishedAt: new Date(),
+          });
+          logger.info(
+            {
+              agentId,
+              issueId: issue.id,
+              suppressionCode: ISSUE_CONTINUATION_WAITING_ON_INTERACTION_ERROR_CODE,
+              pendingInteractionId: pendingInteraction.id,
+              pendingInteractionKind: pendingInteraction.kind,
+            },
+            "enqueueWakeup: suppressed no-op continuation while issue waits on interaction",
+          );
           return { kind: "skipped" as const };
         }
 

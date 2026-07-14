@@ -489,6 +489,8 @@ Recovery rule for a parked-for-review continuation:
 
 This keeps the post-decomposition umbrella (§7) on a real waiting path instead of relying on `parentId` rollup, which §6 does not treat as a dependency.
 
+A pending issue-thread interaction configured with `wake_assignee` or `wake_assignee_on_accept` is also an explicit waiting path. Paperclip suppresses a non-critical, system-generated `issue_continuation_needed` wake before adapter invocation when that wake contains no new comment, interaction decision, approval, blocker change, explicit resume intent, or other advancing signal. The skipped wake records `issue_continuation_waiting_on_interaction` plus bounded interaction identity metadata; manual wakes, critical work, and event-bearing continuations still run.
+
 ### 9.3 Recovery model-profile lane
 
 Cheap model profiles are only for status-only operational recovery overhead. Paperclip may request `modelProfile: "cheap"` for bounded recovery-owner work that updates task liveness, clears bad status, records a disposition, or asks for human/manager intervention. Those wakes must carry guard context such as `allowDeliverableWork: false`, `allowDocumentUpdates: false`, and `resumeRequiresNormalModel: true`.
