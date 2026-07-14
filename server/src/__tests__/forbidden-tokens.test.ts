@@ -139,8 +139,12 @@ describe("forbidden token check", () => {
     expect(exitCode).toBe(1);
     expect(exec).toHaveBeenCalledTimes(2);
     expect(error).toHaveBeenCalledWith("ERROR: Forbidden tokens found in tracked files:\n");
-    expect(error).toHaveBeenCalledWith("  server/file.ts:1:found");
+    expect(error).toHaveBeenCalledWith("  server/file.ts:1:[REDACTED forbidden token]");
     expect(error).toHaveBeenCalledWith("\nBuild blocked. Remove the forbidden token(s) before publishing.");
+    const errorOutput = error.mock.calls.flat().join("\n");
+    expect(errorOutput).not.toContain("server/file.ts:1:found");
+    expect(errorOutput).not.toContain("paperclip");
+    expect(errorOutput).not.toContain("custom-token");
   });
 
   it("adds path excludes to the git grep command", () => {
