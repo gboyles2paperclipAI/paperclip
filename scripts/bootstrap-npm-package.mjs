@@ -27,7 +27,7 @@ function usage() {
       "",
       "Examples:",
       "  node scripts/bootstrap-npm-package.mjs @paperclipai/adapter-acpx-local",
-      "  node scripts/bootstrap-npm-package.mjs packages/adapters/acpx-local --publish",
+      "  node scripts/bootstrap-npm-package.mjs packages/adapters/acpx-local --publish --otp 123456",
       "",
     ].join("\n"),
   );
@@ -109,10 +109,6 @@ function runChecked(command, args, options = {}) {
   if (result.status !== 0) {
     throw new Error(`${command} ${args.join(" ")} failed with status ${result.status ?? "unknown"}`);
   }
-}
-
-function formatCommand(command, args) {
-  return `${command} ${args.join(" ")}`;
 }
 
 function ensureNpmAuth() {
@@ -226,17 +222,26 @@ function verifyStagedTarball(staged) {
   }
 }
 
-function publishPackage(pkg, staged, otp) {
+function publishPackage(staged, otp, commandRunner = runCommand) {
   verifyStagedTarball(staged);
   const publishArgs = buildPublishArgs(staged.tarballPath, { otp });
 
-  const result = runCommand("pnpm", publishArgs);
+  let result;
+  try {
+    result = commandRunner("pnpm", publishArgs);
+  } catch {
+    throw new Error(
+      "npm publish failed before completion. Command details were withheld because they may contain authentication material.",
+    );
+  }
+  if (!result || result.error) {
+    throw new Error(
+      "npm publish failed before completion. Command details were withheld because they may contain authentication material.",
+    );
+  }
   const stdout = result.stdout ?? "";
   const stderr = result.stderr ?? "";
   const output = `${stdout}\n${stderr}`.trim();
-
-  if (stdout) process.stdout.write(stdout);
-  if (stderr) process.stderr.write(stderr);
 
   if (result.status === 0) {
     return;
@@ -246,12 +251,14 @@ function publishPackage(pkg, staged, otp) {
     throw new Error(
       [
         "npm publish reached the publish-time 2FA check.",
-        "Complete the browser auth URL printed by npm and rerun the helper, or rerun with `--otp <code>` if your npm account uses authenticator-app codes.",
+        "Complete npm authentication separately and rerun with a fresh `--otp <code>` if your account uses authenticator-app codes.",
       ].join(" "),
     );
   }
 
-  throw new Error(`${formatCommand("pnpm", publishArgs)} failed with status ${result.status ?? "unknown"}`);
+  throw new Error(
+    "npm publish failed. Command output was withheld because it may contain authentication material.",
+  );
 }
 
 function main(argv) {
@@ -314,7 +321,7 @@ function main(argv) {
     }
 
     process.stdout.write(`Publishing ${pkg.name}...\n`);
-    publishPackage(pkg, staged, otp);
+    publishPackage(staged, otp);
     printNextSteps(pkg);
   } finally {
     if (stageRoot) cleanupReleaseStageRoot(stageRoot);

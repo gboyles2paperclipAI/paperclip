@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
-import { buildPublishArgs, parseArgs, resolveTargetPackage } from "./bootstrap-npm-package.mjs";
+import {
+  buildPublishArgs,
+  parseArgs,
+  publishPackage,
+  resolveTargetPackage,
+} from "./bootstrap-npm-package.mjs";
 
 test("parseArgs recognizes publish and skip-build flags", () => {
   assert.deepEqual(parseArgs(["@paperclipai/adapter-acpx-local", "--publish", "--skip-build"]), {
@@ -82,4 +91,70 @@ test("buildPublishArgs includes dry-run and otp flags when requested", () => {
     "--otp",
     "123456",
   ]);
+});
+
+test("publish failures never expose the otp or raw command output", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "paperclip-bootstrap-publish-"));
+  const tarballPath = join(fixture, "staged-package.tgz");
+  const bytes = Buffer.from("immutable staged bytes");
+  const sentinelOtp = "OTP_SENTINEL_593817";
+  writeFileSync(tarballPath, bytes);
+  const staged = {
+    tarballPath,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+  const failures = [
+    () => ({
+      status: 1,
+      stdout: `raw args included --otp ${sentinelOtp}`,
+      stderr: `registry failure repeated ${sentinelOtp}`,
+    }),
+    () => ({
+      status: 1,
+      stdout: `npm error EOTP one-time password ${sentinelOtp}`,
+      stderr: "",
+    }),
+    () => ({ status: null, stdout: sentinelOtp, stderr: sentinelOtp }),
+    () => ({ error: new Error(`spawn result ${sentinelOtp}`) }),
+    () => {
+      throw new Error(`spawn threw ${sentinelOtp}`);
+    },
+  ];
+
+  try {
+    for (const commandRunner of failures) {
+      let capturedStdout = "";
+      let capturedStderr = "";
+      let thrown;
+      const originalStdoutWrite = process.stdout.write;
+      const originalStderrWrite = process.stderr.write;
+      process.stdout.write = (chunk) => {
+        capturedStdout += String(chunk);
+        return true;
+      };
+      process.stderr.write = (chunk) => {
+        capturedStderr += String(chunk);
+        return true;
+      };
+      try {
+        publishPackage(staged, sentinelOtp, (command, args) => {
+          assert.equal(command, "pnpm");
+          assert.ok(args.includes(sentinelOtp));
+          return commandRunner();
+        });
+      } catch (error) {
+        thrown = error;
+      } finally {
+        process.stdout.write = originalStdoutWrite;
+        process.stderr.write = originalStderrWrite;
+      }
+
+      assert.ok(thrown instanceof Error);
+      const observable = `${capturedStdout}\n${capturedStderr}\n${thrown.message}`;
+      assert.doesNotMatch(observable, new RegExp(sentinelOtp));
+      assert.doesNotMatch(observable, /raw args included|registry failure repeated|spawn result|spawn threw/);
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
