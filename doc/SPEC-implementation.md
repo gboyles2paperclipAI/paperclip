@@ -181,7 +181,11 @@ Invariants:
 - `last_used_at` timestamptz null
 - `revoked_at` timestamptz null
 
-Invariant: plaintext key shown once at creation; only hash stored.
+Invariants:
+
+- plaintext key is shown once at creation; only its hash is stored
+- key creation writes bounded actor/source provenance into the existing `activity_log`; authorized inventory responses combine the earliest linked audit record (ordered by timestamp, then audit id) with `last_used_at` but never include plaintext tokens or key hashes
+- keys without a linked creation audit record report `unknown` provenance instead of inventing an actor or source
 
 ## 7.4 `goals`
 
@@ -690,6 +694,7 @@ All endpoints are under `/api` and return JSON.
 - `POST /agents/:agentId/pause`
 - `POST /agents/:agentId/resume`
 - `POST /agents/:agentId/terminate`
+- `GET /agents/:agentId/keys` (board-authorized metadata inventory; never returns token/hash material)
 - `POST /agents/:agentId/keys` (create API key)
 - `POST /agents/:agentId/heartbeat/invoke`
 

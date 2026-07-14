@@ -4212,7 +4212,23 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
 
 /* ---- Keys Tab ---- */
 
-function KeysTab({ agentId, companyId }: { agentId: string; companyId?: string }) {
+function describeKeyCreation(key: AgentKey) {
+  const creation = key.creation ?? {
+    actorType: "unknown",
+    actorId: null,
+    source: "unknown",
+  };
+  if (creation.actorType === "unknown") return "Creation provenance unavailable";
+  const actor = creation.actorId
+    ? `${creation.actorType} ${creation.actorId}`
+    : creation.actorType;
+  const source = creation.source === "unknown"
+    ? "unknown source"
+    : creation.source.replaceAll("_", " ");
+  return `Created by ${actor} via ${source}`;
+}
+
+export function KeysTab({ agentId, companyId }: { agentId: string; companyId?: string }) {
   const queryClient = useQueryClient();
   const [newKeyName, setNewKeyName] = useState("");
   const [newToken, setNewToken] = useState<string | null>(null);
@@ -4336,12 +4352,17 @@ function KeysTab({ agentId, companyId }: { agentId: string; companyId?: string }
           </h3>
           <div className="border border-border rounded-lg divide-y divide-border">
             {activeKeys.map((key: AgentKey) => (
-              <div key={key.id} className="flex items-center justify-between px-4 py-2.5">
-                <div>
-                  <span className="text-sm font-medium">{key.name}</span>
-                  <span className="text-xs text-muted-foreground ml-3">
-                    Created {formatDate(key.createdAt)}
-                  </span>
+              <div key={key.id} className="flex items-center justify-between gap-4 px-4 py-2.5">
+                <div className="min-w-0">
+                  <div>
+                    <span className="text-sm font-medium">{key.name}</span>
+                    <span className="text-xs text-muted-foreground ml-3">
+                      Created {formatDate(key.createdAt)} · {key.lastUsedAt ? `Last used ${formatDate(key.lastUsedAt)}` : "Never used"}
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground break-all">
+                    {describeKeyCreation(key)}
+                  </p>
                 </div>
                 <Button
                   variant="ghost"
@@ -4366,12 +4387,17 @@ function KeysTab({ agentId, companyId }: { agentId: string; companyId?: string }
           </h3>
           <div className="border border-border rounded-lg divide-y divide-border opacity-50">
             {revokedKeys.map((key: AgentKey) => (
-              <div key={key.id} className="flex items-center justify-between px-4 py-2.5">
-                <div>
-                  <span className="text-sm line-through">{key.name}</span>
-                  <span className="text-xs text-muted-foreground ml-3">
-                    Revoked {key.revokedAt ? formatDate(key.revokedAt) : ""}
-                  </span>
+              <div key={key.id} className="flex items-center justify-between gap-4 px-4 py-2.5">
+                <div className="min-w-0">
+                  <div>
+                    <span className="text-sm line-through">{key.name}</span>
+                    <span className="text-xs text-muted-foreground ml-3">
+                      Revoked {key.revokedAt ? formatDate(key.revokedAt) : ""} · {key.lastUsedAt ? `Last used ${formatDate(key.lastUsedAt)}` : "Never used"}
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground break-all">
+                    {describeKeyCreation(key)}
+                  </p>
                 </div>
               </div>
             ))}
