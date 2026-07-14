@@ -12,6 +12,7 @@ import {
   heartbeatRuns,
   issueComments,
   issueDocuments,
+  issueThreadInteractions,
   issues,
 } from "@paperclipai/db";
 import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
@@ -290,6 +291,41 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       documentId,
       key: ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
     });
+  }
+
+  async function seedPendingQuestionsInteraction(input: {
+    companyId: string;
+    issueId: string;
+    agentId: string;
+    sourceRunId?: string;
+  }) {
+    return db
+      .insert(issueThreadInteractions)
+      .values({
+        companyId: input.companyId,
+        issueId: input.issueId,
+        kind: "ask_user_questions",
+        status: "pending",
+        continuationPolicy: "wake_assignee",
+        createdByAgentId: input.agentId,
+        sourceRunId: input.sourceRunId ?? null,
+        payload: {
+          version: 1,
+          questions: [
+            {
+              id: "decision",
+              prompt: "Which option should proceed?",
+              selectionMode: "single",
+              options: [
+                { id: "one", label: "Option one" },
+                { id: "two", label: "Option two" },
+              ],
+            },
+          ],
+        },
+      })
+      .returning()
+      .then((rows) => rows[0]!);
   }
 
   it("skips generic timer wakes with no actionable assigned work before adapter execution", async () => {
@@ -1413,6 +1449,258 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       .then((rows) => rows[0] ?? null);
     expect(run?.status).toBe("succeeded");
     expect(run?.errorCode).toBeNull();
+  });
+
+  it("suppresses an automatic continuation before queueing while a user interaction is pending", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Waiting for operator choice",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+    const interaction = await seedPendingQuestionsInteraction({ companyId, issueId, agentId });
+
+    const run = await heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_continuation_needed",
+      payload: { issueId },
+      requestedByActorType: "system",
+      contextSnapshot: {
+        issueId,
+        taskId: issueId,
+        wakeReason: "issue_continuation_needed",
+        retryReason: "issue_continuation_needed",
+        source: "issue.continuation_recovery",
+      },
+    });
+
+    expect(run).toBeNull();
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+
+    const [wakeup, runRows] = await Promise.all([
+      db
+        .select({
+          status: agentWakeupRequests.status,
+          reason: agentWakeupRequests.reason,
+          payload: agentWakeupRequests.payload,
+        })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.agentId, agentId))
+        .then((rows) => rows[0] ?? null),
+      db.select({ id: heartbeatRuns.id }).from(heartbeatRuns),
+    ]);
+
+    expect(wakeup).toMatchObject({
+      status: "skipped",
+      reason: "issue_continuation_waiting_on_interaction",
+      payload: {
+        issueId,
+        continuationSuppression: {
+          code: "issue_continuation_waiting_on_interaction",
+          pendingInteractionId: interaction.id,
+          pendingInteractionKind: "ask_user_questions",
+          continuationPolicy: "wake_assignee",
+        },
+      },
+    });
+    expect(runRows).toHaveLength(0);
+  });
+
+  it.each([
+    {
+      sourceLabel: "manual",
+      source: "on_demand",
+      triggerDetail: "manual",
+      reason: "operator_resume",
+      requestedByActorType: "user",
+      requestedByActorId: "local-board",
+      contextSnapshot: { wakeReason: "operator_resume", resumeIntent: true },
+    },
+    {
+      sourceLabel: "automatic continuation",
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_continuation_needed",
+      requestedByActorType: "system",
+      requestedByActorId: null,
+      contextSnapshot: {
+        wakeReason: "issue_continuation_needed",
+        retryReason: "issue_continuation_needed",
+        source: "issue.continuation_recovery",
+      },
+    },
+  ] as const)("suppresses automatic direct recovery when a $sourceLabel source run creates a pending interaction and fails", async (source) => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Continuation asked the operator and then failed",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+
+    let interactionId: string | null = null;
+    mockAdapterExecute.mockImplementationOnce(async (context: { runId: string }) => {
+      const interaction = await seedPendingQuestionsInteraction({
+        companyId,
+        issueId,
+        agentId,
+        sourceRunId: context.runId,
+      });
+      interactionId = interaction.id;
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: "Synthetic continuation failure after asking the operator",
+        provider: "test",
+        model: "test-model",
+      };
+    });
+
+    const sourceRun = await heartbeat.wakeup(agentId, {
+      source: source.source,
+      triggerDetail: source.triggerDetail,
+      reason: source.reason,
+      payload: { issueId },
+      requestedByActorType: source.requestedByActorType,
+      requestedByActorId: source.requestedByActorId,
+      contextSnapshot: {
+        issueId,
+        taskId: issueId,
+        ...source.contextSnapshot,
+      },
+    });
+
+    expect(sourceRun).not.toBeNull();
+    await waitForCondition(async () => {
+      const [run, skippedWake] = await Promise.all([
+        db
+          .select({ status: heartbeatRuns.status })
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, sourceRun!.id))
+          .then((rows) => rows[0] ?? null),
+        db
+          .select({ id: agentWakeupRequests.id })
+          .from(agentWakeupRequests)
+          .where(eq(agentWakeupRequests.reason, "issue_continuation_waiting_on_interaction"))
+          .then((rows) => rows[0] ?? null),
+      ]);
+      return run?.status === "failed" && Boolean(skippedWake);
+    }, 5_000);
+
+    const [runs, skippedWake] = await Promise.all([
+      db
+        .select({
+          id: heartbeatRuns.id,
+          status: heartbeatRuns.status,
+          retryOfRunId: heartbeatRuns.retryOfRunId,
+        })
+        .from(heartbeatRuns),
+      db
+        .select({
+          status: agentWakeupRequests.status,
+          reason: agentWakeupRequests.reason,
+          payload: agentWakeupRequests.payload,
+        })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.reason, "issue_continuation_waiting_on_interaction"))
+        .then((rows) => rows[0] ?? null),
+    ]);
+
+    expect(interactionId).not.toBeNull();
+    expect(runs).toEqual([
+      expect.objectContaining({
+        id: sourceRun!.id,
+        status: "failed",
+        retryOfRunId: null,
+      }),
+    ]);
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    expect(skippedWake).toMatchObject({
+      status: "skipped",
+      reason: "issue_continuation_waiting_on_interaction",
+      payload: {
+        issueId,
+        retryOfRunId: sourceRun!.id,
+        continuationSuppression: {
+          code: "issue_continuation_waiting_on_interaction",
+          pendingInteractionId: interactionId,
+          pendingInteractionKind: "ask_user_questions",
+          continuationPolicy: "wake_assignee",
+        },
+      },
+    });
+  }, 15_000);
+
+  it("preserves an explicit manual continuation while an interaction is pending", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Operator explicitly requested a continuation",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+    await seedPendingQuestionsInteraction({ companyId, issueId, agentId });
+
+    const run = await heartbeat.wakeup(agentId, {
+      source: "on_demand",
+      triggerDetail: "manual",
+      reason: "issue_continuation_needed",
+      payload: { issueId },
+      requestedByActorType: "user",
+      requestedByActorId: "local-board",
+      contextSnapshot: {
+        issueId,
+        wakeReason: "issue_continuation_needed",
+        retryReason: "issue_continuation_needed",
+      },
+    });
+
+    expect(run).not.toBeNull();
+    await waitForCondition(async () => countExecuteCallsForRun(run!.id) === 1);
+    expect(countExecuteCallsForRun(run!.id)).toBe(1);
+  });
+
+  it("preserves critical automatic continuations while an interaction is pending", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Critical continuation",
+      status: "in_progress",
+      priority: "critical",
+      assigneeAgentId: agentId,
+    });
+    await seedPendingQuestionsInteraction({ companyId, issueId, agentId });
+
+    const run = await heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_continuation_needed",
+      payload: { issueId },
+      requestedByActorType: "system",
+      contextSnapshot: {
+        issueId,
+        wakeReason: "issue_continuation_needed",
+        retryReason: "issue_continuation_needed",
+      },
+    });
+
+    expect(run).not.toBeNull();
+    await waitForCondition(async () => countExecuteCallsForRun(run!.id) === 1);
+    expect(countExecuteCallsForRun(run!.id)).toBe(1);
   });
 
   it("baseline: runs queued runs when the issue is in_progress with the same assignee", async () => {
