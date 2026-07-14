@@ -115,6 +115,17 @@ function canonicalLiteralFragments(source) {
   return value.toLowerCase();
 }
 
+function containsLiteralPackagePublishCommand(command) {
+  const canonicalCommand = command.replace(/\\(.)/g, "$1").replace(/["']/g, "");
+  for (const match of canonicalCommand.matchAll(/\b(?:npm|pnpm)\b/gi)) {
+    const remaining = canonicalCommand.slice(match.index);
+    const separatorIndex = remaining.search(/&&|\|\||[|&;#`)]|\s\d*>/);
+    const segment = separatorIndex === -1 ? remaining : remaining.slice(0, separatorIndex);
+    if (findPublishSubcommand(tokenizeCommand(segment)) !== -1) return true;
+  }
+  return false;
+}
+
 function findProgrammaticPackagePublishOffenses(filePath, content) {
   const offenses = [];
   const directChildProcessCall =
@@ -124,6 +135,15 @@ function findProgrammaticPackagePublishOffenses(filePath, content) {
       /^(?:npm|pnpm)$/.test(canonicalLiteralFragments(match[1]) ?? "") &&
       match[2].split(",").some((element) => canonicalLiteralFragments(element) === "publish")
     ) {
+      const lineNumber = content.slice(0, match.index).split(/\r?\n/).length;
+      offenses.push(`${filePath}:${lineNumber}`);
+    }
+  }
+  const directCommandStringCall =
+    /\b(?:exec(?:Sync)?|execaCommand(?:Sync)?)\s*\(\s*([\s\S]{1,600}?)(?:,|\))/g;
+  for (const match of content.matchAll(directCommandStringCall)) {
+    const command = canonicalLiteralFragments(match[1]);
+    if (command && containsLiteralPackagePublishCommand(command)) {
       const lineNumber = content.slice(0, match.index).split(/\r?\n/).length;
       offenses.push(`${filePath}:${lineNumber}`);
     }
@@ -306,6 +326,9 @@ test("common literal spawn, exec, and execa publication forms stay behind canoni
     'execSync("npm publish .");',
     'exec("pnpm publish .", callback);',
     'execaCommand("npm publish .");',
+    'execSync("n" + "pm publish .");',
+    'exec("npm pub" + "lish .", callback);',
+    'execaCommand("n" + "pm pub" + "lish .");',
     'spawnSync("npm", ["view", "paperclipai"]);',
     'spawnSync(command, args);',
     'commandRunner("pnpm", publishArgs);',
@@ -321,6 +344,9 @@ test("common literal spawn, exec, and execa publication forms stay behind canoni
     "scripts/example.mjs:8",
     "scripts/example.mjs:9",
     "scripts/example.mjs:10",
+    "scripts/example.mjs:11",
+    "scripts/example.mjs:12",
+    "scripts/example.mjs:13",
   ]);
 });
 
