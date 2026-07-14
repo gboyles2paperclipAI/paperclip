@@ -48,15 +48,22 @@ describe("issue validators", () => {
     expect(parsed.comment).toBe("Done\n\n- Verified the route");
   });
 
-  it("accepts object-shaped issue update comments from generated clients", () => {
-    const parsed = updateIssueSchema.parse({
-      status: "done",
-      comment: {
-        body: "Done\\n\\n- Verified the route",
-      },
+  it("keeps issue attribution fields create-only", () => {
+    const created = createIssueSchema.parse({
+      title: "Preserve attribution input for route checks",
+      createdByUserId: "spoofed-creator",
+      responsibleUserId: "spoofed-responsible",
+    });
+    const updated = updateIssueSchema.parse({
+      title: "Do not update attribution",
+      createdByUserId: "spoofed-creator",
+      responsibleUserId: "spoofed-responsible",
     });
 
-    expect(parsed.comment).toBe("Done\n\n- Verified the route");
+    expect(created.createdByUserId).toBe("spoofed-creator");
+    expect(created.responsibleUserId).toBe("spoofed-responsible");
+    expect(updated).not.toHaveProperty("createdByUserId");
+    expect(updated).not.toHaveProperty("responsibleUserId");
   });
 
   it("allows false-positive recovery resolutions to atomically restore the source issue status", () => {
@@ -99,25 +106,6 @@ describe("issue validators", () => {
       resolveIssueRecoveryActionSchema.safeParse({
         outcome: "false_positive",
         sourceIssueStatus: "todo",
-      }).success,
-    ).toBe(false);
-  });
-
-  it("allows restored recovery resolutions to intentionally park the source issue in backlog", () => {
-    expect(
-      resolveIssueRecoveryActionSchema.parse({
-        outcome: "restored",
-        sourceIssueStatus: "backlog",
-      }),
-    ).toMatchObject({
-      outcome: "restored",
-      sourceIssueStatus: "backlog",
-    });
-
-    expect(
-      resolveIssueRecoveryActionSchema.safeParse({
-        outcome: "false_positive",
-        sourceIssueStatus: "backlog",
       }).success,
     ).toBe(false);
   });
@@ -167,14 +155,6 @@ describe("issue validators", () => {
     });
 
     expect(parsed.body).toBe("Progress update\n\nNext action.");
-  });
-
-  it("accepts legacy comment field for issue comment bodies", () => {
-    const parsed = addIssueCommentSchema.parse({
-      comment: "Legacy automation update.",
-    });
-
-    expect(parsed.body).toBe("Legacy automation update.");
   });
 
   it("accepts structured issue comment presentation and metadata", () => {
@@ -265,12 +245,18 @@ describe("issue validators", () => {
     }).status).toBe("backlog");
   });
 
-  it("defaults issue work mode to standard and accepts ask and planning", () => {
+  it("defaults issue work mode to standard and accepts ask, planning, and skill_test", () => {
     expect(createIssueSchema.parse({ title: "Plan first" }).workMode).toBe("standard");
     expect(createIssueSchema.parse({ title: "Ask first", workMode: "ask" }).workMode).toBe("ask");
     expect(createIssueSchema.parse({ title: "Plan first", workMode: "planning" }).workMode).toBe("planning");
+    expect(createIssueSchema.parse({
+      title: "Harness test",
+      workMode: "skill_test",
+      harnessKind: "skill_test",
+    })).toMatchObject({ workMode: "skill_test", harnessKind: "skill_test" });
     expect(updateIssueSchema.parse({ workMode: "ask" }).workMode).toBe("ask");
     expect(updateIssueSchema.parse({ workMode: "planning" }).workMode).toBe("planning");
+    expect(updateIssueSchema.parse({ workMode: "skill_test" }).workMode).toBe("skill_test");
     expect(suggestedTaskDraftSchema.parse({
       clientKey: "ask-child",
       title: "Ask child",
@@ -281,6 +267,11 @@ describe("issue validators", () => {
       title: "Plan child",
       workMode: "planning",
     }).workMode).toBe("planning");
+    expect(suggestedTaskDraftSchema.parse({
+      clientKey: "skill-test-child",
+      title: "Test child",
+      workMode: "skill_test",
+    }).workMode).toBe("skill_test");
   });
 
   it("validates blocked inbox attention payloads and requires redacted secret fields", () => {

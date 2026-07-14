@@ -1063,8 +1063,10 @@ export function buildHostServices(
 
   return {
     config: {
-      async get() {
-        const configRow = await registry.getConfig(pluginId);
+      async get(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const configRow = await registry.getConfig(pluginId, companyId);
         return configRow?.configJson ?? {};
       },
     },
@@ -1240,7 +1242,9 @@ export function buildHostServices(
 
     secrets: {
       async resolve(params) {
-        return secretsHandler.resolve(params);
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return secretsHandler.resolve({ ...params, companyId });
       },
     },
 
@@ -1558,6 +1562,8 @@ export function buildHostServices(
           originRunId: params.originRunId ?? actorRunId ?? null,
           createdByAgentId: actorAgentId ?? null,
           createdByUserId: actorUserId ?? null,
+          actorResponsibleUserId: actorUserId ?? null,
+          trustExplicitResponsibleUserId: true,
         })) as Issue;
         await logPluginActivity({
           companyId,
@@ -2643,7 +2649,7 @@ export function buildHostServices(
         // Track the subscription so it can be cleaned up on dispose() if the run
         // never reaches a terminal status (hang, crash, network partition).
         if (notifyWorker) {
-          const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+          const TERMINAL_STATUSES = new Set(["succeeded", "interrupted", "failed", "cancelled", "timed_out"]);
 
           const cleanup = () => {
             unsubscribe();

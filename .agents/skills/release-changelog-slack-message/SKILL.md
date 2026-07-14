@@ -1,28 +1,26 @@
 ---
-name: release-changelog-slack-message
+name: release-changelog-discord-message
 description: >
-  Write the Slack release announcement for a stable Paperclip release. Companion
-  to `release-changelog` — that skill produces the file at `releases/vYYYY.MDD.P.md`;
-  this one turns that file into a single copy-pasteable Slack post in dotta's
-  voice and attaches it as the `slack_announcement` document on the release
-  issue.
+  Write the Discord announcement for a stable Paperclip release from the release
+  changelog. Use when a release issue needs a copy-pasteable dotta-voice Discord
+  post or refreshed discord_announcement document.
 ---
 
-# Release Slack Announcement Skill
+# Release Discord Announcement Skill
 
-Write the Slack release announcement for the **stable** Paperclip release.
+Write the Discord release announcement for the **stable** Paperclip release.
 
 This is the companion to `.agents/skills/release-changelog/SKILL.md`. That skill
 generates the file at `releases/vYYYY.MDD.P.md`. This skill turns that file into
-a single copy-pasteable Slack block, in dotta's voice, and posts it as the
-`slack_announcement` document on the release issue.
+a single copy-pasteable Discord block, in dotta's voice, and posts it as the
+`discord_announcement` document on the release issue.
 
 ## What dotta said
 
-> This is for Slack — try to follow my format. If I have a section where I
+> This is for discord — try to follow my format. If I have a section where I
 > think about the future, pull from recent issues we're working on etc.
 
-The Slack announcement is **not** the changelog. The changelog is exhaustive;
+The Discord announcement is **not** the changelog. The changelog is exhaustive;
 the announcement is opinionated, in-voice, and built around the same handful of
 shipped highlights plus a real "what's next" + "what's on my mind" pulled from
 current Paperclip work — not invented.
@@ -32,7 +30,7 @@ current Paperclip work — not invented.
 - After `release-changelog` has produced `releases/vYYYY.MDD.P.md` on the
   release worktree/PR.
 - When the release issue (the one assigned by the release routine) asks for a
-  Slack announcement, or has a `slack_announcement` document that needs to
+  Discord announcement, or has a `discord_announcement` document that needs to
   be refreshed for a new date/version.
 - Never run this in isolation. The version, date, contributor list, and
   highlight set MUST match the matching changelog file — if the changelog has
@@ -40,14 +38,15 @@ current Paperclip work — not invented.
 
 ## Output
 
-A single fenced markdown code block, ready to paste into Slack. Attached as
-issue document key `slack_announcement` on the release issue, and pasted
+A single fenced markdown code block, ready to paste into Discord. Attached as
+issue document key `discord_announcement` on the release issue, and pasted
 verbatim into a comment on that issue so the human can copy it out.
+When Cases are enabled, also upsert the social child case described below.
 
 ```bash
-PUT /api/issues/{releaseIssueId}/documents/slack_announcement
+PUT /api/issues/{releaseIssueId}/documents/discord_announcement
 {
-  "title": "Slack announcement",
+  "title": "Discord announcement",
   "format": "markdown",
   "body": "<the announcement>",
   "baseRevisionId": "<latest if updating>"
@@ -60,8 +59,8 @@ the document was last written, mention what changed in the issue comment.
 
 ## Format (follow this template)
 
-Use Slack emoji shortcodes (`:paperclip:`, `:lock:`, `:brain:` …) — NOT the
-Unicode emoji. Slack renders the shortcodes; the changelog file uses prose.
+Use Discord emoji shortcodes (`:paperclip:`, `:lock:`, `:brain:` …) — NOT the
+Unicode emoji. Discord renders the shortcodes; the changelog file uses prose.
 
 ```
 :paperclip: :paperclip: :paperclip: CLIPPERS!!! v{VERSION} IS OUT :paperclip: :paperclip: :paperclip:
@@ -126,7 +125,7 @@ Notes on the template:
   part of the brand — keep them.
 - Sections may be UPPERCASE or Title Case — dotta has used both. Pick a style
   and stay consistent within a single post.
-- Use `||@everyone||` (Slack spoiler-wrapped) at the very end so it pings
+- Use `||@everyone||` (Discord spoiler-wrapped) at the very end so it pings
   exactly once when the spoiler is removed by the poster.
 
 ## Language tips
@@ -177,23 +176,76 @@ Mimic this register; do not invent a "professional" tone.
 
 1. Read the matching `releases/vYYYY.MDD.P.md` produced by `release-changelog`.
    Use the version and contributor list from that file — never re-derive them.
-2. Read the **release issue thread** (the one assigned to you that ran the
+2. Resolve the parent `release` case with key `paperclip-release:vYYYY.MDD.P`.
+   If it does not exist and Cases are enabled, create it using the schema in
+   `.agents/skills/release-changelog/SKILL.md` before creating child cases.
+3. Read the **release issue thread** (the one assigned to you that ran the
    release routine) — comments + linked issues + recent issues in the company
    are the source for `WHATS NEXT` and `What's on my mind`. Pull real themes,
    not invented ones.
-3. Re-read the three verbatim examples below — they're the canonical voice.
-4. Draft the announcement using the template above.
-5. PUT it as the `slack_announcement` document on the release issue (see
+4. Re-read the three verbatim examples below — they're the canonical voice.
+5. Draft the announcement using the template above.
+6. PUT it as the `discord_announcement` document on the release issue (see
    "Output" above). If updating, send the latest `baseRevisionId`.
-6. Post a comment on the release issue that includes the announcement inside a
-   single fenced markdown code block, so dotta can copy-paste it into Slack
+7. Upsert the `tweet_storm` child case with `parentCaseId` set to the release
+   case id, then PUT its `body` document to the announcement body.
+8. Post a comment on the release issue that includes the announcement inside a
+   single fenced markdown code block, so dotta can copy-paste it into Discord
    without opening the document.
 
-Do not publish to Slack. This skill only prepares the artifact.
+## Tweet Storm Case Schema
+
+Use this child case for the Discord/social announcement thread. The key must be
+stable so retries update the same child case:
+
+```http
+POST /api/companies/:companyId/cases
+{
+  "caseType": "tweet_storm",
+  "key": "paperclip-release:vYYYY.MDD.P:tweet-storm",
+  "title": "Paperclip vYYYY.MDD.P tweet storm",
+  "summary": "Social announcement thread for Paperclip vYYYY.MDD.P.",
+  "status": "in_review",
+  "parentCaseId": "<release-case-id>",
+  "fields": {
+    "schema_version": 1,
+    "version": "vYYYY.MDD.P",
+    "channel": "x",
+    "discord_source": true,
+    "post_count": 1,
+    "target_audience": ["operators", "contributors", "agent-company builders"],
+    "links": {
+      "release_notes": "https://github.com/paperclipai/paperclip/blob/master/releases/vYYYY.MDD.P.md",
+      "official_account": "https://x.com/papercliping"
+    },
+    "review": {
+      "needs_human_copy_paste": true,
+      "approved_by": null
+    }
+  }
+}
+```
+
+Then write the body document:
+
+```http
+PUT /api/cases/:tweetStormCaseId/documents/body
+{
+  "title": "Paperclip vYYYY.MDD.P tweet storm body",
+  "format": "markdown",
+  "body": "<announcement body>",
+  "changeSummary": "Draft social announcement"
+}
+```
+
+If updating an existing document, fetch the case and pass the latest
+`baseRevisionId`.
+
+Do not publish to Discord. This skill only prepares the artifact.
 
 ## Verbatim previous examples
 
-Three previous Slack announcements from dotta, included **verbatim** as the
+Three previous Discord announcements from dotta, included **verbatim** as the
 ground-truth examples for voice, structure, and emoji usage. When in doubt,
 match these.
 
@@ -400,7 +452,7 @@ Before handing off:
 5. Section style (UPPERCASE vs Title Case) is internally consistent.
 6. Closing tagline is `ITS TIME TO CLIP :paperclip: :paperclip: :paperclip:`
    and `||@everyone||` is the very last line.
-7. Document `slack_announcement` is updated on the release issue, and the
+7. Document `discord_announcement` is updated on the release issue, and the
    announcement is also posted in a comment inside a fenced code block.
 
-This skill never posts to Slack. It only prepares the announcement artifact.
+This skill never posts to Discord. It only prepares the announcement artifact.

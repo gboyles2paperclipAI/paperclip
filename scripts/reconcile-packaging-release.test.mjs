@@ -1,0 +1,132 @@
+import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import test from "node:test";
+
+const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+
+function readJson(path) {
+  return JSON.parse(readFileSync(join(repoRoot, path), "utf8"));
+}
+
+function readText(path) {
+  return readFileSync(join(repoRoot, path), "utf8");
+}
+
+function packageExportHasProductionTarget(pkg, key) {
+  const target = pkg.exports?.[key];
+  return Boolean(
+    target &&
+      typeof target === "object" &&
+      typeof target.production === "string" &&
+      typeof target.types === "string" &&
+      typeof target.import === "string" &&
+      typeof target.default === "string",
+  );
+}
+
+test("selected ACPX package architecture remains publishable and built in", () => {
+  const manifest = readJson("scripts/release-package-manifest.json");
+  const releaseEntry = manifest.find((entry) => entry.dir === "packages/adapters/acpx-local");
+  assert.deepEqual(releaseEntry, {
+    dir: "packages/adapters/acpx-local",
+    name: "@paperclipai/adapter-acpx-local",
+    publishFromCi: true,
+  });
+
+  assert.equal(existsSync(join(repoRoot, "packages/adapters/acpx-local/package.json")), true);
+  const acpxPkg = readJson("packages/adapters/acpx-local/package.json");
+  assert.equal(acpxPkg.name, "@paperclipai/adapter-acpx-local");
+  assert.equal(acpxPkg.dependencies.acpx, "^0.11.2");
+  assert.equal(acpxPkg.dependencies["@agentclientprotocol/claude-agent-acp"], "^0.52.0");
+  assert.equal(acpxPkg.dependencies["@zed-industries/codex-acp"], "^0.12.0");
+
+  const cliPkg = readJson("cli/package.json");
+  const serverPkg = readJson("server/package.json");
+  assert.equal(cliPkg.dependencies["@paperclipai/adapter-acpx-local"], "workspace:*");
+  assert.equal(serverPkg.dependencies["@paperclipai/adapter-acpx-local"], "workspace:*");
+});
+
+test("published package exports keep production runtime markers", () => {
+  const packagePaths = [
+    "packages/adapter-utils/package.json",
+    "packages/adapters/acpx-local/package.json",
+    "packages/adapters/claude-local/package.json",
+    "packages/adapters/codex-local/package.json",
+    "packages/adapters/gemini-local/package.json",
+    "packages/shared/package.json",
+  ];
+
+  for (const packagePath of packagePaths) {
+    const pkg = readJson(packagePath);
+    assert.equal(packageExportHasProductionTarget(pkg, "."), true, `${packagePath} root export`);
+  }
+
+  for (const packagePath of packagePaths.slice(1, 5)) {
+    const pkg = readJson(packagePath);
+    assert.equal(packageExportHasProductionTarget(pkg, "./server"), true, `${packagePath} server export`);
+    assert.equal(packageExportHasProductionTarget(pkg, "./ui"), true, `${packagePath} ui export`);
+    assert.equal(packageExportHasProductionTarget(pkg, "./cli"), true, `${packagePath} cli export`);
+  }
+});
+
+test("dependency override policy preserves fork security pins and frozen upstream UI pins", () => {
+  const rootPkg = readJson("package.json");
+  const overrides = rootPkg.pnpm?.overrides ?? {};
+  const expected = {
+    rollup: ">=4.59.0",
+    "drizzle-orm": ">=0.45.2",
+    kysely: ">=0.28.17",
+    picomatch: ">=4.0.4",
+    react: "^19.2.7",
+    "react-dom": "^19.2.7",
+    lexical: "0.46.0",
+    "@lexical/clipboard": "0.46.0",
+    "@lexical/link": "0.46.0",
+    "@lexical/list": "0.46.0",
+    "@lexical/markdown": "0.46.0",
+    "@lexical/plain-text": "0.46.0",
+    "@lexical/react": "0.46.0",
+    "@lexical/rich-text": "0.46.0",
+    "@lexical/selection": "0.46.0",
+    "@lexical/utils": "0.46.0",
+  };
+
+  assert.deepEqual(overrides, expected);
+
+  const lockfile = readText("pnpm-lock.yaml");
+  for (const [name, spec] of Object.entries(expected)) {
+    const keyForms = [name, `'${name}'`];
+    const specForms = [spec, `'${spec}'`];
+    assert.equal(
+      keyForms.some((key) => specForms.some((value) => lockfile.includes(`  ${key}: ${value}`))),
+      true,
+      `${name} override is present in pnpm-lock.yaml`,
+    );
+  }
+});
+
+test("release and governance controls stay wired into focused PR verification", () => {
+  const rootPkg = readJson("package.json");
+  assert.match(rootPkg.scripts["test:release-registry"], /reconcile-packaging-release\.test\.mjs/);
+
+  const help2dayVerify = readText(".github/workflows/help2day-pr-verify.yml");
+  assert.match(help2dayVerify, /Test release registry and immutable-package guards/);
+  assert.match(help2dayVerify, /pnpm run test:release-registry/);
+
+  const releaseMap = readText("scripts/release-package-map.mjs");
+  assert.match(releaseMap, /findUnpublishableWorkspaceEdges/);
+  assert.match(releaseMap, /publishFromCi:true/);
+
+  const stageRelease = readText("scripts/stage-release-packages.mjs");
+  assert.match(stageRelease, /inspectNpmReleaseTarball/);
+  assert.match(stageRelease, /chmodSync\(immutablePath, 0o444\)/);
+  assert.match(stageRelease, /release staging root is missing its safety marker/);
+
+  const directPublishGuard = readText("scripts/no-direct-package-publish.test.mjs");
+  assert.match(directPublishGuard, /tracked literal package-publish commands stay on the verified tarball boundary/);
+
+  assert.equal(existsSync(join(repoRoot, ".github/workflows/gitleaks.yml")), true);
+  assert.equal(existsSync(join(repoRoot, ".github/workflows/governance-approval-tripwire.yml")), true);
+  assert.equal(existsSync(join(repoRoot, ".github/workflows/help2day-pr-verify.yml")), true);
+});

@@ -1,23 +1,16 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  statSync,
-} from "node:fs";
-import {
-  runFixtureCleanupRunnerSettlementTarget,
-  runFixtureCleanupSelfTest,
-  runFixtureCleanupSignalTarget,
-} from "./fixture-cleanup-self-test.mjs";
-import { createFixtureLifecycle, runTokenEnvName } from "./fixture-process-lifecycle.mjs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadShardDurations, selectGeneralServerShard } from "./general-server-shard.mjs";
 
 const repoRoot = process.cwd();
-const scriptPath = fileURLToPath(import.meta.url);
+const scriptsDir = path.dirname(fileURLToPath(import.meta.url));
+const generalServerShardDurations = loadShardDurations(
+  path.join(scriptsDir, "general-server-shard-durations.json"),
+);
 const serverRoot = path.join(repoRoot, "server");
 const serverSrcDir = path.join(repoRoot, "server", "src");
 const serverTestsDir = path.join(repoRoot, "server", "src", "__tests__");
@@ -26,7 +19,6 @@ const nonServerProjects = [
   "@paperclipai/skills-catalog",
   "@paperclipai/db",
   "@paperclipai/adapter-utils",
-  "@paperclipai/adapter-acpx-local",
   "@paperclipai/adapter-codex-local",
   "@paperclipai/adapter-opencode-local",
   "@paperclipai/plugin-sdk",
@@ -54,7 +46,6 @@ const additionalSerializedServerTests = new Set([
   "server/src/__tests__/invite-expiry.test.ts",
   "server/src/__tests__/invite-join-manager.test.ts",
   "server/src/__tests__/invite-onboarding-text.test.ts",
-  "server/src/__tests__/issue-recovery-actions.test.ts",
   "server/src/__tests__/issues-checkout-wakeup.test.ts",
   "server/src/__tests__/issues-service.test.ts",
   "server/src/__tests__/opencode-local-adapter-environment.test.ts",
@@ -76,51 +67,6 @@ const serializedServerVitestArgs = [
   "--no-file-parallelism",
   "--maxWorkers=1",
 ];
-const continueOnFailure =
-  process.env.PAPERCLIP_VITEST_CONTINUE_ON_FAILURE === "1" ||
-  process.env.PAPERCLIP_VITEST_CONTINUE_ON_FAILURE === "true";
-const failures = [];
-let shutdownExitCode = null;
-let shutdownRequested = false;
-let shutdownSignal = null;
-
-const lifecycle = createFixtureLifecycle();
-const {
-  activeRuns,
-  assertLinuxProcReady,
-  captureChildIdentity,
-  cleanupActiveRuns,
-  cleanupRunState,
-  createRunState,
-  discoverOwnedProcessesToFixedPoint,
-  findRunTokenProcesses,
-  generateRunToken,
-  identityKey,
-  isLiveProcess,
-  requestOwnedRunShutdown,
-  resetSweepGuard,
-  signalOwnedIdentity,
-  sleep,
-  sweepOrphanedPcvtTempDirs,
-  writeOwnerManifest,
-} = lifecycle;
-
-function shutdownStatusForSignal(signal) {
-  return signal === "SIGINT" ? 130 : 143;
-}
-
-function requestShutdown(signal) {
-  if (shutdownRequested) return;
-  shutdownRequested = true;
-  shutdownExitCode = shutdownStatusForSignal(signal);
-  shutdownSignal = signal;
-  for (const runState of activeRuns) {
-    requestOwnedRunShutdown(runState, signal, shutdownExitCode, false);
-  }
-}
-
-process.on("SIGINT", () => requestShutdown("SIGINT"));
-process.on("SIGTERM", () => requestShutdown("SIGTERM"));
 
 function walk(dir) {
   const entries = readdirSync(dir);
@@ -191,10 +137,6 @@ function parseCliOptions(argv) {
   let shardCount = null;
   let group = null;
   let dryRun = false;
-  let fixtureCleanupSelfTest = false;
-  let fixtureCleanupSignalTarget = null;
-  let fixtureCleanupSignalEarly = false;
-  let fixtureCleanupRunnerSettlementTarget = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -237,32 +179,6 @@ function parseCliOptions(argv) {
 
     if (arg === "--dry-run") {
       dryRun = true;
-      continue;
-    }
-
-    if (arg === "--fixture-cleanup-self-test") {
-      fixtureCleanupSelfTest = true;
-      continue;
-    }
-
-    if (arg === "--fixture-cleanup-signal-target") {
-      fixtureCleanupSignalTarget = readOptionValue(argv, index, arg);
-      index += 1;
-      continue;
-    }
-
-    if (arg.startsWith("--fixture-cleanup-signal-target=")) {
-      fixtureCleanupSignalTarget = arg.slice("--fixture-cleanup-signal-target=".length);
-      continue;
-    }
-
-    if (arg === "--fixture-cleanup-signal-early") {
-      fixtureCleanupSignalEarly = true;
-      continue;
-    }
-
-    if (arg === "--fixture-cleanup-runner-settlement-target") {
-      fixtureCleanupRunnerSettlementTarget = true;
       continue;
     }
 
@@ -311,14 +227,6 @@ function parseCliOptions(argv) {
     }
   }
 
-  if (fixtureCleanupSignalTarget !== null && !["SIGINT", "SIGTERM"].includes(fixtureCleanupSignalTarget)) {
-    fail("--fixture-cleanup-signal-target must be SIGINT or SIGTERM.");
-  }
-
-  if (fixtureCleanupSignalEarly && fixtureCleanupSignalTarget === null) {
-    fail("--fixture-cleanup-signal-early requires --fixture-cleanup-signal-target.");
-  }
-
   if (mode === serializedModeName) {
     return {
       mode,
@@ -326,10 +234,6 @@ function parseCliOptions(argv) {
       shardCount: shardCount ?? 1,
       group: null,
       dryRun,
-      fixtureCleanupSelfTest,
-      fixtureCleanupSignalTarget,
-      fixtureCleanupSignalEarly,
-      fixtureCleanupRunnerSettlementTarget,
     };
   }
 
@@ -339,10 +243,6 @@ function parseCliOptions(argv) {
     shardCount,
     group,
     dryRun,
-    fixtureCleanupSelfTest,
-    fixtureCleanupSignalTarget,
-    fixtureCleanupSignalEarly,
-    fixtureCleanupRunnerSettlementTarget,
   };
 }
 
@@ -350,179 +250,55 @@ function selectSerializedSuites(routeTests, shardIndex, shardCount) {
   return routeTests.filter((_, index) => index % shardCount === shardIndex);
 }
 
-async function runOwnedCommand(command, args, options) {
-  const {
-    label,
-    env: extraEnv = {},
-    cwd = repoRoot,
-    stdio = "inherit",
-    timeoutMs = null,
-    beforeStart = null,
-    afterSpawnBeforeOwnership = null,
-    afterOwnershipReady = null,
-    beforeCleanup = null,
-    cleanupRunStateFn = cleanupRunState,
-    discoverOwnedProcessesToFixedPointFn = discoverOwnedProcessesToFixedPoint,
-    requestOwnedRunShutdownFn = requestOwnedRunShutdown,
-  } = options;
-
-  invocationIndex += 1;
-  if (process.platform === "linux") {
-    assertLinuxProcReady();
-  }
-  const tempRootParent = process.env.TMPDIR || (process.platform === "win32" ? os.tmpdir() : "/tmp");
-  mkdirSync(tempRootParent, { recursive: true });
-  await sweepOrphanedPcvtTempDirs(tempRootParent);
-  const testRoot = mkdtempSync(path.join(tempRootParent, `pcvt-${process.pid}-${invocationIndex}-`));
-  const runToken = generateRunToken();
-  const runState = createRunState(testRoot, runToken, `${process.pid}-${invocationIndex}`);
-  activeRuns.add(runState);
+function runVitest(args, label) {
   console.log(`\n[test:run] ${label}`);
-
+  invocationIndex += 1;
+  const tempRootParent = process.platform === "win32" ? os.tmpdir() : "/tmp";
+  const testRoot = mkdtempSync(path.join(tempRootParent, `pcvt-${process.pid}-${invocationIndex}-`));
   // Keep per-run paths compact so Unix socket fixtures stay under macOS path limits.
   const env = {
     ...process.env,
-    ...extraEnv,
     NODE_ENV: "test",
     PAPERCLIP_HOME: path.join(testRoot, "h"),
     PAPERCLIP_INSTANCE_ID: `vt-${process.pid}-${invocationIndex}`,
-    [runTokenEnvName]: runToken,
     TMPDIR: path.join(testRoot, "t"),
   };
   mkdirSync(env.PAPERCLIP_HOME, { recursive: true });
   mkdirSync(env.TMPDIR, { recursive: true });
-
-  if (beforeStart) {
-    await beforeStart({ env, runState, testRoot });
-  }
-
-  const child = spawn(command, args, {
-    cwd,
+  const result = spawnSync("pnpm", ["exec", "vitest", "run", ...args], {
+    cwd: repoRoot,
     env,
-    stdio,
+    stdio: "inherit",
   });
-
-  runState.child = child;
-  if (afterSpawnBeforeOwnership) {
-    await afterSpawnBeforeOwnership({ env, runState, testRoot, child });
+  if (result.error) {
+    console.error(`[test:run] Failed to start Vitest: ${result.error.message}`);
+    process.exit(1);
   }
-  let timedOut = false;
-  let timer = null;
-  let poller = null;
-  let pollerError = null;
-
-  try {
-    if (process.platform === "linux") {
-      if (!child.pid) {
-        throw new Error(`Failed to start ${label}: child pid unavailable`);
-      }
-      if (!captureChildIdentity(runState) && !runState.runnerIdentity) {
-        throw new Error(`Failed to start ${label}: child /proc identity unavailable`);
-      }
-      writeOwnerManifest(runState);
-      poller = setInterval(() => {
-        try {
-          discoverOwnedProcessesToFixedPointFn(runState);
-        } catch (error) {
-          pollerError ??= error;
-          requestOwnedRunShutdownFn(runState, "SIGTERM", 1, false);
-        }
-      }, 200);
-    }
-
-    if (afterOwnershipReady) {
-      await afterOwnershipReady({ env, runState, testRoot, child });
-    }
-
-    const result = await new Promise((resolve, reject) => {
-      runState.forceSettle = resolve;
-      child.once("error", reject);
-      child.once("close", (status, signal) => resolve({ status, signal }));
-      if (timeoutMs !== null) {
-        timer = setTimeout(() => {
-          timedOut = true;
-          requestOwnedRunShutdownFn(runState, "SIGTERM", 124, true);
-        }, timeoutMs);
-      }
-      if (shutdownRequested && shutdownExitCode !== null) {
-        requestOwnedRunShutdownFn(runState, shutdownSignal ?? "SIGTERM", shutdownExitCode, false);
-      }
-    });
-
-    if (beforeCleanup) {
-      await beforeCleanup({ env, runState, testRoot });
-    }
-    let shutdownError = null;
-    if (runState.shutdownPromise) {
-      try {
-        await runState.shutdownPromise;
-      } catch (error) {
-        shutdownError = error;
-      }
-    }
-    let cleanupError = null;
-    try {
-      await cleanupRunStateFn(runState);
-    } catch (error) {
-      cleanupError = error;
-    }
-    if (pollerError) throw pollerError;
-    if (shutdownError) throw shutdownError;
-    if (cleanupError) throw cleanupError;
-    if (timedOut) return { status: 124, signal: null, timedOut: true };
-    return { ...result, timedOut: false };
-  } finally {
-    if (timer) clearTimeout(timer);
-    if (poller) clearInterval(poller);
-    runState.forceSettle = null;
-    if (activeRuns.has(runState)) {
-      await cleanupRunState(runState);
-    }
+  if (result.status !== 0) {
+    process.exit(result.status ?? 1);
   }
 }
 
-async function runVitest(args, label) {
-  const result = await runOwnedCommand("pnpm", ["exec", "vitest", "run", ...args], { label });
-  const status = result.status ?? (result.signal ? 1 : 0);
-  if (status !== 0) {
-    if (continueOnFailure && !shutdownRequested) {
-      failures.push({ label, status });
-      return;
-    }
-    process.exitCode = status;
-    throw new Error(`${label} failed with exit ${status}`);
-  }
-}
-
-function exitWithFailureSummary() {
-  if (failures.length === 0) return;
-
-  console.error("\n[test:run] Failing suites:");
-  for (const failure of failures) {
-    console.error(`[test:run] - ${failure.label} (exit ${failure.status})`);
-  }
-  process.exitCode = 1;
-}
-
-async function runGeneralSuites(routeTests) {
+function runGeneralSuites(routeTests) {
   for (const groupName of generalGroupNames) {
-    if (shutdownRequested) return;
-    await runGeneralGroup(routeTests, groupName);
+    runGeneralGroup(routeTests, groupName);
   }
 }
 
-async function runProjectGroup(projects, groupName) {
+function runProjectGroup(projects, groupName) {
   for (const project of projects) {
-    if (shutdownRequested) return;
-    await runVitest(["--project", project], `${groupName} project ${project}`);
+    runVitest(["--project", project], `${groupName} project ${project}`);
   }
 }
 
-async function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = null) {
+function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = null) {
   if (groupName === generalServerGroupName) {
     if (shardCount !== null && shardCount > 1) {
-      const shardFiles = generalServerTestFiles.filter(
-        (_, index) => index % shardCount === shardIndex,
+      const shardFiles = selectGeneralServerShard(
+        generalServerTestFiles,
+        shardIndex,
+        shardCount,
+        generalServerShardDurations,
       );
       console.log(
         `\n[test:run] general-server shard ${shardIndex + 1}/${shardCount} running ${shardFiles.length} of ${generalServerTestFiles.length} suites`,
@@ -531,7 +307,7 @@ async function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCo
         return;
       }
 
-      await runVitest(
+      runVitest(
         [
           "--project",
           "@paperclipai/server",
@@ -544,7 +320,7 @@ async function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCo
     }
 
     const excludeRouteArgs = routeTests.flatMap((file) => ["--exclude", file.serverPath]);
-    await runVitest(
+    runVitest(
       [
         "--project",
         "@paperclipai/server",
@@ -557,27 +333,26 @@ async function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCo
   }
 
   if (groupName === generalWorkspacesAGroupName) {
-    await runProjectGroup(generalWorkspacesAProjects, groupName);
+    runProjectGroup(generalWorkspacesAProjects, groupName);
     return;
   }
 
   if (groupName === generalWorkspacesBGroupName) {
-    await runProjectGroup(generalWorkspacesBProjects, groupName);
+    runProjectGroup(generalWorkspacesBProjects, groupName);
     return;
   }
 
   fail(`Unknown group "${groupName}".`);
 }
 
-async function runSerializedSuites(routeTests, shardIndex, shardCount) {
+function runSerializedSuites(routeTests, shardIndex, shardCount) {
   const shardTests = selectSerializedSuites(routeTests, shardIndex, shardCount);
   console.log(
     `\n[test:run] serialized shard ${shardIndex + 1}/${shardCount} running ${shardTests.length} of ${routeTests.length} suites`,
   );
 
   for (const routeTest of shardTests) {
-    if (shutdownRequested) return;
-    await runVitest(
+    runVitest(
       [
         "--project",
         "@paperclipai/server",
@@ -603,99 +378,58 @@ const routeTests = walk(serverTestsDir)
 // dedicated serialized shards. Sharding this list across runners is what keeps
 // the general-server lane from becoming the PR critical path: the server vitest
 // config pins maxWorkers to 1, so the only way to parallelize is across jobs.
+// Suites are partitioned by recorded duration (scripts/general-server-shard.mjs)
+// rather than round-robin, so one slow suite cluster can't stretch a single shard.
 const generalServerTestFiles = walk(serverSrcDir)
   .map((file) => toRepoPath(file))
   .filter((repoPath) => repoPath.endsWith(".test.ts"))
   .filter((repoPath) => !isRouteOrAuthzTest(repoPath))
   .sort((a, b) => a.localeCompare(b));
 
-function fixtureCleanupContext() {
-  return {
-    getShutdownExitCode: () => shutdownExitCode,
-    lifecycle,
-    repoRoot,
-    runOwnedCommand,
-    scriptPath,
-  };
+const options = parseCliOptions(process.argv.slice(2));
+if (options.dryRun) {
+  const serializedSuites =
+    options.mode === serializedModeName
+      ? selectSerializedSuites(routeTests, options.shardIndex, options.shardCount)
+      : routeTests;
+  console.log(
+    JSON.stringify(
+      {
+        mode: options.mode,
+        shardIndex: options.shardIndex,
+        shardCount: options.shardCount,
+        group: options.group,
+        availableGeneralGroups: generalGroupNames,
+        serializedSuiteCount: routeTests.length,
+        selectedSerializedSuites: serializedSuites.map((routeTest) => routeTest.repoPath),
+        generalServerSuiteCount: generalServerTestFiles.length,
+        selectedGeneralServerSuites:
+          options.mode === generalModeName &&
+          options.group === generalServerGroupName &&
+          options.shardCount !== null
+            ? selectGeneralServerShard(
+                generalServerTestFiles,
+                options.shardIndex,
+                options.shardCount,
+                generalServerShardDurations,
+              )
+            : null,
+      },
+      null,
+      2,
+    ),
+  );
+  process.exit(0);
 }
 
-async function main() {
-  const options = parseCliOptions(process.argv.slice(2));
-  if (options.fixtureCleanupSignalTarget) {
-    await runFixtureCleanupSignalTarget(
-      fixtureCleanupContext(),
-      options.fixtureCleanupSignalTarget,
-      options.fixtureCleanupSignalEarly,
-    );
-    return;
-  }
-
-  if (options.fixtureCleanupRunnerSettlementTarget) {
-    await runFixtureCleanupRunnerSettlementTarget(fixtureCleanupContext());
-    return;
-  }
-
-  if (options.fixtureCleanupSelfTest) {
-    await runFixtureCleanupSelfTest(fixtureCleanupContext());
-    return;
-  }
-
-  if (options.dryRun) {
-    const serializedSuites =
-      options.mode === serializedModeName
-        ? selectSerializedSuites(routeTests, options.shardIndex, options.shardCount)
-        : routeTests;
-    console.log(
-      JSON.stringify(
-        {
-          mode: options.mode,
-          shardIndex: options.shardIndex,
-          shardCount: options.shardCount,
-          group: options.group,
-          availableGeneralGroups: generalGroupNames,
-          serializedSuiteCount: routeTests.length,
-          selectedSerializedSuites: serializedSuites.map((routeTest) => routeTest.repoPath),
-          generalServerSuiteCount: generalServerTestFiles.length,
-          selectedGeneralServerSuites:
-            options.mode === generalModeName &&
-            options.group === generalServerGroupName &&
-            options.shardCount !== null
-              ? generalServerTestFiles.filter(
-                  (_, index) => index % options.shardCount === options.shardIndex,
-                )
-              : null,
-        },
-        null,
-        2,
-      ),
-    );
-    return;
-  }
-
-  if (options.mode === generalModeName || options.mode === allModeName) {
-    if (options.group) {
-      await runGeneralGroup(routeTests, options.group, options.shardIndex, options.shardCount);
-    } else {
-      await runGeneralSuites(routeTests);
-    }
-  }
-
-  if (!shutdownRequested && (options.mode === serializedModeName || options.mode === allModeName)) {
-    await runSerializedSuites(routeTests, options.shardIndex ?? 0, options.shardCount ?? 1);
-  }
-
-  exitWithFailureSummary();
-  if (shutdownExitCode !== null) {
-    process.exitCode = shutdownExitCode;
+if (options.mode === generalModeName || options.mode === allModeName) {
+  if (options.group) {
+    runGeneralGroup(routeTests, options.group, options.shardIndex, options.shardCount);
+  } else {
+    runGeneralSuites(routeTests);
   }
 }
 
-main().catch(async (error) => {
-  try {
-    await cleanupActiveRuns();
-  } catch (cleanupError) {
-    console.error(`[test:run] ${cleanupError.message}`);
-  }
-  console.error(`[test:run] ${error.message}`);
-  process.exitCode = shutdownExitCode ?? process.exitCode ?? 1;
-});
+if (options.mode === serializedModeName || options.mode === allModeName) {
+  runSerializedSuites(routeTests, options.shardIndex ?? 0, options.shardCount ?? 1);
+}

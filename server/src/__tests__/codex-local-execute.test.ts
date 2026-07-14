@@ -1,19 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
-import { execFile } from "node:child_process";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { execute } from "@paperclipai/adapter-codex-local/server";
 
-async function writeFakeCodexCommand(
-  commandPath: string,
-  usage: { input_tokens: number; cached_input_tokens: number; output_tokens: number } = {
-    input_tokens: 1,
-    cached_input_tokens: 0,
-    output_tokens: 1,
-  },
-): Promise<void> {
+async function writeFakeCodexCommand(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
 
@@ -35,7 +27,7 @@ if (capturePath) {
 }
 console.log(JSON.stringify({ type: "thread.started", thread_id: "codex-session-1" }));
 console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "hello" } }));
-console.log(JSON.stringify({ type: "turn.completed", usage: ${JSON.stringify(usage)} }));
+console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
 `;
   await fs.writeFile(commandPath, script, "utf8");
   await fs.chmod(commandPath, 0o755);
@@ -66,8 +58,20 @@ type LogEntry = {
   chunk: string;
 };
 
+const codexHomeOverrides: Array<string | undefined> = [];
+
+afterEach(() => {
+  while (codexHomeOverrides.length > 0) {
+    const previous = codexHomeOverrides.pop();
+    if (previous === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previous;
+  }
+});
+
 async function seedSharedCodexAuth(homeRoot: string): Promise<void> {
   const sharedCodexHome = path.join(homeRoot, ".codex");
+  codexHomeOverrides.push(process.env.CODEX_HOME);
+  process.env.CODEX_HOME = sharedCodexHome;
   await fs.mkdir(sharedCodexHome, { recursive: true });
   await fs.writeFile(path.join(sharedCodexHome, "auth.json"), '{"token":"shared"}\n', "utf8");
 }
@@ -148,7 +152,7 @@ describe("codex execute", () => {
           companyId: "company-1",
           name: "Codex Coder",
           adapterType: "codex_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -157,6 +161,7 @@ describe("codex execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           env: {
@@ -173,12 +178,12 @@ describe("codex execute", () => {
 
       expect(result.exitCode).toBe(0);
       expect(result.errorMessage).toBeNull();
+      expect(result.usage).toEqual({ inputTokens: 1, cachedInputTokens: 0, outputTokens: 1 });
+      expect(result.usageBasis).toBe("per_run");
+      expect(result.costUsd).toBeNull();
 
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
       expect(capture.codexHome).toBe(managedCodexHome);
-      expect(capture.argv).toEqual(
-        expect.arrayContaining(["-c", "sandbox_workspace_write.network_access=true"]),
-      );
 
       const managedAuth = path.join(managedCodexHome, "auth.json");
       const managedConfig = path.join(managedCodexHome, "config.toml");
@@ -208,76 +213,6 @@ describe("codex execute", () => {
     }
   });
 
-  it("estimates default gpt-5.5 cost and emits context warning metadata", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-cost-"));
-    const workspace = path.join(root, "workspace");
-    const commandPath = path.join(root, "codex");
-    await fs.mkdir(workspace, { recursive: true });
-    await writeFakeCodexCommand(commandPath, {
-      input_tokens: 200000,
-      cached_input_tokens: 0,
-      output_tokens: 1000,
-    });
-
-    const previousHome = process.env.HOME;
-    process.env.HOME = root;
-    await seedSharedCodexAuth(root);
-
-    try {
-      const logs: LogEntry[] = [];
-      const result = await execute({
-        runId: "run-cost",
-        agent: {
-          id: "agent-1",
-          companyId: "company-1",
-          name: "Codex Coder",
-          adapterType: "codex_local",
-          adapterConfig: {},
-        },
-        runtime: {
-          sessionId: null,
-          sessionParams: null,
-          sessionDisplayId: null,
-          taskKey: null,
-        },
-        config: {
-          command: commandPath,
-          cwd: workspace,
-          promptTemplate: "Follow the paperclip heartbeat.",
-        },
-        context: {},
-        authToken: "run-jwt-token",
-        onLog: async (stream, chunk) => {
-          logs.push({ stream, chunk });
-        },
-      });
-
-      expect(result.exitCode).toBe(0);
-      expect(result.model).toBe("gpt-5.5");
-      expect(result.costUsd).toBe(1.03);
-      expect(result.resultJson).toMatchObject({
-        total_cost_usd: 1.03,
-        cost_usd: 1.03,
-        contextTokenWarning: {
-          type: "codex_context_tokens_exceeded",
-          maxContextTokens: 200000,
-          inputContextTokens: 200000,
-          totalTokens: 201000,
-        },
-      });
-      expect(logs).toContainEqual(
-        expect.objectContaining({
-          stream: "stdout",
-          chunk: expect.stringContaining("Codex context usage reached 200,000"),
-        }),
-      );
-    } finally {
-      if (previousHome === undefined) delete process.env.HOME;
-      else process.env.HOME = previousHome;
-      await fs.rm(root, { recursive: true, force: true });
-    }
-  });
-
   it("emits a command note that Codex auto-applies repo-scoped AGENTS.md files", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-notes-"));
     const workspace = path.join(root, "workspace");
@@ -299,7 +234,7 @@ describe("codex execute", () => {
           companyId: "company-1",
           name: "Codex Coder",
           adapterType: "codex_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -308,6 +243,7 @@ describe("codex execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           env: {
@@ -361,7 +297,7 @@ describe("codex execute", () => {
           companyId: "company-1",
           name: "Codex Coder",
           adapterType: "codex_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -370,6 +306,7 @@ describe("codex execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: "codex",
           cwd: workspace,
           env: {
@@ -413,12 +350,6 @@ describe("codex execute", () => {
     await fs.mkdir(localWorkspace, { recursive: true });
     await fs.mkdir(remoteWorkspace, { recursive: true });
     await fs.mkdir(binDir, { recursive: true });
-    await execFile("git", ["init"], { cwd: localWorkspace });
-    await execFile("git", ["config", "user.email", "paperclip@example.com"], { cwd: localWorkspace });
-    await execFile("git", ["config", "user.name", "Paperclip Test"], { cwd: localWorkspace });
-    await fs.writeFile(path.join(localWorkspace, "README.md"), "sandbox workspace\n", "utf8");
-    await execFile("git", ["add", "README.md"], { cwd: localWorkspace });
-    await execFile("git", ["commit", "-m", "Initial sandbox workspace"], { cwd: localWorkspace });
     await writeFakeCodexCommand(commandPath);
 
     process.env.HOME = root;
@@ -433,7 +364,7 @@ describe("codex execute", () => {
           companyId: "company-1",
           name: "Codex Coder",
           adapterType: "codex_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -442,6 +373,7 @@ describe("codex execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: localWorkspace,
           env: {
@@ -501,7 +433,7 @@ describe("codex execute", () => {
           companyId: "company-1",
           name: "Codex Coder",
           adapterType: "codex_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -510,6 +442,7 @@ describe("codex execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           env: {
@@ -612,7 +545,7 @@ describe("codex execute", () => {
           companyId: "company-1",
           name: "Codex Coder",
           adapterType: "codex_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -621,6 +554,7 @@ describe("codex execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           promptTemplate: "Follow the paperclip heartbeat.",
@@ -641,7 +575,7 @@ describe("codex execute", () => {
     }
   });
 
-  it("persists retry-not-before metadata for codex usage-limit failures", async () => {
+  it("persists retry-not-before metadata for codex provider quota failures", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-usage-limit-"));
     const workspace = path.join(root, "workspace");
     const commandPath = path.join(root, "codex");
@@ -665,7 +599,7 @@ describe("codex execute", () => {
           companyId: "company-1",
           name: "Codex Coder",
           adapterType: "codex_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: "codex-session-usage-limit",
@@ -677,6 +611,7 @@ describe("codex execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           model: "gpt-5.3-codex-spark",
@@ -688,11 +623,12 @@ describe("codex execute", () => {
       });
 
       expect(result.exitCode).toBe(1);
-      expect(result.errorCode).toBe("codex_transient_upstream");
-      expect(result.errorFamily).toBe("transient_upstream");
+      expect(result.errorCode).toBe("provider_quota");
+      expect(result.errorFamily).toBe("provider_quota");
       const expectedRetryNotBefore = new Date(2026, 3, 22, 23, 31, 0, 0).toISOString();
       expect(result.retryNotBefore).toBe(expectedRetryNotBefore);
       expect(result.resultJson?.retryNotBefore).toBe(expectedRetryNotBefore);
+      expect(result.resultJson?.providerQuotaRetryNotBefore).toBe(expectedRetryNotBefore);
       expect(new Date(String(result.resultJson?.transientRetryNotBefore)).getTime()).toBe(
         new Date(2026, 3, 22, 23, 31, 0, 0).getTime(),
       );
@@ -725,7 +661,7 @@ describe("codex execute", () => {
           companyId: "company-1",
           name: "Codex Coder",
           adapterType: "codex_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -737,6 +673,7 @@ describe("codex execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           fastMode: true,
@@ -801,7 +738,7 @@ describe("codex execute", () => {
           companyId: "company-1",
           name: "Codex Coder",
           adapterType: "codex_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -810,6 +747,7 @@ describe("codex execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           env: {
@@ -870,7 +808,7 @@ describe("codex execute", () => {
           companyId: "company-1",
           name: "Codex Coder",
           adapterType: "codex_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -879,6 +817,7 @@ describe("codex execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           env: {
@@ -956,7 +895,7 @@ describe("codex execute", () => {
           companyId: "company-1",
           name: "Codex Coder",
           adapterType: "codex_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -965,6 +904,7 @@ describe("codex execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           env: {
@@ -1022,7 +962,9 @@ describe("codex execute", () => {
       expect(capture.prompt).toContain("## Paperclip Wake Payload");
       expect(capture.prompt).toContain("Do not switch to another issue until you have handled this wake.");
       expect(capture.prompt).toContain("- issue: PAP-1201 Fix gallery opening for inline images");
-      expect(capture.prompt).toContain("- pending comments: 0/0");
+      expect(capture.prompt).not.toContain("- pending comments:");
+      expect(capture.prompt).not.toContain("acknowledge the latest comment");
+      expect(capture.prompt).not.toContain("Execution contract:");
       expect(capture.prompt).toContain("- issue status: in_progress");
       expect(capture.prompt).toContain("- checkout: already claimed by the harness for this run");
       expect(capture.prompt).toContain("The harness already checked out this issue for the current run.");
@@ -1058,7 +1000,7 @@ describe("codex execute", () => {
           companyId: "company-1",
           name: "Codex Coder",
           adapterType: "codex_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -1070,6 +1012,7 @@ describe("codex execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           instructionsFilePath: instructionsPath,
@@ -1186,7 +1129,7 @@ describe("codex execute", () => {
           companyId: "company-1",
           name: "Codex Coder",
           adapterType: "codex_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -1195,6 +1138,7 @@ describe("codex execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           env: {
@@ -1296,7 +1240,7 @@ describe("codex execute", () => {
           companyId: "company-1",
           name: "Codex Coder",
           adapterType: "codex_local",
-          adapterConfig: {},
+          adapterConfig: { engine: "cli" },
         },
         runtime: {
           sessionId: null,
@@ -1305,6 +1249,7 @@ describe("codex execute", () => {
           taskKey: null,
         },
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           env: {

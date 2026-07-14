@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, asc, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -22,9 +22,6 @@ import {
   isUuidLike,
   normalizeAgentApiKeyScope,
   normalizeAgentUrlKey,
-  type AgentApiKeyCreationProvenance,
-  type AgentApiKeyCreationSource,
-  type AgentApiKeyCreatorType,
   type AgentEligibilityAgent,
   type AgentApiKeyScope,
 } from "@paperclipai/shared";
@@ -33,6 +30,10 @@ import { syncAgentAdapterEnvBindings } from "./agent-secret-bindings.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
 import { secretService } from "./secrets.js";
+import {
+  builtInAgentMarkersEqual,
+  readBuiltInAgentMarker,
+} from "./built-in-agent-metadata.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -42,81 +43,11 @@ function createToken() {
   return `pcp_${randomBytes(24).toString("hex")}`;
 }
 
-const AGENT_API_KEY_CREATOR_TYPES = new Set<AgentApiKeyCreatorType>([
-  "user",
-  "system",
-  "unknown",
-]);
-
-const AGENT_API_KEY_CREATION_SOURCES = new Set<AgentApiKeyCreationSource>([
-  "local_implicit",
-  "session",
-  "board_key",
-  "cloud_tenant",
-  "join_request_claim",
-  "unknown",
-]);
-
-const UNKNOWN_AGENT_API_KEY_CREATION: AgentApiKeyCreationProvenance = {
-  actorType: "unknown",
-  actorId: null,
-  source: "unknown",
-};
-
-export interface CreateAgentApiKeyOptions {
-  /**
-   * Accepted alongside creation provenance so the upstream responsible-user
-   * persistence can merge without changing or overloading the fourth argument.
-   * This branch has no responsible_user_id column; route audit details retain
-   * the value until that independently governed schema change is integrated.
-   */
-  responsibleUserId?: string | null;
-  creation?: AgentApiKeyCreationProvenance;
-}
-
-function normalizeAgentApiKeyCreation(input: unknown): AgentApiKeyCreationProvenance {
-  const value = isPlainRecord(input) ? input : {};
-  const actorType = AGENT_API_KEY_CREATOR_TYPES.has(value.actorType as AgentApiKeyCreatorType)
-    ? value.actorType as AgentApiKeyCreatorType
-    : "unknown";
-  const source = AGENT_API_KEY_CREATION_SOURCES.has(value.source as AgentApiKeyCreationSource)
-    ? value.source as AgentApiKeyCreationSource
-    : "unknown";
-  const actorId = typeof value.actorId === "string" && value.actorId.trim().length > 0
-    ? value.actorId.trim()
-    : null;
-
-  return {
-    actorType,
-    actorId: actorType === "unknown" ? null : actorId,
-    source,
-  };
-}
-
-function agentApiKeyCreationFromActivity(row: {
-  action: string;
-  actorType: string;
-  actorId: string;
-  details: Record<string, unknown> | null;
-}): AgentApiKeyCreationProvenance {
-  const recorded = normalizeAgentApiKeyCreation(row.details?.creation);
-  const fallbackActorType = row.actorType === "user" || row.actorType === "system"
-    ? row.actorType
-    : "unknown";
-
-  return normalizeAgentApiKeyCreation({
-    actorType: recorded.actorType === "unknown" ? fallbackActorType : recorded.actorType,
-    actorId: recorded.actorId ?? row.actorId,
-    source: recorded.source === "unknown" && row.action === "agent_api_key.claimed"
-      ? "join_request_claim"
-      : recorded.source,
-  });
-}
-
 const CONFIG_REVISION_FIELDS = [
   "name",
   "role",
   "title",
+  "icon",
   "reportsTo",
   "capabilities",
   "adapterType",
@@ -139,6 +70,12 @@ interface RevisionMetadata {
 
 interface UpdateAgentOptions {
   recordRevision?: RevisionMetadata;
+  allowBuiltInAgentMetadata?: boolean;
+  allowPendingApprovalConfigUpdate?: boolean;
+}
+
+interface CreateAgentOptions {
+  allowBuiltInAgentMetadata?: boolean;
 }
 
 interface AgentShortnameRow {
@@ -178,6 +115,7 @@ function buildConfigSnapshot(
     name: row.name,
     role: row.role,
     title: row.title,
+    icon: row.icon,
     reportsTo: row.reportsTo,
     capabilities: row.capabilities,
     adapterType: row.adapterType,
@@ -198,6 +136,50 @@ function containsRedactedMarker(value: unknown): boolean {
 
 function hasConfigPatchFields(data: Partial<typeof agents.$inferInsert>) {
   return CONFIG_REVISION_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(data, field));
+}
+
+function changedPendingApprovalConfigFields(
+  existing: typeof agents.$inferSelect,
+  data: Partial<typeof agents.$inferInsert>,
+) {
+  return CONFIG_REVISION_FIELDS.filter((field) =>
+    Object.prototype.hasOwnProperty.call(data, field) && !jsonEqual(data[field], existing[field]),
+  );
+}
+
+function configPatchFromApprovalPayload(payload: Record<string, unknown>) {
+  const patch: Partial<typeof agents.$inferInsert> = {};
+  if (typeof payload.name === "string") patch.name = payload.name;
+  if (typeof payload.role === "string") patch.role = payload.role;
+  if (Object.prototype.hasOwnProperty.call(payload, "title")) {
+    patch.title = typeof payload.title === "string" ? payload.title : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "icon")) {
+    patch.icon = typeof payload.icon === "string" ? payload.icon : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "reportsTo")) {
+    patch.reportsTo = typeof payload.reportsTo === "string" ? payload.reportsTo : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "capabilities")) {
+    patch.capabilities = typeof payload.capabilities === "string" ? payload.capabilities : null;
+  }
+  if (typeof payload.adapterType === "string") patch.adapterType = payload.adapterType;
+  if (isPlainRecord(payload.adapterConfig)) patch.adapterConfig = payload.adapterConfig;
+  if (isPlainRecord(payload.runtimeConfig)) patch.runtimeConfig = payload.runtimeConfig;
+  if (Object.prototype.hasOwnProperty.call(payload, "defaultEnvironmentId")) {
+    patch.defaultEnvironmentId =
+      typeof payload.defaultEnvironmentId === "string" ? payload.defaultEnvironmentId : null;
+  }
+  if (typeof payload.budgetMonthlyCents === "number") {
+    patch.budgetMonthlyCents = payload.budgetMonthlyCents;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "metadata")) {
+    patch.metadata = isPlainRecord(payload.metadata) ? payload.metadata : null;
+  }
+  if (isPlainRecord(payload.permissions)) {
+    patch.permissions = payload.permissions;
+  }
+  return patch;
 }
 
 function parseFiniteNumberLike(value: unknown): number | null {
@@ -464,6 +446,21 @@ export function agentService(db: Db) {
     });
   }
 
+  function assertBuiltInAgentMetadataMutationAllowed(
+    beforeMetadata: unknown,
+    afterMetadata: unknown,
+    options?: { allowBuiltInAgentMetadata?: boolean },
+  ) {
+    if (options?.allowBuiltInAgentMetadata) return;
+    const beforeMarker = readBuiltInAgentMarker(beforeMetadata);
+    const afterMarker = readBuiltInAgentMarker(afterMetadata);
+    if (builtInAgentMarkersEqual(beforeMarker, afterMarker)) return;
+    throw conflict("Built-in agent marker is managed by Paperclip and cannot be edited directly", {
+      code: "built_in_agent_marker_readonly",
+      key: beforeMarker?.key ?? afterMarker?.key ?? null,
+    });
+  }
+
   async function updateAgent(
     id: string,
     data: Partial<typeof agents.$inferInsert>,
@@ -483,6 +480,16 @@ export function agentService(db: Db) {
     ) {
       throw conflict("Pending approval agents cannot be activated directly");
     }
+    if (existing.status === "pending_approval" && !options?.allowPendingApprovalConfigUpdate) {
+      const changedFields = changedPendingApprovalConfigFields(existing as typeof agents.$inferSelect, data);
+      if (changedFields.length > 0) {
+        throw conflict("Pending approval agent configuration cannot be changed before board approval", {
+          code: "pending_approval_agent_config_frozen",
+          agentId: id,
+          fields: changedFields,
+        });
+      }
+    }
 
     if (data.reportsTo !== undefined) {
       if (data.reportsTo) {
@@ -497,6 +504,10 @@ export function agentService(db: Db) {
       if (previousShortname !== nextShortname) {
         await assertCompanyShortnameAvailable(existing.companyId, data.name, { excludeAgentId: id });
       }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(data, "metadata")) {
+      assertBuiltInAgentMetadataMutationAllowed(existing.metadata, data.metadata, options);
     }
 
     const normalizedPatch = { ...data } as Partial<typeof agents.$inferInsert>;
@@ -575,7 +586,8 @@ export function agentService(db: Db) {
 
     getById,
 
-    create: async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId">) => {
+    create: async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId">, options?: CreateAgentOptions) => {
+      assertBuiltInAgentMetadataMutationAllowed(null, data.metadata, options);
       if (data.reportsTo) {
         await ensureManager(companyId, data.reportsTo);
       }
@@ -719,6 +731,14 @@ export function agentService(db: Db) {
     remove: async (id: string) => {
       const existing = await getById(id);
       if (!existing) return null;
+      const builtInMarker = readBuiltInAgentMarker(existing.metadata);
+      if (builtInMarker) {
+        throw conflict("Built-in agents cannot be deleted; pause them instead", {
+          code: "built_in_agent_undeletable",
+          key: builtInMarker.key,
+          featureKeys: builtInMarker.featureKeys,
+        });
+      }
 
       return db.transaction(async (tx) => {
         await tx.update(agents).set({ reportsTo: null }).where(eq(agents.reportsTo, id));
@@ -749,12 +769,32 @@ export function agentService(db: Db) {
       });
     },
 
-    activatePendingApproval: async (id: string) => {
+    activatePendingApproval: async (id: string, approvedPayload?: Record<string, unknown> | null) => {
       const activatedAgent = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
+        const existing = await agentService(txDb).getById(id);
+        if (!existing || existing.status !== "pending_approval") return null;
+        const approvedPatch = approvedPayload ? configPatchFromApprovalPayload(approvedPayload) : {};
+        let patch = { ...approvedPatch } as Partial<typeof agents.$inferInsert>;
+        if (
+          Object.prototype.hasOwnProperty.call(patch, "adapterConfig") &&
+          isPlainRecord(patch.adapterConfig)
+        ) {
+          patch.adapterConfig = await secretService(txDb).normalizeAdapterConfigForPersistence(
+            existing.companyId,
+            patch.adapterConfig,
+            { adapterType: (patch.adapterType ?? existing.adapterType) as string },
+          );
+        }
+        if (patch.permissions !== undefined) {
+          patch.permissions = normalizeAgentPermissions(
+            patch.permissions,
+            (patch.role ?? existing.role) as string,
+          );
+        }
         const updated = await tx
           .update(agents)
-          .set({ status: "idle", updatedAt: new Date() })
+          .set({ ...patch, status: "idle", updatedAt: new Date() })
           .where(and(eq(agents.id, id), eq(agents.status, "pending_approval")))
           .returning()
           .then((rows) => rows[0] ?? null);
@@ -775,9 +815,16 @@ export function agentService(db: Db) {
       return existing ? { agent: existing, activated: false } : null;
     },
 
-    updatePermissions: async (id: string, permissions: Record<string, unknown>) => {
+    updatePermissions: async (id: string, permissions: Record<string, unknown> & { canCreateAgents: boolean }) => {
       const existing = await getById(id);
       if (!existing) return null;
+      if (existing.status === "pending_approval") {
+        throw conflict("Pending approval agent permissions cannot be changed before board approval", {
+          code: "pending_approval_agent_config_frozen",
+          agentId: id,
+          fields: ["permissions"],
+        });
+      }
 
       const updated = await db
         .update(agents)
@@ -836,7 +883,7 @@ export function agentService(db: Db) {
       id: string,
       name: string,
       scope: AgentApiKeyScope = { kind: "standard" },
-      options: CreateAgentApiKeyOptions = {},
+      options?: { responsibleUserId?: string | null },
     ) => {
       const existing = await getById(id);
       if (!existing) throw notFound("Agent not found");
@@ -849,7 +896,6 @@ export function agentService(db: Db) {
 
       const token = createToken();
       const keyHash = hashToken(token);
-      const normalizedCreation = normalizeAgentApiKeyCreation(options.creation);
       const created = await db
         .insert(agentApiKeys)
         .values({
@@ -857,6 +903,7 @@ export function agentService(db: Db) {
           companyId: existing.companyId,
           name,
           keyHash,
+          responsibleUserId: options?.responsibleUserId?.trim() || null,
           scopeConfig: scope.kind === "standard" ? null : scope,
         })
         .returning()
@@ -866,80 +913,32 @@ export function agentService(db: Db) {
         id: created.id,
         name: created.name,
         scope: normalizeAgentApiKeyScope(created.scopeConfig),
-        creation: normalizedCreation,
+        responsibleUserId: created.responsibleUserId,
         token,
-        lastUsedAt: created.lastUsedAt,
-        revokedAt: created.revokedAt,
         createdAt: created.createdAt,
       };
     },
 
-    listKeys: async (id: string) => {
-      const rows = await db
+    listKeys: (id: string) =>
+      db
         .select({
           id: agentApiKeys.id,
-          companyId: agentApiKeys.companyId,
           name: agentApiKeys.name,
+          responsibleUserId: agentApiKeys.responsibleUserId,
           scopeConfig: agentApiKeys.scopeConfig,
-          lastUsedAt: agentApiKeys.lastUsedAt,
           createdAt: agentApiKeys.createdAt,
           revokedAt: agentApiKeys.revokedAt,
         })
         .from(agentApiKeys)
-        .where(eq(agentApiKeys.agentId, id));
-      if (rows.length === 0) return [];
-
-      const keyIds = rows.map((row) => row.id);
-      const detailsKeyId = sql<string>`${activityLog.details} ->> 'keyId'`;
-      const creationRows = await db
-        .select({
-          id: activityLog.id,
-          action: activityLog.action,
-          entityId: activityLog.entityId,
-          actorType: activityLog.actorType,
-          actorId: activityLog.actorId,
-          details: activityLog.details,
-        })
-        .from(activityLog)
-        .where(and(
-          eq(activityLog.companyId, rows[0]!.companyId),
-          or(
-            and(
-              eq(activityLog.action, "agent.key_created"),
-              eq(activityLog.entityType, "agent"),
-              eq(activityLog.entityId, id),
-              inArray(detailsKeyId, keyIds),
-            ),
-            and(
-              eq(activityLog.action, "agent_api_key.claimed"),
-              eq(activityLog.entityType, "agent_api_key"),
-              inArray(activityLog.entityId, keyIds),
-            ),
-          ),
-        ))
-        .orderBy(asc(activityLog.createdAt), asc(activityLog.id));
-
-      const creationByKeyId = new Map<string, AgentApiKeyCreationProvenance>();
-      // Creation provenance is immutable inventory metadata. If duplicate audit
-      // rows exist, the earliest timestamp wins and the UUID is the stable tie-breaker.
-      for (const row of creationRows) {
-        const keyId = row.action === "agent.key_created"
-          ? typeof row.details?.keyId === "string" ? row.details.keyId : null
-          : row.entityId;
-        if (!keyId || creationByKeyId.has(keyId)) continue;
-        creationByKeyId.set(keyId, agentApiKeyCreationFromActivity(row));
-      }
-
-      return rows.map((row) => ({
+        .where(eq(agentApiKeys.agentId, id))
+        .then((rows) => rows.map((row) => ({
           id: row.id,
           name: row.name,
           scope: normalizeAgentApiKeyScope(row.scopeConfig),
-          creation: creationByKeyId.get(row.id) ?? UNKNOWN_AGENT_API_KEY_CREATION,
-          lastUsedAt: row.lastUsedAt,
+          responsibleUserId: row.responsibleUserId,
           createdAt: row.createdAt,
           revokedAt: row.revokedAt,
-        }));
-    },
+        }))),
 
     getKeyById: async (keyId: string) =>
       db
@@ -948,8 +947,8 @@ export function agentService(db: Db) {
           agentId: agentApiKeys.agentId,
           companyId: agentApiKeys.companyId,
           name: agentApiKeys.name,
+          responsibleUserId: agentApiKeys.responsibleUserId,
           scopeConfig: agentApiKeys.scopeConfig,
-          lastUsedAt: agentApiKeys.lastUsedAt,
           createdAt: agentApiKeys.createdAt,
           revokedAt: agentApiKeys.revokedAt,
         })

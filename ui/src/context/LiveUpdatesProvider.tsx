@@ -19,11 +19,9 @@ import { buildSameOriginWebSocketUrl } from "../lib/websocket-url";
 const TOAST_COOLDOWN_WINDOW_MS = 10_000;
 const TOAST_COOLDOWN_MAX = 3;
 const RECONNECT_SUPPRESS_MS = 2000;
-const INVALIDATION_COALESCE_MS = 450;
 const SOCKET_CONNECTING = 0;
 const SOCKET_OPEN = 1;
-const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
-const pendingInvalidations = new WeakMap<QueryClient, Map<string, ReturnType<typeof setTimeout>>>();
+const TERMINAL_RUN_STATUSES = new Set(["succeeded", "interrupted", "failed", "cancelled", "timed_out"]);
 
 type LiveUpdatesSocketLike = {
   readyState: number;
@@ -179,28 +177,6 @@ function isPageForegrounded(): boolean {
   return true;
 }
 
-function scheduleInvalidate(
-  queryClient: QueryClient,
-  queryKey: readonly unknown[],
-  options?: { refetchType?: "active" | "inactive" | "all" | "none" },
-) {
-  const key = JSON.stringify(queryKey);
-  const clientTimers = pendingInvalidations.get(queryClient) ?? new Map<string, ReturnType<typeof setTimeout>>();
-  const existing = clientTimers.get(key);
-  if (existing) clearTimeout(existing);
-  const timer = setTimeout(() => {
-    // Background tabs: mark stale but don't immediately refetch — refetchOnWindowFocus
-    // will trigger a refresh when the user brings the tab to the foreground. This
-    // prevents hidden tabs from consuming backend resources on every WebSocket event.
-    const isVisible = typeof document === "undefined" || document.visibilityState === "visible";
-    const refetchType = options?.refetchType ?? (isVisible ? "active" : "none");
-    queryClient.invalidateQueries({ queryKey, refetchType });
-    clientTimers.delete(key);
-  }, INVALIDATION_COALESCE_MS);
-  clientTimers.set(key, timer);
-  pendingInvalidations.set(queryClient, clientTimers);
-}
-
 function resolveVisibleIssueRouteContext(
   queryClient: QueryClient,
   pathname: string,
@@ -330,6 +306,164 @@ function invalidateVisibleIssueRunQueries(
   return true;
 }
 
+interface RunLiveStatusPatch {
+  runId: string;
+  agentId: string | null;
+  issueId: string | null;
+  message?: string | null;
+  updatedAt?: string | null;
+  currentToolName?: string | null;
+  lastAssistantSnippet?: string | null;
+  lastEventAt?: string | null;
+}
+
+function hasPatchKey<K extends keyof RunLiveStatusPatch>(
+  patch: RunLiveStatusPatch,
+  key: K,
+): patch is RunLiveStatusPatch & Required<Pick<RunLiveStatusPatch, K>> {
+  return Object.prototype.hasOwnProperty.call(patch, key);
+}
+
+function applyRunLiveStatusPatch<T extends ActiveRunForIssue | LiveRunForIssue>(
+  run: T,
+  patch: RunLiveStatusPatch,
+): T {
+  if (run.id !== patch.runId) return run;
+  return {
+    ...run,
+    ...(hasPatchKey(patch, "message")
+      ? { currentStatusMessage: patch.message }
+      : {}),
+    ...(hasPatchKey(patch, "updatedAt")
+      ? { currentStatusUpdatedAt: patch.updatedAt }
+      : {}),
+    ...(hasPatchKey(patch, "currentToolName")
+      ? { currentToolName: patch.currentToolName }
+      : {}),
+    ...(hasPatchKey(patch, "lastAssistantSnippet")
+      ? { lastAssistantSnippet: patch.lastAssistantSnippet }
+      : {}),
+    ...(hasPatchKey(patch, "lastEventAt")
+      ? { lastEventAt: patch.lastEventAt }
+      : {}),
+  };
+}
+
+function applyRunLiveStatusPatchToArray<T extends LiveRunForIssue>(
+  runs: T[] | undefined,
+  patch: RunLiveStatusPatch,
+): T[] | undefined {
+  if (!runs) return runs;
+  let changed = false;
+  const nextRuns = runs.map((run) => {
+    if (run.id !== patch.runId) return run;
+    changed = true;
+    return applyRunLiveStatusPatch(run, patch);
+  });
+  return changed ? nextRuns : runs;
+}
+
+function readRunLiveStatusPatchFromPayload(
+  payload: Record<string, unknown>,
+  eventCreatedAt: string,
+  eventType: string,
+): RunLiveStatusPatch | null {
+  const runId = readString(payload.runId);
+  if (!runId) return null;
+
+  const patch: RunLiveStatusPatch = {
+    runId,
+    agentId: readString(payload.agentId),
+    issueId: readString(payload.issueId),
+  };
+
+  if (eventType === "heartbeat.run.progress") {
+    patch.message = readString(payload.message);
+    patch.updatedAt = readString(payload.updatedAt) ?? eventCreatedAt;
+    patch.currentToolName = readString(payload.currentToolName);
+    patch.lastAssistantSnippet = readString(payload.lastAssistantSnippet);
+    patch.lastEventAt = readString(payload.lastEventAt) ?? patch.updatedAt;
+    return patch;
+  }
+
+  if (eventType === "heartbeat.run.log") {
+    patch.lastEventAt = readString(payload.ts) ?? eventCreatedAt;
+    return patch;
+  }
+
+  if (eventType === "heartbeat.run.event") {
+    const message = readString(payload.message);
+    if (message) patch.message = message;
+    patch.updatedAt = readString(payload.updatedAt) ?? eventCreatedAt;
+    const currentToolName = readString(payload.currentToolName);
+    if (currentToolName) patch.currentToolName = currentToolName;
+    const lastAssistantSnippet = readString(payload.lastAssistantSnippet);
+    if (lastAssistantSnippet) patch.lastAssistantSnippet = lastAssistantSnippet;
+    patch.lastEventAt = readString(payload.lastEventAt) ?? eventCreatedAt;
+    return patch;
+  }
+
+  return null;
+}
+
+function applyRunLiveStatusPatchToCaches(
+  queryClient: QueryClient,
+  companyId: string,
+  pathname: string,
+  patch: RunLiveStatusPatch,
+  options?: VisibleRouteOptions,
+): boolean {
+  let changed = false;
+  queryClient.setQueryData(
+    queryKeys.liveRuns(companyId),
+    (current: LiveRunForIssue[] | undefined) => {
+      const nextRuns = applyRunLiveStatusPatchToArray(current, patch);
+      if (nextRuns !== current) changed = true;
+      return nextRuns;
+    },
+  );
+
+  const issueRefs = new Set<string>();
+  if (patch.issueId) {
+    for (const ref of resolveIssueQueryRefs(queryClient, companyId, patch.issueId, null)) {
+      issueRefs.add(ref);
+    }
+  }
+
+  const context = resolveVisibleIssueRouteContext(queryClient, pathname, options);
+  if (
+    context &&
+    (
+      context.runIds.has(patch.runId) ||
+      (!!patch.issueId && context.issueRefs.has(patch.issueId)) ||
+      (!!patch.agentId && !!context.assigneeAgentId && patch.agentId === context.assigneeAgentId)
+    )
+  ) {
+    for (const ref of context.issueRefs) issueRefs.add(ref);
+  }
+
+  for (const issueRef of issueRefs) {
+    queryClient.setQueryData(
+      queryKeys.issues.activeRun(issueRef),
+      (current: ActiveRunForIssue | null | undefined) => {
+        if (!current || current.id !== patch.runId) return current;
+        changed = true;
+        return applyRunLiveStatusPatch(current, patch);
+      },
+    );
+    queryClient.setQueryData(
+      queryKeys.issues.liveRuns(issueRef),
+      (current: LiveRunForIssue[] | undefined) => {
+        const nextRuns = applyRunLiveStatusPatchToArray(current, patch);
+        if (nextRuns !== current) changed = true;
+        return nextRuns;
+      },
+    );
+  }
+
+  return changed;
+}
+
 function shouldSuppressAgentStatusToastForVisibleIssue(
   queryClient: QueryClient,
   pathname: string,
@@ -452,6 +586,13 @@ const ROUTINE_DOCUMENT_ANNOTATION_ACTIVITY_ACTIONS = new Set([
   "routine.document_annotation_thread_resolved",
   "routine.document_annotation_thread_reopened",
   "routine.document_annotation_remapped",
+]);
+const CASE_DOCUMENT_ANNOTATION_ACTIVITY_ACTIONS = new Set([
+  "case.document_annotation_thread_created",
+  "case.document_annotation_comment_added",
+  "case.document_annotation_thread_resolved",
+  "case.document_annotation_thread_reopened",
+  "case.document_annotation_remapped",
 ]);
 const AGENT_TOAST_STATUSES = new Set(["error"]);
 const RUN_TOAST_STATUSES = new Set(["failed", "timed_out", "cancelled"]);
@@ -660,33 +801,28 @@ function invalidateHeartbeatQueries(
   companyId: string,
   payload: Record<string, unknown>,
 ) {
-  scheduleInvalidate(queryClient, queryKeys.liveRuns(companyId));
-  scheduleInvalidate(queryClient, queryKeys.heartbeats(companyId));
-  scheduleInvalidate(queryClient, queryKeys.agents.list(companyId));
-  scheduleInvalidate(queryClient, queryKeys.dashboard(companyId));
-  scheduleInvalidate(queryClient, queryKeys.costs(companyId));
-  scheduleInvalidate(queryClient, queryKeys.sidebarBadges(companyId));
-
-  const agentId = readString(payload.agentId);
-  if (agentId) {
-    scheduleInvalidate(queryClient, queryKeys.agents.detail(agentId));
-    scheduleInvalidate(queryClient, queryKeys.heartbeats(companyId, agentId));
-  }
-}
-
-function invalidateHeartbeatProgressQueries(
-  queryClient: ReturnType<typeof useQueryClient>,
-  companyId: string,
-  payload: Record<string, unknown>,
-) {
   queryClient.invalidateQueries({ queryKey: queryKeys.liveRuns(companyId) });
   queryClient.invalidateQueries({ queryKey: queryKeys.heartbeats(companyId) });
   queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.costs(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.sidebarBadges(companyId) });
 
   const agentId = readString(payload.agentId);
   if (agentId) {
     queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentId) });
     queryClient.invalidateQueries({ queryKey: queryKeys.heartbeats(companyId, agentId) });
+  }
+}
+
+function invalidateHeartbeatProgressQueries(
+  queryClient: ReturnType<typeof useQueryClient>,
+  _companyId: string,
+  payload: Record<string, unknown>,
+) {
+  const agentId = readString(payload.agentId);
+  if (agentId) {
+    queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentId) });
   }
 }
 
@@ -697,9 +833,9 @@ function invalidateActivityQueries(
   currentActor: { userId: string | null; agentId: string | null },
   options?: { pathname?: string; isForegrounded?: boolean },
 ) {
-  scheduleInvalidate(queryClient, queryKeys.activity(companyId));
-  scheduleInvalidate(queryClient, queryKeys.dashboard(companyId));
-  scheduleInvalidate(queryClient, queryKeys.sidebarBadges(companyId));
+  queryClient.invalidateQueries({ queryKey: queryKeys.activity(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.sidebarBadges(companyId) });
 
   const entityType = readString(payload.entityType);
   const entityId = readString(payload.entityId);
@@ -719,10 +855,10 @@ function invalidateActivityQueries(
   }
 
   if (entityType === "issue") {
-    scheduleInvalidate(queryClient, queryKeys.issues.list(companyId));
-    scheduleInvalidate(queryClient, queryKeys.issues.listMineByMe(companyId));
-    scheduleInvalidate(queryClient, queryKeys.issues.listTouchedByMe(companyId));
-    scheduleInvalidate(queryClient, queryKeys.issues.listUnreadTouchedByMe(companyId));
+    queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(companyId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.issues.listMineByMe(companyId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.issues.listTouchedByMe(companyId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.issues.listUnreadTouchedByMe(companyId) });
     if (entityId) {
       const selfCommentActivity =
         ((action === "issue.comment_added") ||
@@ -751,20 +887,20 @@ function invalidateActivityQueries(
           (selfCommentActivity || visibleIssueAgentActivity || visibleIssueCommentActivity)
             ? { refetchType: "inactive" as const }
             : undefined;
-        scheduleInvalidate(queryClient, queryKeys.issues.detail(ref), invalidationOptions);
-        scheduleInvalidate(queryClient, queryKeys.issues.activity(ref), invalidationOptions);
+        queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(ref), ...invalidationOptions });
+        queryClient.invalidateQueries({ queryKey: queryKeys.issues.activity(ref), ...invalidationOptions });
         if (action === "issue.comment_added") {
-          scheduleInvalidate(queryClient, queryKeys.issues.comments(ref), invalidationOptions);
+          queryClient.invalidateQueries({ queryKey: queryKeys.issues.comments(ref), ...invalidationOptions });
         }
         if (action && ISSUE_DOCUMENT_ACTIVITY_ACTIONS.has(action)) {
           const documentKey = readString(details?.key);
-          scheduleInvalidate(queryClient, queryKeys.issues.documents(ref), invalidationOptions);
+          queryClient.invalidateQueries({ queryKey: queryKeys.issues.documents(ref), ...invalidationOptions });
           if (documentKey) {
-            scheduleInvalidate(queryClient, queryKeys.issues.document(ref, documentKey), invalidationOptions);
-            scheduleInvalidate(queryClient, queryKeys.issues.documentRevisions(ref, documentKey), invalidationOptions);
+            queryClient.invalidateQueries({ queryKey: queryKeys.issues.document(ref, documentKey), ...invalidationOptions });
+            queryClient.invalidateQueries({ queryKey: queryKeys.issues.documentRevisions(ref, documentKey), ...invalidationOptions });
           } else {
-            scheduleInvalidate(queryClient, ["issues", "document", ref], invalidationOptions);
-            scheduleInvalidate(queryClient, ["issues", "document-revisions", ref], invalidationOptions);
+            queryClient.invalidateQueries({ queryKey: ["issues", "document", ref], ...invalidationOptions });
+            queryClient.invalidateQueries({ queryKey: ["issues", "document-revisions", ref], ...invalidationOptions });
           }
         }
         if (
@@ -780,7 +916,7 @@ function invalidateActivityQueries(
           });
         }
         if (action?.startsWith("issue.thread_interaction_")) {
-          scheduleInvalidate(queryClient, queryKeys.issues.interactions(ref), invalidationOptions);
+          queryClient.invalidateQueries({ queryKey: queryKeys.issues.interactions(ref), ...invalidationOptions });
         }
       }
     }
@@ -841,6 +977,25 @@ function invalidateActivityQueries(
     return;
   }
 
+  if (entityType === "case") {
+    queryClient.invalidateQueries({ queryKey: queryKeys.cases.list(companyId) });
+    if (entityId) {
+      queryClient.invalidateQueries({ queryKey: queryKeys.cases.detail(entityId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.cases.events(entityId) });
+      if (action && CASE_DOCUMENT_ANNOTATION_ACTIVITY_ACTIONS.has(action)) {
+        const documentKey = readString(details?.key) ?? readString(details?.documentKey);
+        const caseInvalidationOptions = ownActorActivity ? { refetchType: "inactive" as const } : undefined;
+        queryClient.invalidateQueries({
+          queryKey: documentKey
+            ? ["cases", "document-annotations", entityId, documentKey]
+            : ["cases", "document-annotations", entityId],
+          ...caseInvalidationOptions,
+        });
+      }
+    }
+    return;
+  }
+
   if (entityType === "company") {
     queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
   }
@@ -894,6 +1049,10 @@ function handleLiveEvent(
 
   const nameOf = (id: string) => resolveAgentName(queryClient, expectedCompanyId, id);
   const payload = event.payload ?? {};
+  const liveStatusPatch = readRunLiveStatusPatchFromPayload(payload, event.createdAt, event.type);
+  if (liveStatusPatch) {
+    applyRunLiveStatusPatchToCaches(queryClient, expectedCompanyId, pathname, liveStatusPatch);
+  }
   if (event.type === "heartbeat.run.log") {
     return;
   }
@@ -1003,10 +1162,12 @@ export const __liveUpdatesTestUtils = {
   buildAgentStatusToast,
   buildRunStatusToast,
   closeSocketQuietly,
+  applyRunLiveStatusPatchToCaches,
   hydrateVisibleIssueComment,
   invalidateActivityQueries,
   invalidateHeartbeatProgressQueries,
   invalidateVisibleIssueRunQueries,
+  readRunLiveStatusPatchFromPayload,
   resolveLiveCompanyId,
   shouldDeferIssueRefetchForVisibleAgentActivity,
   shouldDeferVisibleIssueCommentActivity,
