@@ -4,15 +4,17 @@
  *
  * Scans for forbidden tokens without echoing matched values. The default mode
  * mirrors the git pre-commit hook across the tracked tree. The
- * --npm-package-dir mode derives the exact publishable file set from
- * `npm pack --dry-run --json` and scans that assembled package instead.
+ * --npm-package-dir mode derives a preview publishable file set from
+ * `npm pack --dry-run --json` and scans that package directory. The release
+ * path performs its final check against the exact staged tarball instead.
  *
  * Token list: .git/hooks/forbidden-tokens.txt (one per line, # comments ok).
- * If the file is missing, the check still uses the active local username when
- * available. If username detection fails, the check degrades gracefully.
+ * Tokens combine explicit, stable account/path fragments with current-account
+ * names only when bounded as host paths. Bare process account names are never
+ * used because shared runners commonly use ordinary words such as "runner".
  */
 
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import os from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -22,18 +24,6 @@ function uniqueNonEmpty(values) {
   return Array.from(new Set(values.map((value) => value?.trim() ?? "").filter(Boolean)));
 }
 
-export function resolveDynamicForbiddenTokens(env = process.env, osModule = os) {
-  const candidates = [env.USER, env.LOGNAME, env.USERNAME];
-
-  try {
-    candidates.push(osModule.userInfo().username);
-  } catch {
-    // Some environments do not expose userInfo; env vars are enough fallback.
-  }
-
-  return uniqueNonEmpty(candidates);
-}
-
 export function readForbiddenTokensFile(tokensFile) {
   if (!existsSync(tokensFile)) return [];
 
@@ -41,6 +31,22 @@ export function readForbiddenTokensFile(tokensFile) {
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith("#"));
+}
+
+export function resolveBoundedHostPathTokens(env = process.env, osModule = os) {
+  const candidates = [env.USER, env.LOGNAME, env.USERNAME];
+  try {
+    candidates.push(osModule.userInfo().username);
+  } catch {
+    // A release caller still fails closed if no explicit or bounded token exists.
+  }
+  return uniqueNonEmpty(candidates)
+    .filter((account) => /^[A-Za-z0-9._-]+$/.test(account))
+    .flatMap((account) => [
+      `/home/${account}/`,
+      `/Users/${account}/`,
+      `C:\\Users\\${account}\\`,
+    ]);
 }
 
 export function readPathExcludesFile(excludesFile) {
@@ -54,8 +60,8 @@ export function readPathExcludesFile(excludesFile) {
 
 export function resolveForbiddenTokens(tokensFile, env = process.env, osModule = os) {
   return uniqueNonEmpty([
-    ...resolveDynamicForbiddenTokens(env, osModule),
     ...readForbiddenTokensFile(tokensFile),
+    ...resolveBoundedHostPathTokens(env, osModule),
   ]);
 }
 
@@ -72,7 +78,7 @@ export function runForbiddenTokenCheck({
   repoRoot,
   tokens,
   pathExcludes = [],
-  exec = execSync,
+  exec = spawnSync,
   log = console.log,
   error = console.error,
 }) {
@@ -85,20 +91,40 @@ export function runForbiddenTokenCheck({
   let found = false;
 
   for (const token of tokens) {
+    const gitGrepExcludes = [
+      ":!pnpm-lock.yaml",
+      ":!.git",
+      ...pathExcludes.map((entry) => `:!${entry}`),
+    ];
+    let result;
     try {
-      const gitGrepExcludes = [":!pnpm-lock.yaml", ":!.git", ...pathExcludes.map((entry) => `:!${entry}`)]
-        .map((entry) => `'${entry.replace(/'/g, "'\\''")}'`)
-        .join(" ");
-      const result = exec(
-        `git grep -in --no-color -- ${JSON.stringify(token)} -- ${gitGrepExcludes}`,
+      result = exec(
+        "git",
+        ["grep", "-in", "--no-color", "--", token, "--", ...gitGrepExcludes],
         { encoding: "utf8", cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] },
       );
-      if (result.trim()) {
+    } catch {
+      error("ERROR: Forbidden-token tracked-tree scan failed before it could complete safely.");
+      return 2;
+    }
+
+    if (result?.error || result?.signal || ![0, 1].includes(result?.status)) {
+      error("ERROR: Forbidden-token tracked-tree scan failed before it could complete safely.");
+      return 2;
+    }
+
+    if (result.status === 0) {
+      const output = typeof result.stdout === "string" ? result.stdout.trim() : "";
+      if (!output) {
+        error("ERROR: Forbidden-token tracked-tree scan returned an invalid successful result.");
+        return 2;
+      }
+      if (output) {
         if (!found) {
           error("ERROR: Forbidden tokens found in tracked files:\n");
         }
         found = true;
-        const lines = result.trim().split("\n");
+        const lines = output.split("\n");
         for (const line of lines) {
           const match = line.match(/^(.+?):(\d+):/);
           const displayPath = match
@@ -109,8 +135,6 @@ export function runForbiddenTokenCheck({
           );
         }
       }
-    } catch {
-      // git grep returns exit code 1 when no matches — that's fine
     }
   }
 
@@ -228,9 +252,11 @@ export function runForbiddenTokenFileCheck({
   return 0;
 }
 
-function resolveRepoPaths(exec = execSync) {
-  const repoRoot = exec("git rev-parse --show-toplevel", { encoding: "utf8" }).trim();
-  const gitCommonDir = exec("git rev-parse --git-common-dir", {
+function resolveRepoPaths(exec = execFileSync) {
+  const repoRoot = exec("git", ["rev-parse", "--show-toplevel"], {
+    encoding: "utf8",
+  }).trim();
+  const gitCommonDir = exec("git", ["rev-parse", "--git-common-dir"], {
     encoding: "utf8",
     cwd: repoRoot,
   }).trim();

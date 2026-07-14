@@ -270,15 +270,77 @@ is_npm_tlog_duplicate_error() {
     grep -q "equivalent entry already exists in the transparency log" <<< "$output"
 }
 
+create_release_stage_dir() {
+  local stage_dir
+  stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/paperclip-release-stage.XXXXXX")"
+  if ! : > "$stage_dir/.paperclip-release-stage"; then
+    rm -rf -- "$stage_dir"
+    return 1
+  fi
+  printf '%s\n' "$stage_dir"
+}
+
+cleanup_release_stage_dir() {
+  local stage_dir="${1:-}"
+  [ -n "$stage_dir" ] || return 0
+  case "$(basename "$stage_dir")" in
+    paperclip-release-stage.*) ;;
+    *) release_warn "Refusing to clean an unrecognized release staging directory."; return 1 ;;
+  esac
+  if [ ! -f "$stage_dir/.paperclip-release-stage" ]; then
+    release_warn "Refusing to clean an unmarked release staging directory."
+    return 1
+  fi
+  chmod -R u+w "$stage_dir" 2>/dev/null || true
+  rm -rf -- "$stage_dir"
+}
+
+verify_release_tarball_identity() {
+  local tarball_path="$1"
+  local expected_sha256="$2"
+
+  node - "$tarball_path" "$expected_sha256" <<'NODE'
+const { createHash } = require("node:crypto");
+const { lstatSync, readFileSync } = require("node:fs");
+const [path, expected] = process.argv.slice(2);
+try {
+  if (!/^[a-f0-9]{64}$/.test(expected) || !lstatSync(path).isFile()) process.exit(1);
+  const actual = createHash("sha256").update(readFileSync(path)).digest("hex");
+  process.exit(actual === expected ? 0 : 1);
+} catch {
+  process.exit(1);
+}
+NODE
+}
+
+preview_package_to_npm() {
+  local dist_tag="$1"
+  local tarball_path="$2"
+  local tarball_sha256="$3"
+
+  verify_release_tarball_identity "$tarball_path" "$tarball_sha256" || {
+    release_warn "Refusing to preview a staged package whose bytes changed after scanning."
+    return 1
+  }
+  pnpm publish "$tarball_path" --dry-run --ignore-scripts --no-git-checks --tag "$dist_tag" --access public
+}
+
 publish_package_to_npm() {
   local dist_tag="$1"
   local package_name="$2"
   local package_version="$3"
+  local tarball_path="$4"
+  local tarball_sha256="$5"
   local publish_log
+
+  verify_release_tarball_identity "$tarball_path" "$tarball_sha256" || {
+    release_warn "Refusing to publish a staged package whose bytes changed after scanning."
+    return 1
+  }
 
   publish_log="$(mktemp "${TMPDIR:-/tmp}/paperclip-npm-publish.XXXXXX")"
 
-  if (set -o pipefail; pnpm publish --no-git-checks --tag "$dist_tag" --access public 2>&1 | tee "$publish_log"); then
+  if (set -o pipefail; pnpm publish "$tarball_path" --ignore-scripts --no-git-checks --tag "$dist_tag" --access public 2>&1 | tee "$publish_log"); then
     rm -f "$publish_log"
     return 0
   fi
@@ -303,7 +365,12 @@ publish_package_to_npm() {
   fi
 
   release_warn "Retrying ${package_name}@${package_version} once with npm provenance disabled."
-  if pnpm publish --no-git-checks --tag "$dist_tag" --access public --provenance=false; then
+  verify_release_tarball_identity "$tarball_path" "$tarball_sha256" || {
+    release_warn "Refusing to retry a staged package whose bytes changed after scanning."
+    rm -f "$publish_log"
+    return 1
+  }
+  if pnpm publish "$tarball_path" --ignore-scripts --no-git-checks --tag "$dist_tag" --access public --provenance=false; then
     rm -f "$publish_log"
     return 0
   fi

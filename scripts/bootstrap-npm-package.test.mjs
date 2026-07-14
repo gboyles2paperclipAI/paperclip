@@ -59,12 +59,11 @@ test("resolveTargetPackage includes the workspace diff plugin bootstrap package"
   assert.equal(pkg.dir, "packages/plugins/plugin-workspace-diff");
 });
 
-test("buildPublishArgs publishes from the repo root through pnpm", () => {
-  const pkg = { dir: "packages/adapters/hermes", name: "@paperclipai/hermes-paperclip-adapter" };
-
-  assert.deepEqual(buildPublishArgs(pkg), [
+test("buildPublishArgs publishes an immutable tarball without lifecycle scripts", () => {
+  assert.deepEqual(buildPublishArgs("/tmp/staged-package.tgz"), [
     "publish",
-    "packages/adapters/hermes",
+    "/tmp/staged-package.tgz",
+    "--ignore-scripts",
     "--no-git-checks",
     "--access",
     "public",
@@ -72,11 +71,10 @@ test("buildPublishArgs publishes from the repo root through pnpm", () => {
 });
 
 test("buildPublishArgs includes dry-run and otp flags when requested", () => {
-  const pkg = { dir: "packages/adapters/hermes", name: "@paperclipai/hermes-paperclip-adapter" };
-
-  assert.deepEqual(buildPublishArgs(pkg, { dryRun: true, otp: "123456" }), [
+  assert.deepEqual(buildPublishArgs("/tmp/staged-package.tgz", { dryRun: true, otp: "123456" }), [
     "publish",
-    "packages/adapters/hermes",
+    "/tmp/staged-package.tgz",
+    "--ignore-scripts",
     "--no-git-checks",
     "--access",
     "public",

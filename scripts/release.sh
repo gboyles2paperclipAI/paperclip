@@ -14,6 +14,7 @@ print_version_only=false
 tag_name=""
 
 cleanup_on_exit=false
+RELEASE_STAGE_DIR=""
 
 usage() {
   cat <<'EOF'
@@ -55,6 +56,10 @@ restore_publish_artifacts() {
 }
 
 cleanup_release_state() {
+  if [ -n "$RELEASE_STAGE_DIR" ]; then
+    cleanup_release_stage_dir "$RELEASE_STAGE_DIR" || true
+    RELEASE_STAGE_DIR=""
+  fi
   restore_publish_artifacts
 
   tracked_changes="$(git -C "$REPO_ROOT" diff --name-only; git -C "$REPO_ROOT" diff --cached --name-only)"
@@ -245,34 +250,31 @@ if [ "$VERSION_IN_CLI_PACKAGE" != "$TARGET_PUBLISH_VERSION" ]; then
 fi
 
 release_info ""
-release_info "==> Step 5/8: Scanning every publishable package payload..."
-SCANNED_PACKAGE_COUNT=0
-while IFS=$'\t' read -r pkg_dir _pkg_name _pkg_version; do
-  [ -z "$pkg_dir" ] && continue
-  node "$REPO_ROOT/scripts/check-forbidden-tokens.mjs" --npm-package-dir "$REPO_ROOT/$pkg_dir"
-  SCANNED_PACKAGE_COUNT=$((SCANNED_PACKAGE_COUNT + 1))
-done <<< "$VERSIONED_PACKAGE_INFO"
-[ "$SCANNED_PACKAGE_COUNT" -gt 0 ] || release_fail "no publishable package manifests were scanned."
-release_info "  ✓ Scanned all $SCANNED_PACKAGE_COUNT publishable package payloads"
+release_info "==> Step 5/8: Staging and scanning immutable package tarballs..."
+RELEASE_STAGE_DIR="$(create_release_stage_dir)"
+STAGED_PACKAGE_INFO="$(node "$REPO_ROOT/scripts/stage-release-packages.mjs" stage "$RELEASE_STAGE_DIR")"
+STAGED_PACKAGE_COUNT="$(printf '%s\n' "$STAGED_PACKAGE_INFO" | awk 'NF { count += 1 } END { print count + 0 }')"
+EXPECTED_PACKAGE_COUNT="$(printf '%s\n' "$VERSIONED_PACKAGE_INFO" | awk 'NF { count += 1 } END { print count + 0 }')"
+[ "$STAGED_PACKAGE_COUNT" -gt 0 ] || release_fail "no publishable package tarballs were staged."
+[ "$STAGED_PACKAGE_COUNT" -eq "$EXPECTED_PACKAGE_COUNT" ] || release_fail "staged package count does not match the release plan."
+release_info "  ✓ Staged and scanned all $STAGED_PACKAGE_COUNT immutable package tarballs"
 
 release_info ""
 if [ "$dry_run" = true ]; then
   release_info "==> Step 6/8: Previewing publish payloads (--dry-run)..."
-  while IFS=$'\t' read -r pkg_dir _pkg_name _pkg_version; do
+  while IFS=$'\t' read -r pkg_dir _pkg_name _pkg_version tarball_path tarball_sha256; do
     [ -z "$pkg_dir" ] && continue
     release_info "  --- $pkg_dir ---"
-    cd "$REPO_ROOT/$pkg_dir"
-    pnpm publish --dry-run --no-git-checks --tag "$DIST_TAG" 2>&1 | tail -3
-  done <<< "$VERSIONED_PACKAGE_INFO"
+    preview_package_to_npm "$DIST_TAG" "$tarball_path" "$tarball_sha256" 2>&1 | tail -3
+  done <<< "$STAGED_PACKAGE_INFO"
   release_info "  [dry-run] Would create git tag $tag_name on $CURRENT_SHA"
 else
   release_info "==> Step 6/8: Publishing packages to npm..."
-  while IFS=$'\t' read -r pkg_dir pkg_name pkg_version; do
+  while IFS=$'\t' read -r pkg_dir pkg_name pkg_version tarball_path tarball_sha256; do
     [ -z "$pkg_dir" ] && continue
     release_info "  Publishing $pkg_name@$pkg_version"
-    cd "$REPO_ROOT/$pkg_dir"
-    publish_package_to_npm "$DIST_TAG" "$pkg_name" "$pkg_version"
-  done <<< "$VERSIONED_PACKAGE_INFO"
+    publish_package_to_npm "$DIST_TAG" "$pkg_name" "$pkg_version" "$tarball_path" "$tarball_sha256"
+  done <<< "$STAGED_PACKAGE_INFO"
   release_info "  ✓ Published all packages under dist-tag $DIST_TAG"
 fi
 

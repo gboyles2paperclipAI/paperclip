@@ -5,6 +5,12 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 import { buildReleasePackagePlan } from "./release-package-map.mjs";
+import { releaseTarballSha256 } from "./npm-release-tarball.mjs";
+import {
+  cleanupReleaseStageRoot,
+  createReleaseStageRoot,
+  stageReleasePackages,
+} from "./stage-release-packages.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
@@ -187,8 +193,15 @@ function printNextSteps(pkg) {
   );
 }
 
-function buildPublishArgs(pkg, { dryRun = false, otp = null } = {}) {
-  const args = ["publish", pkg.dir, "--no-git-checks", "--access", "public"];
+function buildPublishArgs(tarballPath, { dryRun = false, otp = null } = {}) {
+  const args = [
+    "publish",
+    tarballPath,
+    "--ignore-scripts",
+    "--no-git-checks",
+    "--access",
+    "public",
+  ];
 
   if (dryRun) {
     args.push("--dry-run");
@@ -201,8 +214,21 @@ function buildPublishArgs(pkg, { dryRun = false, otp = null } = {}) {
   return args;
 }
 
-function publishPackage(pkg, otp) {
-  const publishArgs = buildPublishArgs(pkg, { otp });
+function verifyStagedTarball(staged) {
+  let actual;
+  try {
+    actual = releaseTarballSha256(staged.tarballPath);
+  } catch {
+    throw new Error("staged bootstrap tarball could not be re-read safely");
+  }
+  if (actual !== staged.sha256) {
+    throw new Error("staged bootstrap tarball changed after scanning");
+  }
+}
+
+function publishPackage(pkg, staged, otp) {
+  verifyStagedTarball(staged);
+  const publishArgs = buildPublishArgs(staged.tarballPath, { otp });
 
   const result = runCommand("pnpm", publishArgs);
   const stdout = result.stdout ?? "";
@@ -265,24 +291,34 @@ function main(argv) {
     runChecked("pnpm", ["--filter", pkg.name, "build"]);
   }
 
-  process.stdout.write(`Previewing publish payload for ${pkg.name}...\n`);
-  runChecked("pnpm", buildPublishArgs(pkg, { dryRun: true }));
+  let stageRoot;
+  try {
+    process.stdout.write(`Staging and scanning publish payload for ${pkg.name}...\n`);
+    stageRoot = createReleaseStageRoot();
+    const [staged] = stageReleasePackages({ stageRoot, packages: [pkg] });
 
-  if (!publish) {
-    process.stdout.write(
-      [
-        "",
-        "Dry run complete. To perform the first publish from an authenticated maintainer machine, run:",
-        `node scripts/bootstrap-npm-package.mjs ${pkg.name} --publish --otp <code>`,
-        "",
-      ].join("\n"),
-    );
-    return;
+    process.stdout.write(`Previewing immutable publish payload for ${pkg.name}...\n`);
+    verifyStagedTarball(staged);
+    runChecked("pnpm", buildPublishArgs(staged.tarballPath, { dryRun: true }));
+
+    if (!publish) {
+      process.stdout.write(
+        [
+          "",
+          "Dry run complete. To perform the first publish from an authenticated maintainer machine, run:",
+          `node scripts/bootstrap-npm-package.mjs ${pkg.name} --publish --otp <code>`,
+          "",
+        ].join("\n"),
+      );
+      return;
+    }
+
+    process.stdout.write(`Publishing ${pkg.name}...\n`);
+    publishPackage(pkg, staged, otp);
+    printNextSteps(pkg);
+  } finally {
+    if (stageRoot) cleanupReleaseStageRoot(stageRoot);
   }
-
-  process.stdout.write(`Publishing ${pkg.name}...\n`);
-  publishPackage(pkg, otp);
-  printNextSteps(pkg);
 }
 
 const isDirectRun = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -303,4 +339,5 @@ export {
   parseArgs,
   publishPackage,
   resolveTargetPackage,
+  verifyStagedTarball,
 };

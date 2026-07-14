@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  resolveForbiddenTokens,
   resolveNpmPackageFiles,
   runForbiddenTokenCheck,
   runForbiddenTokenFileCheck,
@@ -147,12 +148,83 @@ test("an empty npm publishable manifest fails closed", () => {
   }
 });
 
+test("runner is safe as an ordinary word while its bounded home path is blocked", () => {
+  const fixture = makePackageFixture();
+  try {
+    const tokens = resolveForbiddenTokens(
+      join(fixture.root, "missing-hook-tokens.txt"),
+      { USER: "runner" },
+      { userInfo: () => ({ username: "runner" }) },
+    );
+    assert.ok(tokens.length > 0, "bounded policy must remain non-vacuous without a hook file");
+    assert.equal(tokens.includes("runner"), false);
+    writeFileSync(join(fixture.packageDir, "dist", "index.js"), 'export const role = "runner";\n');
+    const files = resolveNpmPackageFiles(fixture.packageDir);
+    assert.equal(
+      runForbiddenTokenFileCheck({ files, tokens, displayRoot: fixture.root, log: () => {}, error: () => {} }),
+      0,
+    );
+    writeFileSync(
+      join(fixture.packageDir, "dist", "index.js"),
+      'export const path = "/home/runner/private";\n',
+    );
+    assert.equal(
+      runForbiddenTokenFileCheck({ files, tokens, displayRoot: fixture.root, log: () => {}, error: () => {} }),
+      1,
+    );
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("tracked-tree scanner treats only status 1 as no-match and fails closed generically", () => {
+  const errors = [];
+  const calls = [];
+  const status = runForbiddenTokenCheck({
+    repoRoot: "/tmp/example",
+    tokens: [forbidden],
+    pathExcludes: ["docs/operator's guide.md"],
+    exec: (file, args) => {
+      calls.push({ file, args });
+      return { status: 2, stdout: "", stderr: `fatal: ${forbidden}` };
+    },
+    log: () => {},
+    error: (message) => errors.push(message),
+  });
+  assert.equal(status, 2);
+  assert.deepEqual(calls[0], {
+    file: "git",
+    args: [
+      "grep", "-in", "--no-color", "--", forbidden, "--",
+      ":!pnpm-lock.yaml", ":!.git", ":!docs/operator's guide.md",
+    ],
+  });
+  assert.match(errors.join("\n"), /failed before it could complete safely/);
+  assert.doesNotMatch(errors.join("\n"), new RegExp(forbidden, "i"));
+});
+
+test("tracked-tree scanner catches execution throws without leaking the token", () => {
+  const errors = [];
+  const status = runForbiddenTokenCheck({
+    repoRoot: "/tmp/example",
+    tokens: [forbidden],
+    exec: () => {
+      throw new TypeError(`invalid argument containing ${forbidden}`);
+    },
+    log: () => {},
+    error: (message) => errors.push(message),
+  });
+  assert.equal(status, 2);
+  assert.match(errors.join("\n"), /failed before it could complete safely/);
+  assert.doesNotMatch(errors.join("\n"), new RegExp(forbidden, "i"));
+});
+
 test("tracked-tree scanner reports locations without echoing matched values", () => {
   const errors = [];
   const status = runForbiddenTokenCheck({
     repoRoot: "/tmp/example",
     tokens: [forbidden],
-    exec: () => `docs/evidence.txt:7:/home/${forbidden}/runtime\n`,
+    exec: () => ({ status: 0, stdout: `docs/evidence.txt:7:/home/${forbidden}/runtime\n`, stderr: "" }),
     log: () => {},
     error: (message) => errors.push(message),
   });
@@ -167,7 +239,7 @@ test("tracked-tree scanner redacts token-bearing diagnostic paths", () => {
   const status = runForbiddenTokenCheck({
     repoRoot: "/tmp/example",
     tokens: [forbidden],
-    exec: () => `${rawPath}:7:/home/${forbidden}/runtime\n`,
+    exec: () => ({ status: 0, stdout: `${rawPath}:7:/home/${forbidden}/runtime\n`, stderr: "" }),
     log: () => {},
     error: (message) => errors.push(message),
   });
@@ -188,7 +260,7 @@ test("canonical release path preserves the publishable-package forbidden-token g
   assert.doesNotMatch(releaseScript, /build-npm\.sh[^\n]*--skip-checks/);
 });
 
-test("canonical release scans every enabled package before any publish command", () => {
+test("canonical release stages every enabled package before any publish command", () => {
   const releasePackages = getReleasePackages();
   assert.equal(releasePackages.length, 30);
   assert.equal(releasePackages.filter((pkg) => pkg.dir !== "cli").length, 29);
@@ -197,21 +269,31 @@ test("canonical release scans every enabled package before any publish command",
   const versionedInfoIndex = releaseScript.indexOf(
     'VERSIONED_PACKAGE_INFO="$(list_public_package_info)"',
   );
-  const scanInvocation =
-    'node "$REPO_ROOT/scripts/check-forbidden-tokens.mjs" --npm-package-dir "$REPO_ROOT/$pkg_dir"';
-  const scanIndex = releaseScript.indexOf(scanInvocation);
-  const scanLoopEndIndex = releaseScript.indexOf('done <<< "$VERSIONED_PACKAGE_INFO"', scanIndex);
+  const stageInvocation =
+    'STAGED_PACKAGE_INFO="$(node "$REPO_ROOT/scripts/stage-release-packages.mjs" stage "$RELEASE_STAGE_DIR")"';
+  const stageIndex = releaseScript.indexOf(stageInvocation);
 
   assert.notEqual(versionedInfoIndex, -1);
-  assert.ok(scanIndex > versionedInfoIndex);
-  assert.ok(scanLoopEndIndex > scanIndex);
+  assert.ok(stageIndex > versionedInfoIndex);
+  assert.doesNotMatch(releaseScript, /--npm-package-dir/);
 
   const publishCommands = [
     ...releaseScript.matchAll(/\bpnpm publish\b|\bpublish_package_to_npm\b/g),
   ];
   assert.ok(publishCommands.length > 0);
   assert.ok(
-    publishCommands.every((match) => match.index > scanLoopEndIndex),
-    "every dry-run or real publish must occur after the complete package-scan loop",
+    publishCommands.every((match) => match.index > stageIndex),
+    "every dry-run or real publish must occur after complete immutable staging",
   );
+  assert.match(releaseScript, /done <<< "\$STAGED_PACKAGE_INFO"/);
+  assert.match(releaseScript, /preview_package_to_npm "\$DIST_TAG" "\$tarball_path" "\$tarball_sha256"/);
+  assert.match(releaseScript, /publish_package_to_npm "\$DIST_TAG" "\$pkg_name" "\$pkg_version" "\$tarball_path" "\$tarball_sha256"/);
+});
+
+test("canonical release establishes cleanup before creating the staged tarball root", () => {
+  const releaseScript = readFileSync(join(import.meta.dirname, "release.sh"), "utf8");
+  const trapIndex = releaseScript.indexOf("set_cleanup_trap");
+  const stageIndex = releaseScript.indexOf('RELEASE_STAGE_DIR="$(create_release_stage_dir)"');
+  assert.ok(trapIndex !== -1 && stageIndex > trapIndex);
+  assert.match(releaseScript, /cleanup_release_stage_dir "\$RELEASE_STAGE_DIR"/);
 });

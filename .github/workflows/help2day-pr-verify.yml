@@ -46,8 +46,8 @@ jobs:
       - name: Test stable-runner shard partition
         run: node --test scripts/__tests__/run-vitest-stable-shard.test.mjs
 
-      - name: Test package scanner and canonical release guards
-        run: node --test scripts/check-forbidden-tokens.test.mjs
+      - name: Test release registry and immutable-package guards
+        run: pnpm run test:release-registry
 
       - name: Check diff whitespace
         env:
