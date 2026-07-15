@@ -638,6 +638,11 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   blockedByIssueIds?: string[];
   inheritExecutionWorkspaceFromIssueId?: string | null;
   skipExecutionWorkspaceInheritance?: boolean;
+  workspaceOverrideIntent?: {
+    projectId?: boolean;
+    projectWorkspaceId?: boolean;
+    executionWorkspace?: boolean;
+  };
   watchdog?: { agentId: string; instructions?: string | null } | null;
   watchdogActorRunId?: string | null;
   actorRunId?: string | null;
@@ -6067,6 +6072,7 @@ export function issueService(db: Db) {
         blockedByIssueIds,
         inheritExecutionWorkspaceFromIssueId,
         skipExecutionWorkspaceInheritance,
+        workspaceOverrideIntent,
         watchdog,
         watchdogActorRunId,
         actorRunId,
@@ -6075,10 +6081,19 @@ export function issueService(db: Db) {
         ...issueData
       } = data;
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
+      const preservesAgentDefaultIntent =
+        workspaceOverrideIntent?.executionWorkspace === true &&
+        issueData.executionWorkspacePreference === "agent_default";
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
         delete issueData.executionWorkspacePreference;
         delete issueData.executionWorkspaceSettings;
+        if (preservesAgentDefaultIntent) {
+          issueData.assigneeAdapterOverrides = {
+            ...((issueData.assigneeAdapterOverrides as Record<string, unknown> | null | undefined) ?? {}),
+            useProjectWorkspace: false,
+          };
+        }
       }
       if (data.assigneeAgentId && data.assigneeUserId) {
         throw unprocessable("Issue can only have one assignee");
@@ -6102,20 +6117,24 @@ export function issueService(db: Db) {
         const workspaceInheritanceIssueId = skipExecutionWorkspaceInheritance
           ? null
           : inheritExecutionWorkspaceFromIssueId ?? issueData.parentId ?? null;
+        const allowProjectInheritance = workspaceOverrideIntent?.projectId !== true;
+        const allowProjectWorkspaceInheritance = workspaceOverrideIntent?.projectWorkspaceId !== true;
+        const allowExecutionWorkspaceInheritance = workspaceOverrideIntent?.executionWorkspace !== true;
         const hasExplicitExecutionWorkspaceOverride =
           issueData.executionWorkspaceId !== undefined ||
           issueData.executionWorkspacePreference !== undefined ||
           issueData.executionWorkspaceSettings !== undefined;
         if (workspaceInheritanceIssueId) {
           const workspaceSource = await getWorkspaceInheritanceIssue(tx, companyId, workspaceInheritanceIssueId);
-          if (issueData.projectId == null && workspaceSource.projectId) {
+          if (allowProjectInheritance && issueData.projectId == null && workspaceSource.projectId) {
             issueData.projectId = workspaceSource.projectId;
           }
-          if (projectWorkspaceId == null && workspaceSource.projectWorkspaceId) {
+          if (allowProjectWorkspaceInheritance && projectWorkspaceId == null && workspaceSource.projectWorkspaceId) {
             projectWorkspaceId = workspaceSource.projectWorkspaceId;
           }
           if (
             isolatedWorkspacesEnabled &&
+            allowExecutionWorkspaceInheritance &&
             !hasExplicitExecutionWorkspaceOverride &&
             workspaceSource.executionWorkspaceId
           ) {
@@ -6166,6 +6185,7 @@ export function issueService(db: Db) {
         if (
           executionWorkspaceSettings == null &&
           executionWorkspaceId == null &&
+          allowExecutionWorkspaceInheritance &&
           issueData.projectId
         ) {
           executionWorkspaceSettings =
@@ -6176,7 +6196,7 @@ export function issueService(db: Db) {
               ),
             ) as Record<string, unknown> | null;
         }
-        if (!projectWorkspaceId && issueData.projectId) {
+        if (!projectWorkspaceId && allowProjectWorkspaceInheritance && issueData.projectId) {
           const project = await tx
             .select({
               executionWorkspacePolicy: projects.executionWorkspacePolicy,

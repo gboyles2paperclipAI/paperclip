@@ -465,11 +465,22 @@ function createRoutineDispatchFingerprint(input: {
   executionWorkspaceId?: string | null;
   executionWorkspacePreference?: string | null;
   executionWorkspaceSettings?: Record<string, unknown> | null;
+  workspaceOverridePresence?: {
+    projectId: boolean;
+    projectWorkspaceId: boolean;
+    executionWorkspaceId: boolean;
+    executionWorkspacePreference: boolean;
+    executionWorkspaceSettings: boolean;
+  };
   title: string;
   description: string | null;
 }) {
   const canonical = JSON.stringify(normalizeRoutineDispatchFingerprintValue(input));
   return crypto.createHash("sha256").update(canonical).digest("hex");
+}
+
+function hasOwnRoutineRunField<T extends object>(input: T, field: keyof T) {
+  return Object.prototype.hasOwnProperty.call(input, field);
 }
 
 function createRoutineEnvFingerprint(env: unknown) {
@@ -1599,8 +1610,21 @@ export function routineService(
     descriptionAppendix?: string | null;
     actor?: Actor;
   }) {
-    const projectId = input.projectId ?? input.routine.projectId ?? null;
-    const projectWorkspaceId = input.projectWorkspaceId ?? null;
+    const projectIdOverrideProvided = hasOwnRoutineRunField(input, "projectId");
+    const projectWorkspaceIdOverrideProvided = hasOwnRoutineRunField(input, "projectWorkspaceId");
+    const executionWorkspaceIdOverrideProvided = hasOwnRoutineRunField(input, "executionWorkspaceId");
+    const executionWorkspacePreferenceOverrideProvided = hasOwnRoutineRunField(
+      input,
+      "executionWorkspacePreference",
+    );
+    const executionWorkspaceSettingsOverrideProvided = hasOwnRoutineRunField(
+      input,
+      "executionWorkspaceSettings",
+    );
+    const projectId = projectIdOverrideProvided
+      ? input.projectId ?? null
+      : input.routine.projectId ?? null;
+    const projectWorkspaceId = projectWorkspaceIdOverrideProvided ? input.projectWorkspaceId ?? null : null;
     const assigneeAgentId = input.assigneeAgentId ?? input.routine.assigneeAgentId ?? null;
     if (!assigneeAgentId) {
       throw unprocessable("Default agent required");
@@ -1654,6 +1678,13 @@ export function routineService(
       executionWorkspaceId: input.executionWorkspaceId ?? null,
       executionWorkspacePreference: input.executionWorkspacePreference ?? null,
       executionWorkspaceSettings: input.executionWorkspaceSettings ?? null,
+      workspaceOverridePresence: {
+        projectId: projectIdOverrideProvided,
+        projectWorkspaceId: projectWorkspaceIdOverrideProvided,
+        executionWorkspaceId: executionWorkspaceIdOverrideProvided,
+        executionWorkspacePreference: executionWorkspacePreferenceOverrideProvided,
+        executionWorkspaceSettings: executionWorkspaceSettingsOverrideProvided,
+      },
       title,
       description,
     });
@@ -1778,9 +1809,23 @@ export function routineService(
             originRunId: createdRun.id,
             originFingerprint: dispatchFingerprint,
             billingCode: issueBillingCode,
-            executionWorkspaceId: input.executionWorkspaceId ?? null,
-            executionWorkspacePreference: input.executionWorkspacePreference ?? null,
-            executionWorkspaceSettings: input.executionWorkspaceSettings ?? null,
+            ...(executionWorkspaceIdOverrideProvided
+              ? { executionWorkspaceId: input.executionWorkspaceId ?? null }
+              : {}),
+            ...(executionWorkspacePreferenceOverrideProvided
+              ? { executionWorkspacePreference: input.executionWorkspacePreference ?? null }
+              : {}),
+            ...(executionWorkspaceSettingsOverrideProvided
+              ? { executionWorkspaceSettings: input.executionWorkspaceSettings ?? null }
+              : {}),
+            workspaceOverrideIntent: {
+              projectId: projectIdOverrideProvided,
+              projectWorkspaceId: projectWorkspaceIdOverrideProvided,
+              executionWorkspace:
+                executionWorkspaceIdOverrideProvided ||
+                executionWorkspacePreferenceOverrideProvided ||
+                executionWorkspaceSettingsOverrideProvided,
+            },
           });
         } catch (error) {
           const isOpenExecutionConflict =
@@ -2685,14 +2730,24 @@ export function routineService(
         source: input.source,
         payload: input.payload as Record<string, unknown> | null | undefined,
         variables: input.variables as Record<string, unknown> | null | undefined,
-        projectId: input.projectId ?? null,
-        projectWorkspaceId: input.projectWorkspaceId ?? null,
+        ...(hasOwnRoutineRunField(input, "projectId") ? { projectId: input.projectId ?? null } : {}),
+        ...(hasOwnRoutineRunField(input, "projectWorkspaceId")
+          ? { projectWorkspaceId: input.projectWorkspaceId ?? null }
+          : {}),
         assigneeAgentId: input.assigneeAgentId ?? null,
         idempotencyKey: input.idempotencyKey,
-        executionWorkspaceId: input.executionWorkspaceId ?? null,
-        executionWorkspacePreference: input.executionWorkspacePreference ?? null,
-        executionWorkspaceSettings:
-          (input.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null,
+        ...(hasOwnRoutineRunField(input, "executionWorkspaceId")
+          ? { executionWorkspaceId: input.executionWorkspaceId ?? null }
+          : {}),
+        ...(hasOwnRoutineRunField(input, "executionWorkspacePreference")
+          ? { executionWorkspacePreference: input.executionWorkspacePreference ?? null }
+          : {}),
+        ...(hasOwnRoutineRunField(input, "executionWorkspaceSettings")
+          ? {
+              executionWorkspaceSettings:
+                (input.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null,
+            }
+          : {}),
         actor,
       });
     },
@@ -2710,14 +2765,24 @@ export function routineService(
         source: "api",
         payload: input.payload as Record<string, unknown> | null | undefined,
         variables: input.variables as Record<string, unknown> | null | undefined,
-        projectId: input.projectId ?? null,
-        projectWorkspaceId: input.projectWorkspaceId ?? null,
+        ...(hasOwnRoutineRunField(input, "projectId") ? { projectId: input.projectId ?? null } : {}),
+        ...(hasOwnRoutineRunField(input, "projectWorkspaceId")
+          ? { projectWorkspaceId: input.projectWorkspaceId ?? null }
+          : {}),
         assigneeAgentId: input.assigneeAgentId ?? null,
         idempotencyKey: input.idempotencyKey,
-        executionWorkspaceId: input.executionWorkspaceId ?? null,
-        executionWorkspacePreference: input.executionWorkspacePreference ?? null,
-        executionWorkspaceSettings:
-          (input.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null,
+        ...(hasOwnRoutineRunField(input, "executionWorkspaceId")
+          ? { executionWorkspaceId: input.executionWorkspaceId ?? null }
+          : {}),
+        ...(hasOwnRoutineRunField(input, "executionWorkspacePreference")
+          ? { executionWorkspacePreference: input.executionWorkspacePreference ?? null }
+          : {}),
+        ...(hasOwnRoutineRunField(input, "executionWorkspaceSettings")
+          ? {
+              executionWorkspaceSettings:
+                (input.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null,
+            }
+          : {}),
         descriptionAppendix: input.descriptionAppendix ?? null,
         actor,
       });
