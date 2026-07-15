@@ -91,6 +91,7 @@ import { isUuidLike, normalizeAgentUrlKey, parseFrontmatterMarkdown } from "@pap
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { ghFetch, gitHubApiBase, resolveRawGitHubUrl } from "./github-fetch.js";
+import { logger } from "../middleware/logger.js";
 import { agentService } from "./agents.js";
 import { issueDocumentSelect, mapIssueDocumentRow } from "./documents.js";
 import { toIssueWorkProduct } from "./work-products.js";
@@ -370,6 +371,7 @@ type RuntimeSkillSourceResolution =
   | { status: "missing"; source: string; detail: string };
 
 const skillInventoryRefreshPromises = new Map<string, Promise<void>>();
+const runtimeSkillMaterializePromises = new Map<string, Promise<RuntimeSkillSourceResolution>>();
 
 function selectCompanySkillColumns() {
   return {
@@ -4718,30 +4720,226 @@ export function companySkillService(db: Db) {
     };
   }
 
-  async function materializeRuntimeSkillFiles(companyId: string, skill: CompanySkill) {
-    const runtimeRoot = path.resolve(resolveManagedSkillsRoot(companyId), "__runtime__");
-    const skillDir = path.resolve(runtimeRoot, buildSkillRuntimeName(skill.key, skill.slug));
-    await fs.rm(skillDir, { recursive: true, force: true });
-    await fs.mkdir(skillDir, { recursive: true });
+  type RuntimeSkillSnapshot = Map<string, string>;
 
+  function isRuntimePublishResidue(filePath: string) {
+    const basename = path.basename(filePath);
+    return basename.startsWith(".") || basename.includes(".publish-") || basename.includes(".tmp-");
+  }
+
+  function resolveRuntimeSkillSnapshotPath(skillDir: string, relativePath: string) {
+    const normalizedPath = normalizePortablePath(relativePath);
+    if (!normalizedPath) return null;
+    const targetPath = path.resolve(skillDir, normalizedPath);
+    if (targetPath !== skillDir && !targetPath.startsWith(`${skillDir}${path.sep}`)) {
+      throw unprocessable(`Runtime skill file path is invalid: ${relativePath}`);
+    }
+    return { normalizedPath, targetPath };
+  }
+
+  function orderedSkillSnapshotPaths(snapshot: RuntimeSkillSnapshot) {
+    return Array.from(snapshot.keys()).sort((left, right) => {
+      if (left === "SKILL.md") return 1;
+      if (right === "SKILL.md") return -1;
+      return left.localeCompare(right);
+    });
+  }
+
+  function assertRuntimeSkillMarkdownValid(markdown: string, context: string) {
+    const parsed = parseFrontmatterMarkdown(markdown);
+    if (!markdown.startsWith("---\n") || !parsed.hasFrontmatter || !asString(parsed.frontmatter.name)) {
+      throw unprocessable(`${context} SKILL.md must contain valid frontmatter with a name.`);
+    }
+  }
+
+  function validateRuntimeSkillSnapshot(snapshot: RuntimeSkillSnapshot, context: string) {
+    const markdown = snapshot.get("SKILL.md");
+    if (markdown === undefined) {
+      throw unprocessable(`${context} snapshot is missing SKILL.md.`);
+    }
+    assertRuntimeSkillMarkdownValid(markdown, context);
+  }
+
+  async function collectRuntimeSkillSnapshot(companyId: string, skill: CompanySkill) {
+    const snapshot: RuntimeSkillSnapshot = new Map();
     let wroteSkillFile = false;
+
     for (const entry of skill.fileInventory) {
       const normalizedPath = normalizePortablePath(entry.path);
-      const detail = await readFile(companyId, skill.id, normalizedPath).catch(() => null);
-      const content = detail?.content ?? (normalizedPath === "SKILL.md" ? skill.markdown : null);
-      if (content === null) continue;
-      const targetPath = path.resolve(skillDir, entry.path);
-      await fs.mkdir(path.dirname(targetPath), { recursive: true });
-      await fs.writeFile(targetPath, content, "utf8");
+      if (!normalizedPath || normalizedPath !== entry.path) continue;
+      const detail = await readFile(companyId, skill.id, normalizedPath);
+      const content = detail?.content ?? null;
+      if (content === null) {
+        if (normalizedPath === "SKILL.md") {
+          throw unprocessable("Company skill could not be materialized because its stored SKILL.md copy is missing.");
+        }
+        throw notFound("Skill file is unavailable: the skill source directory is missing.");
+      }
+      snapshot.set(normalizedPath, content);
       if (normalizedPath === "SKILL.md") wroteSkillFile = true;
     }
 
     if (!wroteSkillFile) {
-      await fs.rm(skillDir, { recursive: true, force: true });
       throw unprocessable("Company skill could not be materialized because its stored SKILL.md copy is missing.");
     }
 
-    return skillDir;
+    validateRuntimeSkillSnapshot(snapshot, "Desired runtime skill");
+    return snapshot;
+  }
+
+  async function readRuntimeSkillSnapshot(skillDir: string): Promise<RuntimeSkillSnapshot | null> {
+    const existingFiles = await listMaterializedFiles(skillDir);
+    if (!existingFiles) return null;
+
+    const snapshot: RuntimeSkillSnapshot = new Map();
+    for (const relativePath of existingFiles) {
+      if (isRuntimePublishResidue(relativePath)) continue;
+      const resolved = resolveRuntimeSkillSnapshotPath(skillDir, relativePath);
+      if (!resolved) continue;
+      const content = await fs.readFile(resolved.targetPath, "utf8");
+      snapshot.set(resolved.normalizedPath, content);
+    }
+    validateRuntimeSkillSnapshot(snapshot, "Captured runtime skill");
+    return snapshot;
+  }
+
+  async function runtimeSnapshotMatches(skillDir: string, desired: RuntimeSkillSnapshot) {
+    const existing = await readRuntimeSkillSnapshot(skillDir).catch((error) => {
+      logger.warn({ err: error, skillDir }, "runtime skill snapshot failed validation during match check");
+      return null;
+    });
+    if (!existing || existing.size !== desired.size) return false;
+    for (const [relativePath, content] of desired.entries()) {
+      if (existing.get(relativePath) !== content) return false;
+    }
+    return true;
+  }
+
+  async function cleanupRuntimePublishResidue(skillDir: string) {
+    async function walk(dir: string) {
+      const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        const absolutePath = path.join(dir, entry.name);
+        if (isRuntimePublishResidue(entry.name)) {
+          await fs.rm(absolutePath, { recursive: true, force: true });
+        } else if (entry.isDirectory()) {
+          await walk(absolutePath);
+        }
+      }
+    }
+    await walk(skillDir);
+  }
+
+  async function publishRuntimeSkillSnapshot(
+    skillDir: string,
+    desired: RuntimeSkillSnapshot,
+    previous: RuntimeSkillSnapshot | null,
+  ) {
+    await fs.mkdir(skillDir, { recursive: true });
+    const publishId = `${Date.now()}-${randomUUID()}`;
+    const publishFiles: Array<{ publishPath: string; targetPath: string }> = [];
+
+    try {
+      for (const relativePath of orderedSkillSnapshotPaths(desired)) {
+        const resolved = resolveRuntimeSkillSnapshotPath(skillDir, relativePath);
+        if (!resolved) continue;
+        await fs.mkdir(path.dirname(resolved.targetPath), { recursive: true });
+        const publishPath = path.join(
+          path.dirname(resolved.targetPath),
+          `${path.basename(resolved.targetPath)}.publish-${publishId}`,
+        );
+        await fs.writeFile(publishPath, desired.get(relativePath)!, "utf8");
+        publishFiles.push({ publishPath, targetPath: resolved.targetPath });
+      }
+
+      for (const publishFile of publishFiles) {
+        await fs.rename(publishFile.publishPath, publishFile.targetPath);
+      }
+
+      for (const relativePath of previous?.keys() ?? []) {
+        if (desired.has(relativePath)) continue;
+        const resolved = resolveRuntimeSkillSnapshotPath(skillDir, relativePath);
+        if (resolved) await fs.rm(resolved.targetPath, { force: true });
+      }
+    } catch (error) {
+      await Promise.all(
+        publishFiles.map(({ publishPath }) => fs.rm(publishPath, { force: true }).catch(() => undefined)),
+      );
+      throw error;
+    }
+  }
+
+  async function materializeRuntimeSkillFilesUnlocked(
+    companyId: string,
+    skill: CompanySkill,
+  ): Promise<RuntimeSkillSourceResolution> {
+    const runtimeRoot = path.resolve(resolveManagedSkillsRoot(companyId), "__runtime__");
+    const skillDir = path.resolve(runtimeRoot, buildSkillRuntimeName(skill.key, skill.slug));
+    const desired = await collectRuntimeSkillSnapshot(companyId, skill);
+
+    await cleanupRuntimePublishResidue(skillDir);
+    if (await runtimeSnapshotMatches(skillDir, desired)) {
+      return { status: "available", source: skillDir };
+    }
+
+    const previous = await readRuntimeSkillSnapshot(skillDir).catch((error) => {
+      logger.warn({ err: error, companyId, skillId: skill.id, skillKey: skill.key, skillDir }, "runtime skill previous snapshot failed validation");
+      return null;
+    });
+    try {
+      await publishRuntimeSkillSnapshot(skillDir, desired, previous);
+      await cleanupRuntimePublishResidue(skillDir);
+      return { status: "available", source: skillDir };
+    } catch (error) {
+      await cleanupRuntimePublishResidue(skillDir).catch(() => undefined);
+      if (previous) {
+        if (await runtimeSnapshotMatches(skillDir, previous).catch(() => false)) {
+          return { status: "available", source: skillDir };
+        }
+        try {
+          await publishRuntimeSkillSnapshot(skillDir, previous, await readRuntimeSkillSnapshot(skillDir));
+          await cleanupRuntimePublishResidue(skillDir);
+          return { status: "available", source: skillDir };
+        } catch (restoreError) {
+          await cleanupRuntimePublishResidue(skillDir).catch(() => undefined);
+          logger.error(
+            { err: restoreError, companyId, skillId: skill.id, skillKey: skill.key, skillDir },
+            "runtime skill refresh failed and previous snapshot restore failed",
+          );
+          return {
+            status: "missing",
+            source: skillDir,
+            detail: "Company skill refresh failed and the previous snapshot could not be restored safely.",
+          };
+        }
+      }
+      await fs.rm(skillDir, { recursive: true, force: true }).catch(() => undefined);
+      const message = error instanceof Error ? error.message : "unknown error";
+      return {
+        status: "missing",
+        source: skillDir,
+        detail: `Company skill could not be materialized safely: ${message}`,
+      };
+    }
+  }
+
+  async function materializeRuntimeSkillFiles(
+    companyId: string,
+    skill: CompanySkill,
+  ): Promise<RuntimeSkillSourceResolution> {
+    const materializeKey = `${companyId}:${skill.id}`;
+    const existing = runtimeSkillMaterializePromises.get(materializeKey);
+    if (existing) return existing;
+
+    const promise = materializeRuntimeSkillFilesUnlocked(companyId, skill);
+    runtimeSkillMaterializePromises.set(materializeKey, promise);
+    promise
+      .finally(() => {
+        if (runtimeSkillMaterializePromises.get(materializeKey) !== promise) return;
+        runtimeSkillMaterializePromises.delete(materializeKey);
+      })
+      .catch(() => undefined);
+    return promise;
   }
 
   function resolveVersionSnapshotPath(skillDir: string, relativePath: string) {
@@ -4870,8 +5068,11 @@ export function companySkillService(db: Db) {
       };
     }
 
-    const materializedSource = await materializeRuntimeSkillFiles(companyId, skill).catch(() => null);
-    return materializedSource ? { status: "available", source: materializedSource } : null;
+    return materializeRuntimeSkillFiles(companyId, skill).catch((error): RuntimeSkillSourceResolution => ({
+      status: "missing",
+      source: resolveRuntimeSkillMaterializedPath(companyId, skill),
+      detail: error instanceof Error ? error.message : buildMissingRuntimeSourceDetail(skill),
+    }));
   }
 
   async function listRuntimeSkillEntries(
