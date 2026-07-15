@@ -7965,6 +7965,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }
 
   async function clearDetachedRunWarning(runId: string) {
+    if (!isUuidLike(runId)) return null;
+
     const updated = await db
       .update(heartbeatRuns)
       .set({
