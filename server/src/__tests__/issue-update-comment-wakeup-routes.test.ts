@@ -326,7 +326,7 @@ describe("issue update comment wakeups", () => {
       existing.id,
       "write the whole thing",
       expect.objectContaining({ userId: "local-board" }),
-      undefined,
+      expect.objectContaining({ sourceTrust: null }),
       expect.any(Object),
     );
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
