@@ -4,7 +4,6 @@ import {
   agents,
   authUsers,
   companyMemberships,
-  heartbeatRuns,
   instanceUserRoles,
   issueComments,
   issues,
@@ -26,6 +25,7 @@ import {
   type TrustPresetResolution,
 } from "./trust-preset-resolver.js";
 import { logger } from "../middleware/logger.js";
+import { loadMatchingAgentRun, type MatchingAgentRun } from "./agent-run-context.js";
 
 export type AuthorizationActor =
   {
@@ -717,20 +717,8 @@ export function authorizationService(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
-  async function loadRunPolicy(runId: string | null | undefined, companyId: string, agentId: string) {
-    if (!runId) return null;
-    if (!isUuidLike(runId)) return null;
-    const row = await db
-      .select({
-        id: heartbeatRuns.id,
-        companyId: heartbeatRuns.companyId,
-        agentId: heartbeatRuns.agentId,
-        contextSnapshot: heartbeatRuns.contextSnapshot,
-      })
-      .from(heartbeatRuns)
-      .where(eq(heartbeatRuns.id, runId))
-      .then((rows) => rows[0] ?? null);
-    if (!row || row.companyId !== companyId || row.agentId !== agentId) return null;
+  function runPolicy(row: MatchingAgentRun | null) {
+    if (!row) return null;
     const context = isPlainRecord(row.contextSnapshot) ? row.contextSnapshot : null;
     return isPlainRecord(context?.executionPolicy)
       ? { companyId: row.companyId, executionPolicy: context.executionPolicy }
@@ -769,18 +757,17 @@ export function authorizationService(db: Db) {
 
   async function resolveActorTrust(input: {
     actorAgent: AgentAuthorizationRow;
-    actor: AuthorizationActor;
+    run: MatchingAgentRun | null;
     companyId: string;
     resource: AuthorizationResource;
   }): Promise<TrustPresetResolution> {
     const { issue, project } = await loadResourceContext(input.resource);
-    const run = await loadRunPolicy(input.actor.runId, input.companyId, input.actorAgent.id);
     return resolveCoreTrustPreset({
       companyId: input.companyId,
       agent: input.actorAgent,
       project,
       issue,
-      run,
+      run: runPolicy(input.run),
     });
   }
 
@@ -1634,6 +1621,19 @@ export function authorizationService(db: Db) {
       if (skillTestDecision) return skillTestDecision;
     }
 
+    const matchingRun = await loadMatchingAgentRun(db, {
+      runId: input.actor.runId,
+      companyId,
+      agentId: actorAgentId,
+    });
+    if (input.actor.runId != null && !matchingRun) {
+      return deny({
+        action: input.action,
+        reason: "deny_scope",
+        explanation: "Agent run context is missing or does not match the authenticated agent and company.",
+      });
+    }
+
     if (input.actor.source === "agent_key" && input.actor.keyScope?.kind === "task_bridge") {
       const keyId = input.actor.keyId ?? null;
       if (!keyId) {
@@ -1659,7 +1659,7 @@ export function authorizationService(db: Db) {
       resource: input.resource,
       resolution: await resolveActorTrust({
         actorAgent,
-        actor: input.actor,
+        run: matchingRun,
         companyId,
         resource: input.resource,
       }),
