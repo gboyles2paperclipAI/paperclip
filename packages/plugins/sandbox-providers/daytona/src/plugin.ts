@@ -1,6 +1,6 @@
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { Daytona, DaytonaNotFoundError, DaytonaTimeoutError } from "@daytonaio/sdk";
+import { Daytona, DaytonaNotFoundError, DaytonaTimeoutError } from "@daytona/sdk";
 import type {
   CreateSandboxBaseParams,
   CreateSandboxFromImageParams,
@@ -8,7 +8,7 @@ import type {
   DaytonaConfig,
   Resources,
   Sandbox,
-} from "@daytonaio/sdk";
+} from "@daytona/sdk";
 import { definePlugin } from "@paperclipai/plugin-sdk";
 import type {
   PluginEnvironmentAcquireLeaseParams,
@@ -510,7 +510,7 @@ async function createSshConnection(
   const createSshAccess = (sandbox as DaytonaInteractiveSandbox).createSshAccess;
   if (typeof createSshAccess !== "function") {
     throw new Error(
-      "Daytona interactive setup requires @daytonaio/sdk Sandbox.createSshAccess support.",
+      "Daytona interactive setup requires @daytona/sdk Sandbox.createSshAccess support.",
     );
   }
 
@@ -1139,7 +1139,7 @@ const plugin = definePlugin({
     const createSnapshot = (sandbox as DaytonaInteractiveSandbox)._experimental_createSnapshot;
     if (typeof createSnapshot !== "function") {
       throw new Error(
-        "Daytona template capture requires @daytonaio/sdk Sandbox._experimental_createSnapshot support.",
+        "Daytona template capture requires @daytona/sdk Sandbox._experimental_createSnapshot support.",
       );
     }
     const templateRef = sanitizeSnapshotName(
@@ -1213,7 +1213,7 @@ const plugin = definePlugin({
     const client = createDaytonaClient(config) as Daytona & { snapshot?: DaytonaSnapshotService };
     const snapshotService = client.snapshot;
     if (typeof snapshotService?.get !== "function" || typeof snapshotService.delete !== "function") {
-      throw new Error("Daytona template deletion requires @daytonaio/sdk snapshot.get/delete support.");
+      throw new Error("Daytona template deletion requires @daytona/sdk snapshot.get/delete support.");
     }
     const snapshot = await snapshotService.get(params.templateRef);
     await snapshotService.delete(snapshot);

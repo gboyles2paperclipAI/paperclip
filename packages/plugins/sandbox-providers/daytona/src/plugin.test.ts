@@ -10,7 +10,7 @@ const { MockDaytonaNotFoundError, MockDaytonaTimeoutError } = vi.hoisted(() => {
   return { MockDaytonaNotFoundError, MockDaytonaTimeoutError };
 });
 
-vi.mock("@daytonaio/sdk", () => ({
+vi.mock("@daytona/sdk", () => ({
   Daytona: class MockDaytona {
     create = mockCreate;
     get = mockGet;
