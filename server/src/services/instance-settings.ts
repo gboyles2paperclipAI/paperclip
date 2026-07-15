@@ -205,7 +205,6 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
       enableEnvironments: parsed.data.enableEnvironments ?? false,
       enableIsolatedWorkspaces: parsed.data.enableIsolatedWorkspaces ?? false,
       enableStreamlinedLeftNavigation: parsed.data.enableStreamlinedLeftNavigation ?? true,
-      enableApps: parsed.data.enableApps ?? false,
       enablePipelines: parsed.data.enablePipelines ?? false,
       enableCases: parsed.data.enableCases ?? false,
       enableConferenceRoomChat: parsed.data.enableConferenceRoomChat ?? false,
@@ -214,7 +213,6 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
       enableTaskWatchdogs: parsed.data.enableTaskWatchdogs ?? false,
       enableCloudSync: parsed.data.enableCloudSync ?? false,
       enableExternalObjects: parsed.data.enableExternalObjects ?? false,
-      enableSmokeLab: parsed.data.enableSmokeLab ?? false,
       enableBuiltInAgents: parsed.data.enableBuiltInAgents ?? false,
       enableDecisions: parsed.data.enableDecisions ?? false,
       enableGoalsSidebarLink: parsed.data.enableGoalsSidebarLink ?? false,
@@ -230,13 +228,12 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
       issueGraphLivenessAutoRecoveryLookbackHours:
         parsed.data.issueGraphLivenessAutoRecoveryLookbackHours ??
         DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
-    };
+    } as InstanceExperimentalSettings;
   }
   return {
     enableEnvironments: false,
     enableIsolatedWorkspaces: false,
     enableStreamlinedLeftNavigation: true,
-    enableApps: false,
     enablePipelines: false,
     enableCases: false,
     enableConferenceRoomChat: false,
@@ -245,7 +242,6 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
     enableExperimentalFileViewer: false,
     enableCloudSync: false,
     enableExternalObjects: false,
-    enableSmokeLab: false,
     enableBuiltInAgents: false,
     enableDecisions: false,
     enableGoalsSidebarLink: false,
@@ -259,7 +255,7 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
     worktreeRunExecutionActivationInstanceId: null,
     issueGraphLivenessAutoRecoveryLookbackHours:
       DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
-  };
+  } as InstanceExperimentalSettings;
 }
 
 function toInstanceSettings(row: typeof instanceSettings.$inferSelect): InstanceSettings {
