@@ -86,6 +86,7 @@ import { companySkillService } from "./company-skills.js";
 import {
   activeHeartbeatRunExecutionPromises,
   activeHeartbeatRunExecutions,
+  activeHeartbeatSchedulingPromises,
   waitForAllHeartbeatRunExecutionsDrain,
 } from "./heartbeat-execution-registry.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
@@ -11362,7 +11363,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
   }
 
-  async function startNextQueuedRunForAgent(agentId: string) {
+  function startNextQueuedRunForAgent(agentId: string) {
+    const scheduling = startNextQueuedRunForAgentInternal(agentId);
+    activeHeartbeatSchedulingPromises.add(scheduling);
+    void scheduling.then(
+      () => activeHeartbeatSchedulingPromises.delete(scheduling),
+      () => activeHeartbeatSchedulingPromises.delete(scheduling),
+    );
+    return scheduling;
+  }
+
+  async function startNextQueuedRunForAgentInternal(agentId: string) {
     if ((await getSchedulingSuppression()).suppressed) return [];
     const cutoff = await getWorktreeExecutionCutoff();
 
