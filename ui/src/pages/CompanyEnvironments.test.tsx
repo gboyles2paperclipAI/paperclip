@@ -1,11 +1,14 @@
 // @vitest-environment jsdom
 
 import { createRoot } from "react-dom/client";
+import { act as reactAct } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { CompanyEnvironments } from "./CompanyEnvironments";
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const xtermMocks = vi.hoisted(() => {
   class MockTerminal {
@@ -226,16 +229,20 @@ class FakeWebSocket {
 }
 
 async function act(callback: () => void | Promise<void>) {
-  await callback();
-  await Promise.resolve();
-  await new Promise((resolve) => window.setTimeout(resolve, 0));
+  await reactAct(async () => {
+    await callback();
+    await Promise.resolve();
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+  });
 }
 
 async function flushReact() {
-  for (let i = 0; i < 3; i += 1) {
-    await Promise.resolve();
-    await new Promise((resolve) => window.setTimeout(resolve, 0));
-  }
+  await reactAct(async () => {
+    for (let i = 0; i < 3; i += 1) {
+      await Promise.resolve();
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    }
+  });
 }
 
 async function waitForAssertion(assertion: () => void) {
@@ -463,8 +470,10 @@ describe("CompanyEnvironments — test provider button", () => {
     );
   });
 
-  afterEach(() => {
-    root?.unmount();
+  afterEach(async () => {
+    if (root) {
+      await reactAct(async () => root?.unmount());
+    }
     root = null;
     container.remove();
     document.body.innerHTML = "";
@@ -635,7 +644,9 @@ describe("CompanyEnvironments — test provider button", () => {
     });
     await flushReact();
 
-    expect(getEnvironmentFormPage()).toBeNull();
+    await waitForAssertion(() => {
+      expect(getEnvironmentFormPage()).toBeNull();
+    });
   });
 
   it("opens the edit form on a standalone page with existing values and closes after save", async () => {
@@ -684,7 +695,9 @@ describe("CompanyEnvironments — test provider button", () => {
         envVars: { API_TOKEN: { type: "plain", value: "draft-token" } },
       }),
     );
-    expect(getEnvironmentFormPage()).toBeNull();
+    await waitForAssertion(() => {
+      expect(getEnvironmentFormPage()).toBeNull();
+    });
   });
 
   it("confirms before cancelling the edit page with unsaved environment variable drafts", async () => {

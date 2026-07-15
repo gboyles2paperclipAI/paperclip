@@ -100,7 +100,11 @@ restore_sources() {
   if [[ -f "$REPO_ROOT/cli/package.dev.json" ]]; then
     mv "$REPO_ROOT/cli/package.dev.json" "$REPO_ROOT/cli/package.json"
   fi
-  rm -f "$REPO_ROOT/cli/README.md"
+  if [[ -f "$BACKUP_ROOT/cli-README.md" ]]; then
+    cp -p "$BACKUP_ROOT/cli-README.md" "$REPO_ROOT/cli/README.md"
+  else
+    rm -f "$REPO_ROOT/cli/README.md"
+  fi
 }
 
 cleanup() {
@@ -130,6 +134,9 @@ while IFS=$'\t' read -r pkg_dir _name _version; do
   cp -p "$REPO_ROOT/$pkg_dir/package.json" "$BACKUP_ROOT/$pkg_dir/package.json"
 done < "$BACKUP_ROOT/release-packages.tsv"
 cp -p "$REPO_ROOT/cli/src/index.ts" "$BACKUP_ROOT/cli-src-index.ts"
+if [[ -f "$REPO_ROOT/cli/README.md" ]]; then
+  cp -p "$REPO_ROOT/cli/README.md" "$BACKUP_ROOT/cli-README.md"
+fi
 
 cd "$REPO_ROOT"
 run_logged typecheck pnpm -r typecheck

@@ -157,4 +157,9 @@ test("Help2day source evidence is isolated from publication and runtime activati
   assert.match(evidence, /grype/);
   assert.match(evidence, /source-range-gitleaks/);
   assert.match(evidence, /package-gitleaks/);
+  assert.match(evidence, /BACKUP_ROOT\/cli-README\.md/);
+  assert.match(
+    evidence,
+    /if \[\[ -f "\$BACKUP_ROOT\/cli-README\.md" \]\]; then[\s\S]*cp -p "\$BACKUP_ROOT\/cli-README\.md" "\$REPO_ROOT\/cli\/README\.md"[\s\S]*else[\s\S]*rm -f "\$REPO_ROOT\/cli\/README\.md"/,
+  );
 });
