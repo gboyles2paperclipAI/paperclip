@@ -856,6 +856,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         {
           resumeSessionId,
           skipGitRepoCheck: executionTargetIsSandbox,
+          enableNetworkAccess: true,
         },
       );
       const args = execArgs.args;
