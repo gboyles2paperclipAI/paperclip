@@ -14,6 +14,7 @@ LIVE_PREFIX=""
 STAGE_ROOT=""
 EXTRACT_ROOT=""
 BACKUP_ROOT=""
+VITEST_EVIDENCE_TMP=""
 
 usage() {
   printf '%s\n' \
@@ -133,6 +134,8 @@ NODE
   fi
   [[ -z "$EXTRACT_ROOT" || ! -d "$EXTRACT_ROOT" ]] || rm -rf "$EXTRACT_ROOT"
   [[ -z "$BACKUP_ROOT" || ! -d "$BACKUP_ROOT" ]] || rm -rf "$BACKUP_ROOT"
+  [[ -z "$VITEST_EVIDENCE_TMP" || ! -d "$VITEST_EVIDENCE_TMP" ]] \
+    || rm -rf "$VITEST_EVIDENCE_TMP"
 }
 trap cleanup EXIT
 
@@ -198,9 +201,12 @@ fi
 
 cd "$REPO_ROOT"
 run_logged typecheck pnpm -r typecheck
-VITEST_EVIDENCE_TMP="$OUTPUT/work/vitest-tmp"
+VITEST_TEMP_BASE="${RUNNER_TEMP:-/tmp}"
+[[ -d "$VITEST_TEMP_BASE" ]] || fail "Vitest temp base does not exist: $VITEST_TEMP_BASE"
+VITEST_EVIDENCE_TMP="$(
+  mktemp -d "$VITEST_TEMP_BASE/paperclip-release-vitest.${SOURCE_COMMIT:0:12}.XXXXXX"
+)"
 RELEASE_EVIDENCE_RUN_ID="$(basename "$OUTPUT")-$$"
-mkdir -p "$VITEST_EVIDENCE_TMP"
 run_logged tests env \
   TMPDIR="$VITEST_EVIDENCE_TMP" \
   PAPERCLIP_RELEASE_EVIDENCE_RUN_ID="$RELEASE_EVIDENCE_RUN_ID" \
