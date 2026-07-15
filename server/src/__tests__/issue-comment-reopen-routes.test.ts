@@ -70,9 +70,19 @@ const mockRoutineService = vi.hoisted(() => ({
   syncRunStatusForIssue: vi.fn(async () => undefined),
 }));
 const mockIssueThreadInteractionService = vi.hoisted(() => ({
+  listForIssue: vi.fn(async () => []),
   expireRequestConfirmationsSupersededByComment: vi.fn(async () => []),
   expireStaleRequestConfirmationsForIssueDocument: vi.fn(async () => []),
 }));
+const mockLoadMatchingAgentRun = vi.hoisted(() => vi.fn(async (
+  _db: unknown,
+  input: { runId: string | null | undefined; companyId: string; agentId: string },
+) => input.runId ? ({
+  id: input.runId,
+  companyId: input.companyId,
+  agentId: input.agentId,
+  contextSnapshot: null,
+}) : null));
 const mockIssueRecoveryActionService = vi.hoisted(() => ({
   getActiveForIssue: vi.fn(async () => null),
 }));
@@ -169,6 +179,10 @@ vi.mock("../services/external-objects.js", () => ({
   externalObjectService: () => mockExternalObjectService,
 }));
 
+vi.mock("../services/agent-run-context.js", () => ({
+  loadMatchingAgentRun: mockLoadMatchingAgentRun,
+}));
+
 function createApp() {
   const app = express();
   app.use(express.json());
@@ -225,7 +239,7 @@ function agentActor(agentId = "22222222-2222-4222-8222-222222222222") {
     agentId,
     companyId: "company-1",
     source: "agent_key",
-    runId: "run-1",
+    runId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
   };
 }
 
@@ -262,6 +276,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockInstanceSettingsService.get.mockReset();
     mockInstanceSettingsService.listCompanyIds.mockReset();
     mockRoutineService.syncRunStatusForIssue.mockReset();
+    mockIssueThreadInteractionService.listForIssue.mockReset();
     mockIssueRecoveryActionService.getActiveForIssue.mockReset();
     mockIssueTreeControlService.getActivePauseHoldGate.mockReset();
     mockExternalObjectService.syncCommentSafely.mockReset();
@@ -307,6 +322,7 @@ describe.sequential("issue comment reopen routes", () => {
     });
     mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["company-1"]);
     mockRoutineService.syncRunStatusForIssue.mockResolvedValue(undefined);
+    mockIssueThreadInteractionService.listForIssue.mockResolvedValue([]);
     mockIssueRecoveryActionService.getActiveForIssue.mockResolvedValue(null);
     mockIssueTreeControlService.getActivePauseHoldGate.mockResolvedValue(null);
     mockIssueService.addComment.mockResolvedValue({
@@ -343,7 +359,12 @@ describe.sequential("issue comment reopen routes", () => {
       };
     });
     mockAccessService.hasPermission.mockResolvedValue(false);
-    mockAgentService.getById.mockResolvedValue(null);
+    mockAgentService.getById.mockImplementation(async (id: string) => ({
+      id,
+      companyId: "company-1",
+      role: "worker",
+      permissions: { canCreateAgents: false },
+    }));
     mockAgentService.list.mockResolvedValue([
       {
         id: "22222222-2222-4222-8222-222222222222",
@@ -418,6 +439,7 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      expect.anything(),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -450,6 +472,7 @@ describe.sequential("issue comment reopen routes", () => {
       expect.objectContaining({
         assigneeAgentId: "33333333-3333-4333-8333-333333333333",
       }),
+      expect.anything(),
     );
   });
 
@@ -496,6 +519,7 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      expect.anything(),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -669,7 +693,7 @@ describe.sequential("issue comment reopen routes", () => {
         type: "agent",
         agentId: assigneeAgentId,
         companyId: "company-1",
-        runId: "run-self",
+        runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
       }),
     )
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
@@ -711,7 +735,7 @@ describe.sequential("issue comment reopen routes", () => {
         type: "agent",
         agentId: assigneeAgentId,
         companyId: "company-1",
-        runId: "run-self",
+        runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
       }),
     )
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
@@ -749,7 +773,7 @@ describe.sequential("issue comment reopen routes", () => {
         type: "agent",
         agentId: assigneeAgentId,
         companyId: "company-1",
-        runId: "run-self",
+        runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
       }),
     )
       .patch("/api/issues/11111111-1111-4111-8111-111111111111")
@@ -791,7 +815,7 @@ describe.sequential("issue comment reopen routes", () => {
         type: "agent",
         agentId: otherAgentId,
         companyId: "company-1",
-        runId: "run-other",
+        runId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
       }),
     )
       .patch("/api/issues/11111111-1111-4111-8111-111111111111")
@@ -804,6 +828,7 @@ describe.sequential("issue comment reopen routes", () => {
         assigneeAgentId: otherAgentId,
         status: "todo",
       }),
+      expect.anything(),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -1234,6 +1259,7 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      expect.anything(),
     );
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
@@ -1290,6 +1316,7 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      expect.anything(),
     );
     expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("retry-run-1");
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
@@ -1398,6 +1425,7 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      expect.anything(),
     );
     expect(mockIssueService.update).not.toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
@@ -1494,13 +1522,14 @@ describe.sequential("issue comment reopen routes", () => {
         actorAgentId: "22222222-2222-4222-8222-222222222222",
         actorUserId: null,
       }),
+      expect.anything(),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
-        action: "issue.comment_added",
+        action: "issue.updated",
         details: expect.objectContaining({
-          commentId: "comment-1",
+          reopened: true,
           resumeIntent: true,
           followUpRequested: true,
         }),
@@ -2782,7 +2811,7 @@ describe.sequential("issue comment reopen routes", () => {
         type: "agent",
         agentId: "22222222-2222-4222-8222-222222222222",
         companyId: "company-1",
-        runId: "run-1",
+        runId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       }),
     )
       .patch("/api/issues/11111111-1111-4111-8111-111111111111")
@@ -2871,7 +2900,7 @@ describe.sequential("issue comment reopen routes", () => {
         type: "agent",
         agentId: "33333333-3333-4333-8333-333333333333",
         companyId: "company-1",
-        runId: "run-2",
+        runId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
       }),
     )
       .patch("/api/issues/11111111-1111-4111-8111-111111111111")
