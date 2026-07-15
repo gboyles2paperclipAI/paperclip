@@ -162,6 +162,9 @@ test("Help2day source evidence is isolated from publication and runtime activati
   assert.match(evidence, /prove-isolated-release-runtime\.sh/);
   assert.match(evidence, /--runtime-proof-mode/);
   assert.match(evidence, /heartbeat-settlement-errors\.log/);
+  assert.match(evidence, /assert_no_vitest_fixture_leaks/);
+  assert.match(evidence, /PAPERCLIP_VITEST_RUN_ID=/);
+  assert.match(evidence, /stable test cleanup left/);
   assert.match(evidence, /CONNECTION_\(ENDED\|DESTROYED\)/);
   assert.match(evidence, /skipping late \(setup failure\|adapter failure\|run\) finalization/);
   assert.doesNotMatch(evidence, /--legacy-peer-deps/);

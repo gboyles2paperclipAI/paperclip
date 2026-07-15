@@ -142,6 +142,42 @@ run_logged() {
   "$@" > >(tee "$OUTPUT/test-results/${label}.log") 2>&1
 }
 
+assert_no_vitest_fixture_leaks() {
+  node --input-type=module - <<'NODE'
+import { readFileSync, readlinkSync, readdirSync } from "node:fs";
+import path from "node:path";
+import { selectVitestTempRootParent } from "./scripts/vitest-stable-temp.mjs";
+
+const tempRootParent = selectVitestTempRootParent();
+const leakedRoots = readdirSync(tempRootParent, { withFileTypes: true })
+  .filter((entry) => entry.isDirectory() && /^pcvt-/.test(entry.name))
+  .map((entry) => path.join(tempRootParent, entry.name));
+const leakedProcesses = [];
+for (const entry of readdirSync("/proc")) {
+  if (!/^\d+$/.test(entry)) continue;
+  const pid = Number(entry);
+  if (pid === process.pid) continue;
+  try {
+    const environ = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0");
+    const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+    const cwd = readlinkSync(`/proc/${pid}/cwd`).replace(/ \(deleted\)$/, "");
+    const hasRunToken = environ.some((value) => value.startsWith("PAPERCLIP_VITEST_RUN_ID="));
+    const hasPcvtPath = [cwd, ...cmdline].some((value) =>
+      value.startsWith(`${tempRootParent}${path.sep}pcvt-`),
+    );
+    if (hasRunToken || hasPcvtPath) leakedProcesses.push(pid);
+  } catch {
+    // A process that exits during the /proc scan is not a leak.
+  }
+}
+if (leakedRoots.length > 0 || leakedProcesses.length > 0) {
+  throw new Error(
+    `stable test cleanup left ${leakedRoots.length} pcvt root(s) and ${leakedProcesses.length} fixture process(es)`,
+  );
+}
+NODE
+}
+
 BACKUP_ROOT="$(mktemp -d "$OUTPUT/work/source-backup.XXXXXX")"
 node "$REPO_ROOT/scripts/release-package-map.mjs" list > "$BACKUP_ROOT/release-packages.tsv"
 while IFS=$'\t' read -r pkg_dir _name _version; do
@@ -157,12 +193,14 @@ fi
 cd "$REPO_ROOT"
 run_logged typecheck pnpm -r typecheck
 run_logged tests pnpm test:run
+assert_no_vitest_fixture_leaks
 if rg -n \
   'CONNECTION_(ENDED|DESTROYED)|violates foreign key constraint|failed to refresh issue continuation summary|queued heartbeat execution failed|failed to release environment lease for heartbeat run|skipping late (setup failure|adapter failure|run) finalization.*"currentStatus":null' \
   "$OUTPUT/test-results/tests.log" > "$OUTPUT/test-results/heartbeat-settlement-errors.log"; then
   fail "test output contains late heartbeat settlement errors"
 fi
 run_logged standalone-tests node scripts/test-standalone-public-packages.mjs
+assert_no_vitest_fixture_leaks
 run_logged workspace-build pnpm build
 run_logged standalone-build node scripts/build-standalone-public-packages.mjs
 run_logged prepare-server-ui bash scripts/prepare-server-ui-dist.sh
