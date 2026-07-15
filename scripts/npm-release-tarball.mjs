@@ -170,6 +170,50 @@ function containsToken(value, normalizedTokens) {
   return normalizedTokens.some((token) => normalizedValue.includes(token));
 }
 
+function collectEntrypointTargets(value, targets) {
+  if (typeof value === "string") {
+    if (value.startsWith("./")) targets.add(value.slice(2));
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) collectEntrypointTargets(entry, targets);
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const entry of Object.values(value)) collectEntrypointTargets(entry, targets);
+  }
+}
+
+function wildcardPattern(target) {
+  const escaped = target.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^package/${escaped.replaceAll("*", "[^/]+")}$`);
+}
+
+export function verifyManifestEntrypoints(manifest, entries) {
+  const targets = new Set();
+  collectEntrypointTargets(manifest.main, targets);
+  collectEntrypointTargets(manifest.module, targets);
+  collectEntrypointTargets(manifest.types, targets);
+  collectEntrypointTargets(manifest.bin, targets);
+  collectEntrypointTargets(manifest.exports, targets);
+
+  const filePaths = new Set(entries.filter((entry) => entry.type === "file").map((entry) => entry.path));
+  for (const target of targets) {
+    if (!target || target.includes("\\") || target === ".." || target.startsWith("../")) {
+      throw new Error("staged tarball manifest contains an unsafe entrypoint");
+    }
+    if (target.includes("*")) {
+      const pattern = wildcardPattern(target);
+      if (![...filePaths].some((path) => pattern.test(path))) {
+        throw new Error("staged tarball is missing a wildcard entrypoint target");
+      }
+    } else if (!filePaths.has(`package/${target}`)) {
+      throw new Error("staged tarball is missing a concrete entrypoint target");
+    }
+  }
+  return [...targets].sort();
+}
+
 export function releaseTarballSha256(tarballPath) {
   if (!lstatSync(tarballPath).isFile()) throw new Error("release tarball is not a regular file");
   return createHash("sha256").update(readFileSync(tarballPath)).digest("hex");
@@ -204,6 +248,8 @@ export function inspectNpmReleaseTarball({ tarballPath, expectedName, expectedVe
   if (manifest.name !== expectedName || manifest.version !== expectedVersion) {
     throw new Error("staged tarball package identity does not match the release plan");
   }
+
+  verifyManifestEntrypoints(manifest, entries);
 
   return { sha256, entries, manifest };
 }

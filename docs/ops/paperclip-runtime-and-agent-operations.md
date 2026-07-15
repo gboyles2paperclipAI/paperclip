@@ -7,7 +7,8 @@ This host runs the Help2day Paperclip control plane as a private local service.
 - `paperclip.service` must be active and enabled.
 - `paperclip-staging.service` must stay inactive and disabled unless Grant explicitly approves a local-only staging test.
 - The only Paperclip listener should be `127.0.0.1:3100`.
-- `/api/health` should return `status=ok`, `version=0.3.1`, `deploymentMode=local_trusted`, and `deploymentExposure=private`.
+- Until a separately approved runtime change occurs, `/api/health` should return `status=ok`, the current live `version=0.3.1`, `deploymentMode=local_trusted`, and `deploymentExposure=private`. A source-release candidate does not change this expectation.
+- After a governed activation, require the approved Help2day version and full `buildCommit` to match the immutable release manifest. Do not accept a version-only match as deployment proof.
 - Do not print full process environments or raw service environment values. Use targeted checks only.
 
 ## Agent Operational Smoke

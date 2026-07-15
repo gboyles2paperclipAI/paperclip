@@ -1,0 +1,120 @@
+name: Help2day Source Release Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Full commit SHA to validate. Branch names and moving tags are not accepted.
+        required: true
+        type: string
+      version:
+        description: Governed version in YYYY.MDD.P-help2day.N form.
+        required: true
+        type: string
+      upstream_base:
+        description: Full frozen public-upstream commit SHA.
+        required: true
+        type: string
+      fork_anchor:
+        description: Full company-fork anchor commit SHA.
+        required: true
+        type: string
+
+concurrency:
+  group: help2day-source-release-${{ inputs.source_ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    name: Immutable source-release evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: source-release
+
+    steps:
+      - name: Reject a moving source reference
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          if [[ ! "$SOURCE_REF" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]; then
+            echo "source_ref must be a full lowercase commit SHA" >&2
+            exit 1
+          fi
+
+      - name: Checkout exact source commit
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.source_ref }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.22.3
+          cache: pnpm
+
+      - name: Setup Go for pinned scanners
+        uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.2
+          cache: false
+
+      - name: Install exact repository dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install maintained scanners at governed versions
+        env:
+          GOBIN: ${{ runner.temp }}/release-tools/bin
+        run: |
+          mkdir -p "$GOBIN"
+          go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.3.8
+          go install github.com/anchore/grype/cmd/grype@v0.110.0
+          echo "$GOBIN" >> "$GITHUB_PATH"
+
+      - name: Record scanner versions
+        run: |
+          osv-scanner --version
+          grype version
+          gitleaks version
+          node_modules/.bin/cyclonedx-npm --version
+
+      - name: Build exact evidence bundle
+        id: evidence
+        continue-on-error: true
+        env:
+          EVIDENCE_ROOT: ${{ runner.temp }}/help2day-source-release-evidence
+          VERSION: ${{ inputs.version }}
+          UPSTREAM_BASE: ${{ inputs.upstream_base }}
+          FORK_ANCHOR: ${{ inputs.fork_anchor }}
+          BUILDER_ID: github:${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          ./scripts/build-help2day-release-evidence.sh \
+            --version "$VERSION" \
+            --output "$EVIDENCE_ROOT" \
+            --upstream-base "$UPSTREAM_BASE" \
+            --fork-anchor "$FORK_ANCHOR" \
+            --build-timestamp "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+            --builder-id "$BUILDER_ID"
+
+      - name: Upload immutable evidence bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: help2day-source-release-${{ inputs.source_ref }}
+          path: ${{ runner.temp }}/help2day-source-release-evidence/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce evidence result
+        if: steps.evidence.outcome != 'success'
+        run: |
+          echo "Source-release evidence did not pass. Inspect the retained bundle." >&2
+          exit 1

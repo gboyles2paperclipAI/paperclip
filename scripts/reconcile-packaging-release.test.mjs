@@ -140,3 +140,21 @@ test("release and governance controls stay wired into focused PR verification", 
   assert.equal(existsSync(join(repoRoot, ".github/workflows/governance-approval-tripwire.yml")), true);
   assert.equal(existsSync(join(repoRoot, ".github/workflows/help2day-pr-verify.yml")), true);
 });
+
+test("Help2day source evidence is isolated from publication and runtime activation", () => {
+  const workflow = readText(".github/workflows/help2day-source-release-evidence.yml");
+  assert.match(workflow, /environment: source-release/);
+  assert.match(workflow, /build-help2day-release-evidence\.sh/);
+  assert.doesNotMatch(workflow, /environment: production-runtime/);
+  assert.doesNotMatch(workflow, /npm[_ -]stable|paperclip\.service|db:migrate/);
+
+  const evidence = readText("scripts/build-help2day-release-evidence.sh");
+  const standaloneBuild = evidence.indexOf("build-standalone-public-packages.mjs");
+  const immutableStage = evidence.indexOf("stage-release-packages.mjs stage");
+  assert.ok(standaloneBuild >= 0 && immutableStage > standaloneBuild);
+  assert.match(evidence, /cyclonedx-npm/);
+  assert.match(evidence, /osv-scanner/);
+  assert.match(evidence, /grype/);
+  assert.match(evidence, /source-range-gitleaks/);
+  assert.match(evidence, /package-gitleaks/);
+});

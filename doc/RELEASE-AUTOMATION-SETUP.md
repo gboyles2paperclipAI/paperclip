@@ -159,6 +159,27 @@ Reasoning:
 - stable publishes should require an explicit human approval gate
 - the workflow is manual, but the environment should still be the real control point
 
+### Help2day governance environments
+
+The company fork also requires two environments that must not share secrets or
+approval meaning.
+
+Configure `source-release` with required source RED reviewers and prevent
+self-approval. It may read source and upload immutable evidence. Do not add
+production database, service, deployment, or runtime credentials. The manual
+`help2day-source-release-evidence.yml` workflow is the only current consumer.
+
+Reserve `production-runtime` for a later, separately approved activation
+workflow. It may receive only the minimum secrets needed to install approved
+artifact hashes, back up and migrate the database, and restart and verify the
+governed service. Require a distinct runtime RED approval referencing the exact
+source release and artifact hashes.
+
+Ordinary pull-request and preview workflows must not target either environment,
+publish packages, run production migrations, modify live secrets, or restart a
+service. No production-runtime workflow is enabled by the source-evidence
+change.
+
 ## 7. Protect `master`
 
 Open the branch protection settings for `master`.
@@ -172,6 +193,13 @@ Recommended rules:
 5. restrict who can push directly to `master`
 
 At minimum, make sure workflow and release script changes cannot land without review.
+
+On `gboyles2paperclipAI/paperclip`, apply the equivalent rule set to
+`help2day/main`, the company integration branch. Require pull requests, green
+required checks, code-owner review, resolved conversations, and at least one
+non-author approval. Disable direct pushes, force pushes, branch deletion, and
+routine administrator bypass. Governance and RED changes still require the
+separate approved Paperclip approval id and the governed safe-merge path.
 
 ## 8. Enforce CODEOWNERS Review
 

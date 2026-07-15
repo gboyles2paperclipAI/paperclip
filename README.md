@@ -323,6 +323,25 @@ This starts the API server at `http://localhost:3100`. An embedded PostgreSQL da
 
 > **Requirements:** Node.js 20+, pnpm 9.15+
 
+### Verify the build you are running
+
+The CLI reports its package version:
+
+```bash
+paperclipai --version
+```
+
+`GET /api/health` reports the server package version and, for clean governed
+builds, the full source commit as `buildCommit`. Treat the version and commit as
+a pair when comparing an installed runtime with release evidence. A missing
+`buildCommit` means the build did not claim reproducible source provenance; it
+must not be inferred from the version alone.
+
+Help2day distribution candidates use `YYYY.MDD.P-help2day.N`. They remain
+unreleased until the exact immutable package set and its evidence bundle pass
+the separate source-release approval. Source approval does not authorize a live
+runtime change.
+
 <br/>
 
 ## FAQ
