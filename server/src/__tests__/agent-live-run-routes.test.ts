@@ -14,6 +14,7 @@ const mockHeartbeatService = vi.hoisted(() => ({
   getActiveRunIssueSummaryForAgent: vi.fn(),
   getRunLogAccess: vi.fn(),
   readLog: vi.fn(),
+  list: vi.fn(),
   wakeup: vi.fn(),
 }));
 
@@ -223,6 +224,7 @@ describe("agent live run routes", () => {
       logStore: "local_file",
       logRef: "logs/run-1.ndjson",
     });
+    mockHeartbeatService.list.mockResolvedValue([]);
     mockHeartbeatService.readLog.mockResolvedValue({
       runId: "run-1",
       store: "local_file",
@@ -353,6 +355,36 @@ describe("agent live run routes", () => {
       error: "Use /api/companies/{companyId}/heartbeat-runs for company-scoped heartbeat runs",
     });
     expect(mockHeartbeatService.getRun).not.toHaveBeenCalled();
+  });
+
+  it("caps company heartbeat history at 50 rows by default", async () => {
+    const res = await requestApp(
+      await createApp(),
+      (baseUrl) => request(baseUrl).get("/api/companies/company-1/heartbeat-runs"),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockHeartbeatService.list).toHaveBeenCalledWith(
+      "company-1",
+      undefined,
+      50,
+      { summary: false },
+    );
+  });
+
+  it.each(["0", "invalid"])("uses the bounded default for heartbeat history limit %s", async (limit) => {
+    const res = await requestApp(
+      await createApp(),
+      (baseUrl) => request(baseUrl).get(`/api/companies/company-1/heartbeat-runs?limit=${limit}`),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockHeartbeatService.list).toHaveBeenCalledWith(
+      "company-1",
+      undefined,
+      50,
+      { summary: false },
+    );
   });
 
   it("uses narrow run log metadata lookups for log polling", async () => {

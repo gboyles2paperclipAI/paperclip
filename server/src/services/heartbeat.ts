@@ -288,6 +288,17 @@ const MAX_RUN_EVENT_PAYLOAD_DEPTH = 6;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MIN = 1;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 50;
+const PREMIUM_MANAGED_MAX_CONCURRENT_RUNS_DEFAULT = 3;
+const PREMIUM_MANAGED_MAX_CONCURRENT_RUNS_MIN = 1;
+const PREMIUM_MANAGED_MAX_CONCURRENT_RUNS_MAX = 20;
+const PREMIUM_MANAGED_ADAPTER_TYPES = new Set([
+  "acpx_local",
+  "claude_local",
+  "codex_local",
+  "cursor",
+  "cursor_cloud",
+  "gemini_local",
+]);
 const LIVENESS_BOOKKEEPING_ACTIVITY_ACTIONS = [
   "environment.lease_acquired",
   "environment.lease_released",
@@ -2016,6 +2027,29 @@ function normalizeMaxConcurrentRuns(value: unknown) {
   const parsed = Math.floor(asNumber(value, HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT));
   if (!Number.isFinite(parsed)) return HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT;
   return Math.max(HEARTBEAT_MAX_CONCURRENT_RUNS_MIN, Math.min(HEARTBEAT_MAX_CONCURRENT_RUNS_MAX, parsed));
+}
+
+export function normalizePremiumManagedMaxConcurrentRuns(value: unknown) {
+  const parsedValue = typeof value === "string" && value.trim().length > 0
+    ? Number(value)
+    : asNumber(value, PREMIUM_MANAGED_MAX_CONCURRENT_RUNS_DEFAULT);
+  const parsed = Math.floor(parsedValue);
+  if (!Number.isFinite(parsed)) return PREMIUM_MANAGED_MAX_CONCURRENT_RUNS_DEFAULT;
+  return Math.max(
+    PREMIUM_MANAGED_MAX_CONCURRENT_RUNS_MIN,
+    Math.min(PREMIUM_MANAGED_MAX_CONCURRENT_RUNS_MAX, parsed),
+  );
+}
+
+function premiumManagedMaxConcurrentRuns() {
+  return normalizePremiumManagedMaxConcurrentRuns(process.env.PAPERCLIP_PREMIUM_MAX_CONCURRENT_RUNS);
+}
+
+export function isPremiumManagedRun(
+  adapterType: string | null | undefined,
+  modelProfile: string | null | undefined,
+) {
+  return PREMIUM_MANAGED_ADAPTER_TYPES.has(adapterType?.trim() ?? "") && modelProfile !== "cheap";
 }
 
 interface WakeupOptions {
@@ -10021,34 +10055,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
   }
 
-  function readPremiumManagedGlobalCap() {
-    const raw = process.env.PAPERCLIP_PREMIUM_MAX_CONCURRENT_RUNS;
-    if (!raw) return null;
-    const parsed = Math.floor(Number(raw));
-    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-  }
-
-  function isPremiumManagedAdapterType(adapterType: string | null | undefined) {
-    return adapterType === "claude_local" || adapterType === "codex_local" || adapterType === "gemini_local";
-  }
-
-  async function premiumManagedGlobalCapReached(runAgent: typeof agents.$inferSelect) {
-    const cap = readPremiumManagedGlobalCap();
-    if (cap === null || !isPremiumManagedAdapterType(runAgent.adapterType)) return false;
-    const rows = await db
-      .select({ id: heartbeatRuns.id })
-      .from(heartbeatRuns)
-      .innerJoin(agents, eq(agents.id, heartbeatRuns.agentId))
-      .where(
-        and(
-          eq(heartbeatRuns.status, "running"),
-          inArray(agents.adapterType, ["claude_local", "codex_local", "gemini_local"]),
-        ),
-      )
-      .limit(cap + 1);
-    return rows.length >= cap;
-  }
-
   function normalizeOptionalNonNegativeInteger(value: unknown) {
     if (value === null || value === undefined || value === "") return null;
     const normalized = Math.floor(asNumber(value, 0));
@@ -10246,6 +10252,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(count ?? 0);
   }
 
+  async function listPremiumManagedRunningRuns() {
+    return db
+      .select({
+        id: heartbeatRuns.id,
+        agentId: heartbeatRuns.agentId,
+        processGroupId: heartbeatRuns.processGroupId,
+      })
+      .from(heartbeatRuns)
+      .innerJoin(agents, and(eq(heartbeatRuns.agentId, agents.id), eq(heartbeatRuns.companyId, agents.companyId)))
+      .where(
+        and(
+          eq(heartbeatRuns.status, "running"),
+          inArray(agents.adapterType, [...PREMIUM_MANAGED_ADAPTER_TYPES]),
+          sql`coalesce(${heartbeatRuns.contextSnapshot} ->> 'modelProfile', '') != 'cheap'`,
+        ),
+      );
+  }
+
   async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect, companyAgents?: AgentOrgRow[]) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
@@ -10279,6 +10303,32 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (dailyCapBlock) {
       await cancelQueuedRunForHeartbeatDailyCap(run, dailyCapBlock);
       return null;
+    }
+
+    // Premium managed adapters share a bounded host-level pool. Cheap-profile
+    // runs are deliberately exempt so routine low-cost work can continue. A
+    // dead local process group does not consume a slot; recovery will settle
+    // its still-running database row independently.
+    if (isPremiumManagedRun(agent.adapterType, readContextModelProfile(context))) {
+      const premiumRunningRuns = await listPremiumManagedRunningRuns();
+      let activePremiumRunningCount = 0;
+      for (const premiumRun of premiumRunningRuns) {
+        if (premiumRun.processGroupId && !isProcessGroupAlive(premiumRun.processGroupId)) {
+          logger.warn(
+            {
+              runId: premiumRun.id,
+              agentId: premiumRun.agentId,
+              processGroupId: premiumRun.processGroupId,
+            },
+            "Detected premium managed run with a dead process group; excluding it from the concurrency cap",
+          );
+          continue;
+        }
+        activePremiumRunningCount++;
+      }
+      if (activePremiumRunningCount >= premiumManagedMaxConcurrentRuns()) {
+        return null;
+      }
     }
 
     const issueId = readNonEmptyString(context.issueId);
@@ -11299,7 +11349,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const runningCount = await countRunningRunsForAgent(agentId);
       const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
       if (availableSlots <= 0) return [];
-      if (await premiumManagedGlobalCapReached(agent)) return [];
 
       const queuedRuns = await db
         .select()

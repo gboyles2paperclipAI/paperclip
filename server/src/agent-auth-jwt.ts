@@ -36,9 +36,14 @@ function parseBooleanEnv(value: string | undefined): boolean {
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
+function parseExplicitTrueEnv(value: string | undefined): boolean {
+  return value?.trim().toLowerCase() === "true";
+}
+
 function jwtConfig() {
-  const secret = process.env.PAPERCLIP_AGENT_JWT_SECRET?.trim() || process.env.BETTER_AUTH_SECRET?.trim();
+  const secret = process.env.PAPERCLIP_AGENT_JWT_SECRET?.trim();
   if (!secret) return null;
+  const disableLegacyFallback = parseBooleanEnv(process.env.PAPERCLIP_AGENT_JWT_DISABLE_LEGACY_FALLBACK);
 
   return {
     secret,
@@ -51,7 +56,9 @@ function jwtConfig() {
     // the source instance. Folding this into the signing-key derivation is what
     // prevents a fork-minted token from authenticating against the live plane.
     instanceId: resolvePaperclipInstanceId(),
-    disableLegacyFallback: parseBooleanEnv(process.env.PAPERCLIP_AGENT_JWT_DISABLE_LEGACY_FALLBACK),
+    legacyFallbackEnabled:
+      parseExplicitTrueEnv(process.env.PAPERCLIP_AGENT_JWT_ENABLE_LEGACY_FALLBACK) &&
+      !disableLegacyFallback,
   };
 }
 
@@ -69,14 +76,11 @@ function jwtConfig() {
  *    instanceId ("default"), so a fork token — signed under the fork's
  *    instanceId — never matches. See PAP-12896 for the incident this closes.
  *
- * The instance-wide master secret is never used to sign new tokens — it is
- * retained only as a verification fallback so that tokens issued before this
- * change continue to validate. NOTE: that legacy fallback is instance-agnostic
- * (it signs with the raw shared secret), so complete cryptographic instance
- * isolation additionally requires disabling it once outstanding legacy tokens
- * have expired (set PAPERCLIP_AGENT_JWT_DISABLE_LEGACY_FALLBACK=true). Normal
- * fork-minted run tokens are already rejected without that step because they
- * are signed with the derived key, not the raw master secret.
+ * The instance-wide master secret is never used to sign new tokens. Legacy
+ * master-secret verification is disabled by default because it is
+ * instance-agnostic; operators can temporarily restore it only with the
+ * explicit unsafe migration opt-in PAPERCLIP_AGENT_JWT_ENABLE_LEGACY_FALLBACK.
+ * PAPERCLIP_AGENT_JWT_DISABLE_LEGACY_FALLBACK always overrides that opt-in.
  *
  * The derivation domain-separates with the `jwt:` prefix so the same master
  * secret can safely be reused for other HMAC purposes without key reuse.
@@ -173,27 +177,14 @@ export function verifyLocalAgentJwt(token: string): LocalAgentJwtClaims | null {
   if (!claimedCompanyId) return null;
 
   const signingInput = `${headerB64}.${claimsB64}`;
-  // Try the per-instance, per-company derived key first (current tokens),
-  // deriving under THIS control plane's own instanceId. A token minted by a
-  // worktree/fork instance was signed under a different instanceId, so it will
-  // not match here — that is the boundary that keeps fork tokens out of the
-  // live plane (PAP-12896/PAP-12899). Fall back to the raw master secret so
-  // tokens issued before per-company derivation existed continue to verify —
-  // this preserves backward compatibility for any outstanding tokens (TTL
-  // bounds the legacy window naturally).
-  //
-  // Operators should set `PAPERCLIP_AGENT_JWT_DISABLE_LEGACY_FALLBACK=true`
-  // approximately one JWT TTL (~1h by default, see PAPERCLIP_AGENT_JWT_TTL_SECONDS)
-  // after deploying per-company signing. Once set, the master-secret fallback
-  // is disabled and only tokens validating under the per-instance/per-company
-  // derived key are accepted — closing the window in which a leaked master
-  // secret could be used to forge tokens with arbitrary future `exp` values for
-  // any tenant, and completing cryptographic isolation between control-plane
-  // instances (the raw-secret fallback is instance-agnostic).
+  // Derive under THIS control plane's instanceId. A token minted by a different
+  // worktree/fork instance will not match here (PAP-12896/PAP-12899). Raw
+  // master-secret verification is unsafe and disabled by default; the explicit
+  // migration opt-in above is the only path that enables it.
   const perCompanyKey = deriveCompanySigningKey(config.secret, claimedCompanyId, config.instanceId);
   const perCompanySig = signPayload(perCompanyKey, signingInput);
   let signatureOk = safeCompare(signature, perCompanySig);
-  if (!signatureOk && !config.disableLegacyFallback) {
+  if (!signatureOk && config.legacyFallbackEnabled) {
     const legacySig = signPayload(config.secret, signingInput);
     signatureOk = safeCompare(signature, legacySig);
   }

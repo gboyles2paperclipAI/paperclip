@@ -4,7 +4,9 @@ import {
   type AdapterModelProfileDefinition,
 } from "../adapters/index.js";
 import {
+  isPremiumManagedRun,
   mergeModelProfileAdapterConfig,
+  normalizePremiumManagedMaxConcurrentRuns,
   normalizeModelProfileWakeContext,
   resolveModelProfileApplication,
 } from "../services/heartbeat.ts";
@@ -20,6 +22,30 @@ const cheapProfile: AdapterModelProfileDefinition = {
 };
 
 describe("heartbeat model profile application", () => {
+  it("normalizes the premium managed cap to a safe bounded default", () => {
+    expect(normalizePremiumManagedMaxConcurrentRuns(undefined)).toBe(3);
+    expect(normalizePremiumManagedMaxConcurrentRuns("")).toBe(3);
+    expect(normalizePremiumManagedMaxConcurrentRuns("invalid")).toBe(3);
+    expect(normalizePremiumManagedMaxConcurrentRuns("0")).toBe(1);
+    expect(normalizePremiumManagedMaxConcurrentRuns("21")).toBe(20);
+    expect(normalizePremiumManagedMaxConcurrentRuns("4.9")).toBe(4);
+  });
+
+  it("applies the premium cap to all managed adapters except cheap-profile runs", () => {
+    for (const adapterType of [
+      "acpx_local",
+      "claude_local",
+      "codex_local",
+      "cursor",
+      "cursor_cloud",
+      "gemini_local",
+    ]) {
+      expect(isPremiumManagedRun(adapterType, null)).toBe(true);
+      expect(isPremiumManagedRun(adapterType, "cheap")).toBe(false);
+    }
+    expect(isPremiumManagedRun("process", null)).toBe(false);
+  });
+
   it("uses the Codex local adapter cheap default when the agent has no runtime override", async () => {
     const modelProfile = resolveModelProfileApplication({
       adapterModelProfiles: await listAdapterModelProfiles("codex_local"),
