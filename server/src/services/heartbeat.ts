@@ -67,7 +67,6 @@ import { conflict, HttpError, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
 import { normalizeResponsibleUserDenialCode } from "./responsible-user-denial-run-outcomes.js";
-import { LOCAL_BOARD_USER_ID } from "../local-board-retirement.js";
 import type { ProviderCooldownService } from "./provider-cooldown.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import { getServerAdapter, listAdapterModelProfiles, runningProcesses } from "../adapters/index.js";
@@ -5866,9 +5865,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (input.issueContext?.responsibleUserId) return input.issueContext.responsibleUserId;
     const parentResponsibleUserId = await resolveParentIssueResponsibleUserId(input.companyId, input.issueContext?.parentId);
     if (parentResponsibleUserId) return parentResponsibleUserId;
-    if (input.issueContext) return await resolveCompanyDefaultResponsibleUserId(input.companyId) ?? LOCAL_BOARD_USER_ID;
+    if (input.issueContext) return await resolveCompanyDefaultResponsibleUserId(input.companyId);
     if (requestedUserId) return requestedUserId;
-    return await resolveCompanyDefaultResponsibleUserId(input.companyId) ?? LOCAL_BOARD_USER_ID;
+    return await resolveCompanyDefaultResponsibleUserId(input.companyId);
   }
 
   async function resolveResponsibleUserIdForRun(input: {

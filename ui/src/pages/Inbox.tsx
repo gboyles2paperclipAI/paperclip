@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { deriveOriginatingActor, INBOX_MINE_ISSUE_STATUS_FILTER } from "@paperclipai/shared";
+import { deriveOriginatingActor } from "@paperclipai/shared";
 import { useVisibilityRefetchInterval } from "@/lib/polling";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "@/hooks/useSharedPolling";
 import { approvalsApi } from "../api/approvals";
@@ -172,6 +172,7 @@ import { useDismissedInboxAlerts, useInboxDismissals, useReadInboxItems } from "
 const INBOX_HEARTBEAT_RUN_LIMIT = 200;
 const INBOX_ISSUE_LIST_LIMIT = 500;
 const INBOX_HOT_PATH_STALE_MS = 30_000;
+const INBOX_ACTIVE_ISSUE_STATUS_FILTER = "backlog,todo,in_progress,in_review,blocked";
 
 export { InboxIssueMetaLeading, InboxIssueTrailingColumns } from "../components/IssueColumns";
 export { IssueGroupHeader as InboxGroupHeader } from "../components/IssueGroupHeader";
@@ -838,7 +839,9 @@ export function Inbox() {
       issuesApi.listCompact(selectedCompanyId!, {
         includeRoutineExecutions: true,
         includeLiveDescendantSummary: true,
+        status: INBOX_ACTIVE_ISSUE_STATUS_FILTER,
         limit: INBOX_ISSUE_LIST_LIMIT,
+        offset: 0,
       }).then((rows) => rows as Issue[]),
     enabled: !!selectedCompanyId,
     refetchOnWindowFocus: false,
@@ -855,10 +858,11 @@ export function Inbox() {
       issuesApi.listCompact(selectedCompanyId!, {
         touchedByUserId: "me",
         inboxArchivedByUserId: "me",
-        status: INBOX_MINE_ISSUE_STATUS_FILTER,
+        status: INBOX_ACTIVE_ISSUE_STATUS_FILTER,
         includeRoutineExecutions: true,
         includeLiveDescendantSummary: true,
         limit: INBOX_ISSUE_LIST_LIMIT,
+        offset: 0,
       }).then((rows) => rows as Issue[]),
     enabled: !!selectedCompanyId,
     refetchOnWindowFocus: false,
@@ -881,10 +885,11 @@ export function Inbox() {
     queryFn: () =>
       issuesApi.listCompact(selectedCompanyId!, {
         touchedByUserId: "me",
-        status: INBOX_MINE_ISSUE_STATUS_FILTER,
+        status: INBOX_ACTIVE_ISSUE_STATUS_FILTER,
         includeRoutineExecutions: true,
         includeLiveDescendantSummary: true,
         limit: INBOX_ISSUE_LIST_LIMIT,
+        offset: 0,
       }).then((rows) => rows as Issue[]),
     enabled: !!selectedCompanyId,
     refetchOnWindowFocus: false,
@@ -989,6 +994,10 @@ export function Inbox() {
     () => applyIssueFilters(touchedIssues, issueFilters, currentUserId, true, liveIssueIds, issueFilterContext),
     [touchedIssues, issueFilters, currentUserId, liveIssueIds, issueFilterContext],
   );
+  const visibleAllIssues = useMemo(
+    () => applyIssueFilters(issues ?? [], issueFilters, currentUserId, true, liveIssueIds, issueFilterContext),
+    [issues, issueFilters, currentUserId, liveIssueIds, issueFilterContext],
+  );
   const unreadTouchedIssues = useMemo(
     () => visibleTouchedIssues.filter((issue) => issue.isUnreadForMe),
     [visibleTouchedIssues],
@@ -1057,9 +1066,10 @@ export function Inbox() {
     () => {
       if (tab === "mine") return visibleMineIssues;
       if (tab === "unread") return unreadTouchedIssues;
+      if (tab === "all") return visibleAllIssues;
       return visibleTouchedIssues;
     },
-    [tab, visibleMineIssues, visibleTouchedIssues, unreadTouchedIssues],
+    [tab, visibleMineIssues, visibleTouchedIssues, visibleAllIssues, unreadTouchedIssues],
   );
 
   const agentById = useMemo(() => {
@@ -1159,6 +1169,7 @@ export function Inbox() {
     [heartbeatRuns, dismissedAtByKey],
   );
   const approvalsToRender = useMemo(() => {
+    if (tab === "all" && countActiveIssueFilters(issueFilters, true) > 0) return [];
     let filtered = getApprovalsForTab(approvals ?? [], tab, allApprovalFilter, currentUserId);
     if (tab === "mine") {
       filtered = filtered.filter(
@@ -1166,7 +1177,7 @@ export function Inbox() {
       );
     }
     return filtered;
-  }, [approvals, tab, allApprovalFilter, currentUserId, dismissedAtByKey]);
+  }, [approvals, tab, allApprovalFilter, currentUserId, dismissedAtByKey, issueFilters]);
   const showJoinRequestsCategory =
     allCategoryFilter === "everything" || allCategoryFilter === "join_requests";
   const showTouchedCategory =
@@ -1617,10 +1628,6 @@ export function Inbox() {
   const setSelectedIndexFromPointer = useCallback((idx: number) => {
     if (!pointerMovedSinceKeyNavRef.current) return;
     hoveredIndexRef.current = idx;
-    // Drop any keyboard selection band the moment the mouse takes over, so we
-    // never show two identical highlights at once. React bails out when the
-    // value is already -1, so continuous hovering triggers no re-render.
-    setSelectedIndex((prev) => (prev < 0 ? prev : -1));
   }, []);
 
   const invalidateInboxIssueQueryCaches = () => {

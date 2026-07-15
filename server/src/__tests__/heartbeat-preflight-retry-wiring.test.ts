@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import {
   agents,
   companies,
+  companyMemberships,
   createDb,
   environmentLeases,
   heartbeatRuns,
@@ -196,6 +197,7 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
     issueId: string;
   }> {
     const companyId = randomUUID();
+    const ownerUserId = `owner-${randomUUID()}`;
     const agentId = randomUUID();
     const issueId = randomUUID();
     const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
@@ -204,7 +206,16 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
       id: companyId,
       name: "Paperclip",
       issuePrefix,
+      defaultResponsibleUserId: ownerUserId,
       requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: ownerUserId,
+      membershipRole: "owner",
+      status: "active",
     });
 
     await db.insert(agents).values({

@@ -188,6 +188,7 @@ import { externalObjectService } from "../services/external-objects.js";
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
   interrupt: z.boolean().optional(),
+  executionState: z.unknown().optional(),
 });
 const refreshExternalObjectsSchema = z.object({
   objectIds: z.array(z.string().uuid()).max(50).optional(),
@@ -1701,6 +1702,22 @@ function summarizeExecutionParticipants(
 function isClosedIssueStatus(status: string | null | undefined): status is "done" | "cancelled" {
   return status === "done" || status === "cancelled";
 }
+
+const TRIAGE_AUTHORITY_FIELDS_DEFAULT = ["status", "assigneeAgentId", "blockedByIssueIds"];
+const TRIAGE_HARD_BLOCKED_FIELDS = new Set(["title", "description", "body", "documents", "assigneeUserId"]);
+const TRIAGE_STALE_ACTIVITY_MS = 15 * 60 * 1000;
+
+function getTriageAuthorityFields(input: unknown) {
+  if (!Array.isArray(input)) return TRIAGE_AUTHORITY_FIELDS_DEFAULT;
+  const candidate = input.filter((field): field is string => typeof field === "string");
+  return candidate.length > 0 ? candidate : TRIAGE_AUTHORITY_FIELDS_DEFAULT;
+}
+
+type IssueTriageAuthorityPatchDecision = {
+  skipOwnership: boolean;
+  allowed: boolean;
+  routineExecutionCloseout?: boolean;
+};
 
 function shouldImplicitlyMoveCommentedIssueToTodo(input: {
   issueStatus: string | null | undefined;
@@ -3354,6 +3371,173 @@ export function issueRoutes(
     throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
   }
 
+  async function assertBoardTriageAuthorityForIssueAssigneeUserPatch(
+    req: Request,
+    res: Response,
+    existing: { id: string; assigneeUserId: string | null },
+    requestedAssigneeUserId: unknown,
+  ) {
+    if (req.actor.type !== "agent") return true;
+    if (typeof requestedAssigneeUserId !== "string" || requestedAssigneeUserId.trim().length === 0) return true;
+    if (existing.assigneeUserId === requestedAssigneeUserId) return true;
+
+    res.status(403).json({
+      error: "Agent cannot assign issues directly to board users",
+      details: {
+        issueId: existing.id,
+        actorAgentId: req.actor.agentId,
+        requestedAssigneeUserId,
+        securityPrinciples: ["Least Privilege", "Board Triage Authority", "Secure Defaults"],
+      },
+    });
+    return false;
+  }
+
+  async function assertBoardTriageAuthorityForIssuePatch(
+    req: Request,
+    res: Response,
+    existing: {
+      id: string;
+      companyId: string;
+      assigneeAgentId: string | null;
+      status: string;
+      originKind?: string | null;
+      executionState?: unknown;
+      labels?: Array<{ name?: string | null }> | null;
+      updatedAt: string | Date;
+      lastActivityAt?: string | Date | null;
+    },
+    body: Record<string, unknown>,
+  ): Promise<IssueTriageAuthorityPatchDecision> {
+    const patchKeys = Object.keys(body);
+    const hasDirectExecutionStatePatch = Object.prototype.hasOwnProperty.call(body, "executionState");
+    if (req.actor.type !== "agent" || !req.actor.agentId) {
+      if (hasDirectExecutionStatePatch) {
+        res.status(403).json({ error: "Execution state cannot be patched directly" });
+        return { skipOwnership: false, allowed: false };
+      }
+      return { skipOwnership: false, allowed: true };
+    }
+
+    const actorAgent = await agentsSvc.getById(req.actor.agentId);
+    if (!actorAgent || actorAgent.companyId !== existing.companyId) {
+      res.status(403).json({ error: "Forbidden" });
+      return { skipOwnership: false, allowed: false };
+    }
+
+    const actorPermissions = actorAgent.permissions as
+      | { triageAuthority?: unknown; triageAuthorityFields?: unknown }
+      | null
+      | undefined;
+    const hasTriageAuthority = actorPermissions?.triageAuthority === true;
+    const isRoutineExecutionCloseout =
+      hasTriageAuthority &&
+      existing.assigneeAgentId === req.actor.agentId &&
+      existing.originKind === "routine_execution" &&
+      existing.executionState == null &&
+      body.status === "done" &&
+      body.executionState === null &&
+      patchKeys.every((field) => ["status", "comment", "executionState"].includes(field));
+    if (hasDirectExecutionStatePatch) {
+      if (isRoutineExecutionCloseout) {
+        return { skipOwnership: false, allowed: true, routineExecutionCloseout: true };
+      }
+      res.status(403).json({ error: "Execution state cannot be patched directly" });
+      return { skipOwnership: false, allowed: false };
+    }
+    if (!hasTriageAuthority) return { skipOwnership: false, allowed: true };
+
+    const triageCandidateFields = ["status", "assigneeAgentId", "blockedByIssueIds"];
+    const hardBlockedField = patchKeys.find((field) => TRIAGE_HARD_BLOCKED_FIELDS.has(field));
+    if (hardBlockedField) {
+      res.status(403).json({
+        error: "Issue patch contains triage-authority restricted fields",
+        details: {
+          issueId: existing.id,
+          field: hardBlockedField,
+          securityPrinciples: ["Board Triage Authority", "Least Privilege"],
+        },
+      });
+      return { skipOwnership: false, allowed: false };
+    }
+
+    const triagePatchFields = patchKeys.filter((field) => triageCandidateFields.includes(field));
+    if (triagePatchFields.length === 0) return { skipOwnership: false, allowed: true };
+
+    const isAssignedSelfCompletion =
+      existing.assigneeAgentId === req.actor.agentId &&
+      body.status === "done" &&
+      typeof body.comment === "string" &&
+      body.comment.trim().length > 0 &&
+      patchKeys.every((field) => field === "status" || field === "comment");
+    if (isAssignedSelfCompletion) return { skipOwnership: false, allowed: true };
+
+    const nonTriagePatchField = patchKeys.find((field) => !triageCandidateFields.includes(field));
+    if (nonTriagePatchField) {
+      res.status(403).json({
+        error: "Triage authority patches may only include triage fields",
+        details: {
+          issueId: existing.id,
+          field: nonTriagePatchField,
+          allowedFields: triageCandidateFields,
+          securityPrinciples: ["Board Triage Authority", "Least Privilege"],
+        },
+      });
+      return { skipOwnership: false, allowed: false };
+    }
+
+    if (body.assigneeAgentId === req.actor.agentId) {
+      res.status(403).json({
+        error: "Agent cannot assign issue to self",
+        details: {
+          issueId: existing.id,
+          actorAgentId: req.actor.agentId,
+          securityPrinciples: ["Board Triage Authority", "Owner Separation"],
+        },
+      });
+      return { skipOwnership: false, allowed: false };
+    }
+
+    if (isClosedIssueStatus(existing.status)) {
+      res.status(403).json({ error: "Cannot patch done or cancelled issues through triage authority" });
+      return { skipOwnership: false, allowed: false };
+    }
+
+    const triageAuthorityFields = new Set(getTriageAuthorityFields(actorPermissions?.triageAuthorityFields));
+    const disallowedField = triagePatchFields.find((field) => !triageAuthorityFields.has(field));
+    if (disallowedField) {
+      res.status(403).json({
+        error: "Request contains fields outside triage authority",
+        details: {
+          issueId: existing.id,
+          field: disallowedField,
+          allowedTriageFields: [...triageAuthorityFields],
+          securityPrinciples: ["Board Triage Authority", "Least Privilege"],
+        },
+      });
+      return { skipOwnership: false, allowed: false };
+    }
+
+    const latestActivityAt = existing.lastActivityAt
+      ? new Date(existing.lastActivityAt).getTime()
+      : new Date(existing.updatedAt).getTime();
+    const stalenessMs = Date.now() - latestActivityAt;
+    if (stalenessMs < TRIAGE_STALE_ACTIVITY_MS) {
+      res.status(422).json({
+        error: "Issue is too recent for triage-authority patch",
+        details: {
+          issueId: existing.id,
+          lastActivityAt: new Date(latestActivityAt).toISOString(),
+          stalenessMs,
+          requiredStalenessMs: TRIAGE_STALE_ACTIVITY_MS,
+        },
+      });
+      return { skipOwnership: false, allowed: false };
+    }
+
+    return { skipOwnership: true, allowed: true };
+  }
+
   function isTaskBridgeKeyActor(req: Request) {
     return req.actor.type === "agent" && req.actor.source === "agent_key" && req.actor.keyScope?.kind === "task_bridge";
   }
@@ -3512,12 +3696,27 @@ export function issueRoutes(
       status: string;
       assigneeAgentId: string | null;
       assigneeUserId: string | null;
+      labels?: Array<{ name?: string | null }> | null;
     },
+    options: { allowBoardOwned?: boolean; skipOwnershipForTriagePatch?: boolean } = {},
   ) {
     if (req.actor.type !== "agent") return true;
     const actorAgentId = req.actor.agentId;
     if (!actorAgentId) {
       res.status(403).json({ error: "Agent authentication required" });
+      return false;
+    }
+    const hasAwaitingBoardLabel = (issue.labels ?? []).some((label) => label?.name === "awaiting-board");
+    if ((issue.assigneeUserId || hasAwaitingBoardLabel) && !options.allowBoardOwned) {
+      res.status(403).json({
+        error: "Agent cannot mutate board-owned or board-hold issues",
+        details: {
+          issueId: issue.id,
+          assigneeUserId: issue.assigneeUserId ?? null,
+          hasAwaitingBoardLabel,
+          actorAgentId,
+        },
+      });
       return false;
     }
     // Task-watchdog runs receive a scoped *grant* to mutate issues inside the
@@ -3552,6 +3751,9 @@ export function issueRoutes(
       return true;
     }
     if (issue.assigneeAgentId !== actorAgentId) {
+      if (options.skipOwnershipForTriagePatch) {
+        return true;
+      }
       if (await hasActiveCheckoutManagementOverride(actorAgentId, issue.companyId, issue.assigneeAgentId)) {
         return true;
       }
@@ -3577,6 +3779,9 @@ export function issueRoutes(
         });
       }
       return false;
+    }
+    if (options.skipOwnershipForTriagePatch) {
+      return true;
     }
     if (issue.status !== "in_progress") {
       return true;
@@ -7699,7 +7904,30 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, existing.companyId);
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
-    if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
+    const mayBeWorkflowControlledReviewHandoff =
+      req.actor.type === "agent" &&
+      req.body.status === "in_review" &&
+      req.body.reviewRequest !== undefined &&
+      req.body.assigneeUserId !== undefined;
+    if (!mayBeWorkflowControlledReviewHandoff && !(await assertBoardTriageAuthorityForIssueAssigneeUserPatch(
+      req,
+      res,
+      existing,
+      req.body.assigneeUserId,
+    ))) return;
+    const triageAuthorityPatch = await assertBoardTriageAuthorityForIssuePatch(
+      req,
+      res,
+      existing,
+      req.body as Record<string, unknown>,
+    );
+    if (!triageAuthorityPatch.allowed) return;
+    if (!(await assertAgentIssueMutationAllowed(
+      req,
+      res,
+      existing,
+      { skipOwnershipForTriagePatch: triageAuthorityPatch.skipOwnership },
+    ))) return;
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, existing, req.body))) return;
 
     const actor = getActorInfo(req);
@@ -7723,6 +7951,9 @@ export function issueRoutes(
       hiddenAt: hiddenAtRaw,
       ...updateFields
     } = req.body;
+    if (triageAuthorityPatch.routineExecutionCloseout) {
+      delete updateFields.executionState;
+    }
     const shouldCancelActiveRunForCancelledStatus =
       existing.status !== "cancelled" && updateFields.status === "cancelled";
     if (resumeRequested === true && !commentBody) {
@@ -7740,6 +7971,16 @@ export function issueRoutes(
     if (resumeRequested === true && !(await assertExplicitResumeIntentAllowed(req, res, existing))) return;
     if (resumeRequested !== true && reopenRequested === true && req.actor.type === "agent") {
       if (!(await assertExplicitResumeIntentAllowed(req, res, existing))) return;
+    }
+    if (req.actor.type === "agent" && updateFields.status === "done" && !commentBody) {
+      res.status(422).json({
+        error: "Agent done requires comment",
+        details: {
+          rule: "Terminal status requires terminal evidence",
+          fix: "Include a completion comment in the same PATCH request as status=done",
+        },
+      });
+      return;
     }
     await assertIssueEnvironmentSelection(existing.companyId, updateFields.executionWorkspaceSettings?.environmentId);
     const requestedAssigneeAgentId =
@@ -7979,7 +8220,7 @@ export function issueRoutes(
       nextAssigneeUserId === existing.createdByUserId;
 
     if (assigneeWillChange && !transition.workflowControlledAssignment) {
-      if (!isAgentReturningIssueToCreator) {
+      if (!isAgentReturningIssueToCreator && !triageAuthorityPatch.skipOwnership) {
         await assertCanAssignTasks(req, existing.companyId, {
           issueId: existing.id,
           projectId: await resolveAssignmentProjectId({
@@ -8001,8 +8242,25 @@ export function issueRoutes(
     }
 
     let issue;
+    let commentCreatedInPatch: Awaited<ReturnType<typeof svc.addComment>> | null = null;
     try {
-      if (transition.decision && decisionId) {
+      if (triageAuthorityPatch.routineExecutionCloseout) {
+        if (!actor.agentId || !actor.runId) {
+          throw unauthorized("Agent run identity required for routine execution closeout");
+        }
+        const closeout = await svc.closeRoutineExecution(id, {
+          companyId: existing.companyId,
+          actorAgentId: actor.agentId,
+          actorRunId: actor.runId,
+          commentBody,
+        });
+        issue = closeout.issue;
+        commentCreatedInPatch = closeout.comment;
+        for (const field of Object.keys(updateFields)) {
+          delete (updateFields as Record<string, unknown>)[field];
+        }
+        Object.assign(updateFields, closeout.patch);
+      } else if (transition.decision && decisionId) {
         const decision = transition.decision;
         issue = await db.transaction(async (tx) => {
           const updated = await svc.update(
@@ -8029,6 +8287,33 @@ export function issueRoutes(
             createdByRunId: actor.runId ?? null,
           });
 
+          return updated;
+        });
+      } else if (commentBody) {
+        issue = await db.transaction(async (tx) => {
+          const updated = await svc.update(
+            id,
+            {
+              ...updateFields,
+              actorAgentId: actor.agentId ?? null,
+              actorUserId: actor.actorType === "user" ? actor.actorId : null,
+            },
+            tx,
+          );
+          if (!updated) return null;
+          commentCreatedInPatch = await svc.addComment(
+            id,
+            commentBody,
+            {
+              agentId: actor.agentId ?? undefined,
+              userId: actor.actorType === "user" ? actor.actorId : undefined,
+              runId: actor.runId,
+            },
+            {
+              sourceTrust: await sourceTrustForActorWrite(updated, actor),
+            },
+            tx,
+          );
           return updated;
         });
       } else {
@@ -8233,6 +8518,24 @@ export function issueRoutes(
         ),
       },
     });
+    if (triageAuthorityPatch.skipOwnership) {
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.triage_authority_patch",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          issueId: issue.id,
+          fields: Object.keys(req.body),
+          stalenessMs: TRIAGE_STALE_ACTIVITY_MS,
+          actorAgentId: actor.agentId,
+        },
+      });
+    }
 
     if (existing.status === "in_progress" && issue.status !== existing.status && issue.status !== "in_progress") {
       await listSuccessfulRunHandoffStates(db, issue.companyId, [issue.id])
@@ -8427,7 +8730,9 @@ export function issueRoutes(
     }
 
     let comment = null;
-    if (commentBody) {
+    if (commentCreatedInPatch) {
+      comment = commentCreatedInPatch;
+    } else if (commentBody) {
       const commentReferenceSummaryBefore = updateReferenceSummaryAfter
         ?? await issueReferencesSvc.listIssueReferenceSummary(issue.id);
       comment = await svc.addComment(id, commentBody, {

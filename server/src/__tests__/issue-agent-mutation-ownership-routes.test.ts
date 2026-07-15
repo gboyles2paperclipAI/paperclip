@@ -7,12 +7,14 @@ const issueId = "11111111-1111-4111-8111-111111111111";
 const companyId = "22222222-2222-4222-8222-222222222222";
 const ownerAgentId = "33333333-3333-4333-8333-333333333333";
 const peerAgentId = "44444444-4444-4444-8444-444444444444";
+const triageAuthorityAgentId = "cafa7831-645b-4a66-81be-6e6a811add67";
 const ownerRunId = "55555555-5555-4555-8555-555555555555";
 const recoveryActionId = "77777777-7777-4777-8777-777777777777";
 
 const mockIssueService = vi.hoisted(() => ({
   addComment: vi.fn(),
   assertCheckoutOwner: vi.fn(),
+  closeRoutineExecution: vi.fn(),
   create: vi.fn(),
   createChild: vi.fn(),
   decomposeAcceptedPlan: vi.fn(),
@@ -336,6 +338,17 @@ function peerActor(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function triageAuthorityActor(overrides: Record<string, unknown> = {}) {
+  return {
+    type: "agent",
+    agentId: triageAuthorityAgentId,
+    companyId,
+    source: "agent_key",
+    runId: "66666666-6666-4666-8666-666666666666",
+    ...overrides,
+  };
+}
+
 function ownerActor() {
   return {
     type: "agent",
@@ -408,6 +421,7 @@ describe("agent issue mutation checkout ownership", () => {
     mockCompanyService.getById.mockReset();
     mockIssueService.addComment.mockReset();
     mockIssueService.assertCheckoutOwner.mockReset();
+    mockIssueService.closeRoutineExecution.mockReset();
     mockIssueService.create.mockReset();
     mockIssueService.createChild.mockReset();
     mockIssueService.decomposeAcceptedPlan.mockReset();
@@ -540,6 +554,23 @@ describe("agent issue mutation checkout ownership", () => {
     });
     mockIssueService.list.mockResolvedValue([makeIssue()]);
     mockIssueService.assertCheckoutOwner.mockResolvedValue({ adoptedFromRunId: null });
+    mockIssueService.closeRoutineExecution.mockImplementation(async (_id: string, input: Record<string, unknown>) => ({
+      issue: makeIssue({
+        status: "done",
+        assigneeAgentId: ownerAgentId,
+        originKind: "routine_execution",
+        executionState: null,
+      }),
+      comment: input.commentBody
+        ? {
+            id: recoveryActionId,
+            issueId,
+            companyId,
+            body: input.commentBody,
+          }
+        : null,
+      patch: { status: "done" },
+    }));
     mockIssueService.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
       ...makeIssue({
         id: "88888888-8888-4888-8888-888888888888",
@@ -914,6 +945,214 @@ describe("agent issue mutation checkout ownership", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(403);
     expect(res.body.error).toBe("Agent cannot mutate another agent's issue");
     expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("blocks agents from assigning issues directly to board users before checkout ownership", async () => {
+    const res = await request(await createApp(ownerActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeUserId: "board-user-2" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Agent cannot assign issues directly to board users");
+    expect(mockIssueService.assertCheckoutOwner).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("allows board users to assign issues to board users", async () => {
+    const res = await request(await createApp(boardActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeUserId: "board-user-2" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      issueId,
+      expect.objectContaining({ assigneeUserId: "board-user-2" }),
+    );
+  });
+
+  it("allows a triage-authority agent to patch stale triage fields without checkout ownership", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === triageAuthorityAgentId) {
+        return makeAgent(id, {
+          permissions: {
+            canCreateAgents: false,
+            triageAuthority: true,
+            triageAuthorityFields: ["status", "assigneeAgentId", "blockedByIssueIds"],
+          },
+        });
+      }
+      return makeAgent(id);
+    });
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "blocked",
+      assigneeAgentId: ownerAgentId,
+      lastActivityAt: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+    }));
+    mockAgentService.resolveByReference.mockResolvedValue({ ambiguous: false, agent: makeAgent(peerAgentId) });
+
+    const res = await request(await createApp(triageAuthorityActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({
+        status: "todo",
+        assigneeAgentId: peerAgentId,
+        blockedByIssueIds: [],
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.assertCheckoutOwner).not.toHaveBeenCalled();
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      issueId,
+      expect.objectContaining({
+        status: "todo",
+        assigneeAgentId: peerAgentId,
+        blockedByIssueIds: [],
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.triage_authority_patch",
+        entityType: "issue",
+        entityId: issueId,
+      }),
+    );
+  });
+
+  it("blocks triage-authority agents from patching hard-blocked issue fields", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => id === triageAuthorityAgentId
+      ? makeAgent(id, { permissions: { canCreateAgents: false, triageAuthority: true } })
+      : makeAgent(id));
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "todo",
+      lastActivityAt: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+    }));
+
+    const res = await request(await createApp(triageAuthorityActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ title: "Blocked" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Issue patch contains triage-authority restricted fields");
+    expect(mockIssueService.assertCheckoutOwner).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("enforces configured triage-authority field allowlists", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => id === triageAuthorityAgentId
+      ? makeAgent(id, {
+          permissions: {
+            canCreateAgents: false,
+            triageAuthority: true,
+            triageAuthorityFields: ["status"],
+          },
+        })
+      : makeAgent(id));
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "blocked",
+      lastActivityAt: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+    }));
+
+    const res = await request(await createApp(triageAuthorityActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeAgentId: peerAgentId });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Request contains fields outside triage authority");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("requires stale activity before triage-authority patches", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => id === triageAuthorityAgentId
+      ? makeAgent(id, { permissions: { canCreateAgents: false, triageAuthority: true } })
+      : makeAgent(id));
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "blocked",
+      lastActivityAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+    }));
+
+    const res = await request(await createApp(triageAuthorityActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "todo" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.error).toBe("Issue is too recent for triage-authority patch");
+    expect(res.body.details.requiredStalenessMs).toBe(15 * 60 * 1000);
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("blocks triage-authority self-assignment", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => id === triageAuthorityAgentId
+      ? makeAgent(id, { permissions: { canCreateAgents: false, triageAuthority: true } })
+      : makeAgent(id));
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "blocked",
+      lastActivityAt: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+    }));
+
+    const res = await request(await createApp(triageAuthorityActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeAgentId: triageAuthorityAgentId });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Agent cannot assign issue to self");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("blocks triage-authority patches on terminal issues", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => id === triageAuthorityAgentId
+      ? makeAgent(id, { permissions: { canCreateAgents: false, triageAuthority: true } })
+      : makeAgent(id));
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "done",
+      lastActivityAt: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+    }));
+
+    const res = await request(await createApp(triageAuthorityActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "todo" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Cannot patch done or cancelled issues through triage authority");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("requires terminal comment evidence when agents mark issues done", async () => {
+    const res = await request(await createApp(ownerActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "done" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.error).toBe("Agent done requires comment");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("uses closeRoutineExecution for the exact routine closeout shape without duplicating comments", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => id === triageAuthorityAgentId
+      ? makeAgent(id, { permissions: { canCreateAgents: false, triageAuthority: true } })
+      : makeAgent(id));
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "in_progress",
+      assigneeAgentId: triageAuthorityAgentId,
+      originKind: "routine_execution",
+      executionState: null,
+    }));
+
+    const res = await request(await createApp(triageAuthorityActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({
+        status: "done",
+        executionState: null,
+        comment: "Routine execution complete.",
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.closeRoutineExecution).toHaveBeenCalledWith(issueId, {
+      companyId,
+      actorAgentId: triageAuthorityAgentId,
+      actorRunId: "66666666-6666-4666-8666-666666666666",
+      commentBody: "Routine execution complete.",
+    });
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
   });
 
   it("denies cross-company agents before comment authorization is evaluated", async () => {
@@ -1514,13 +1753,14 @@ describe("agent issue mutation checkout ownership", () => {
     );
     mockIssueRecoveryActionService.getActiveForIssue.mockResolvedValue({
       id: recoveryActionId,
+      ownerType: "agent",
       ownerAgentId,
     });
 
     const res = await request(await createApp(peerActor())).patch(`/api/issues/${issueId}`).send({ status: "todo" });
 
     expect(res.status, JSON.stringify(res.body)).toBe(403);
-    expect(res.body.error).toBe("Agent cannot resolve another owner's recovery action");
+    expect(res.body.error).toBe("Agent cannot mutate board-owned or board-hold issues");
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
@@ -1530,6 +1770,7 @@ describe("agent issue mutation checkout ownership", () => {
     );
     mockIssueRecoveryActionService.getActiveForIssue.mockResolvedValue({
       id: recoveryActionId,
+      ownerType: "agent",
       ownerAgentId,
     });
 
@@ -1542,7 +1783,7 @@ describe("agent issue mutation checkout ownership", () => {
       });
 
     expect(res.status, JSON.stringify(res.body)).toBe(403);
-    expect(res.body.error).toBe("Agent cannot resolve another owner's recovery action");
+    expect(res.body.error).toBe("Agent cannot mutate board-owned or board-hold issues");
     expect(mockIssueRecoveryActionService.resolveActiveForIssue).not.toHaveBeenCalled();
   });
 
@@ -1556,6 +1797,7 @@ describe("agent issue mutation checkout ownership", () => {
     }));
     mockIssueRecoveryActionService.getActiveForIssue.mockResolvedValue({
       id: recoveryActionId,
+      ownerType: "agent",
       ownerAgentId,
     });
 
@@ -1570,6 +1812,138 @@ describe("agent issue mutation checkout ownership", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(mockIssueService.update).toHaveBeenCalled();
     expect(mockIssueRecoveryActionService.resolveActiveForIssue).toHaveBeenCalled();
+  });
+
+  it("allows an assigned triage-authority agent to complete its own issue with terminal evidence", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === ownerAgentId) {
+        return makeAgent(id, { permissions: { canCreateAgents: false, triageAuthority: true } });
+      }
+      return makeAgent(id);
+    });
+    mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
+
+    const res = await request(await createApp(ownerActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "done", comment: "Completed with evidence." });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.assertCheckoutOwner).toHaveBeenCalledWith(issueId, ownerAgentId, ownerRunId);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      issueId,
+      expect.objectContaining({ status: "done" }),
+      expect.anything(),
+    );
+    expect(mockIssueService.addComment).toHaveBeenCalledWith(
+      issueId,
+      "Completed with evidence.",
+      expect.any(Object),
+      expect.any(Object),
+      expect.anything(),
+    );
+  });
+
+  it("allows execution-policy review handoff requests to pass the early board-user assignment gate", async () => {
+    const reviewInstructions = "Please review the current implementation before approval.";
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "in_progress",
+      assigneeAgentId: ownerAgentId,
+      executionPolicy: {
+        stages: [
+          { type: "review", participants: [{ type: "agent", agentId: peerAgentId }] },
+          { type: "approval", participants: [{ type: "user", userId: "board-user" }] },
+        ],
+      },
+      executionState: null,
+    }));
+
+    const res = await request(await createApp(ownerActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({
+        status: "in_review",
+        assigneeUserId: "board-user",
+        reviewRequest: { instructions: reviewInstructions },
+        comment: "Ready for review.",
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      issueId,
+      expect.objectContaining({
+        status: "in_review",
+        assigneeAgentId: peerAgentId,
+        assigneeUserId: null,
+        executionState: expect.objectContaining({
+          status: "pending",
+          currentStageType: "review",
+          currentParticipant: expect.objectContaining({ type: "agent", agentId: peerAgentId }),
+          reviewRequest: { instructions: reviewInstructions },
+        }),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("allows an assigned triage-authority agent to close its checked-out routine execution with an executionState null assertion", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === ownerAgentId) {
+        return makeAgent(id, { permissions: { canCreateAgents: false, triageAuthority: true } });
+      }
+      return makeAgent(id);
+    });
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "in_progress",
+      assigneeAgentId: ownerAgentId,
+      originKind: "routine_execution",
+      executionState: null,
+    }));
+
+    const res = await request(await createApp(ownerActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "done", executionState: null, comment: "Routine execution complete." });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.assertCheckoutOwner).toHaveBeenCalledWith(issueId, ownerAgentId, ownerRunId);
+    expect(mockIssueService.closeRoutineExecution).toHaveBeenCalledWith(
+      issueId,
+      expect.objectContaining({
+        companyId,
+        actorAgentId: ownerAgentId,
+        actorRunId: ownerRunId,
+        commentBody: "Routine execution complete.",
+      }),
+    );
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+  });
+
+  it("rejects direct board execution-state patches", async () => {
+    const res = await request(await createApp(boardActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "done", executionState: null });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("Execution state cannot be patched directly");
+    expect(mockIssueService.closeRoutineExecution).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects routine execution closeout assertions without triage authority", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "in_progress",
+      assigneeAgentId: ownerAgentId,
+      originKind: "routine_execution",
+      executionState: null,
+    }));
+
+    const res = await request(await createApp(ownerActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "done", executionState: null, comment: "No authority." });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("Execution state cannot be patched directly");
+    expect(mockIssueService.closeRoutineExecution).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
   it("wakes the assigned agent when recovery resolution restores a source issue to todo", async () => {
@@ -1786,6 +2160,26 @@ describe("agent issue mutation checkout ownership", () => {
 
       expect(res.status, JSON.stringify(res.body)).toBe(200);
       expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({ status: "in_review" }));
+    });
+
+    it.each([
+      ["board-assigned", { assigneeUserId: "board-user" }],
+      ["awaiting-board", { labels: [{ name: "awaiting-board" }] }],
+    ])("denies watchdog mutation of %s issues before applying the watchdog scope grant", async (_name, issueOverrides) => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({
+        status: "in_progress",
+        assigneeAgentId: ownerAgentId,
+        ...issueOverrides,
+      }));
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({ status: "blocked" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(res.body.error).toBe("Agent cannot mutate board-owned or board-hold issues");
+      expect(mockTaskWatchdogService.revalidateMutationScope).not.toHaveBeenCalled();
+      expect(mockIssueService.update).not.toHaveBeenCalled();
     });
 
     it("rejects stale watchdog source mutations when revalidation finds a live path", async () => {

@@ -13,34 +13,32 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // jsdom's CSS parser rejects the custom-property marker rule stitches inserts
 // (`--sxs{--sxs:N}`), pulled into <App>'s eager import graph transitively via
 // @codesandbox/sandpack-react. Substitute a benign, valid rule on parse failure
 // so stitches' index bookkeeping stays intact and the module graph evaluates.
 // (sandpack itself is never exercised by the routing under test.)
-beforeAll(() => {
-  const sheetProto = window.CSSStyleSheet.prototype as unknown as {
-    insertRule: (rule: string, index?: number) => number;
-    __pap13002Patched?: boolean;
-  };
-  if (!sheetProto.__pap13002Patched) {
-    const original = sheetProto.insertRule;
-    sheetProto.insertRule = function patched(this: CSSStyleSheet, rule: string, index?: number) {
+const sheetProto = window.CSSStyleSheet.prototype as unknown as {
+  insertRule: (rule: string, index?: number) => number;
+  __pap13002Patched?: boolean;
+};
+if (!sheetProto.__pap13002Patched) {
+  const original = sheetProto.insertRule;
+  sheetProto.insertRule = function patched(this: CSSStyleSheet, rule: string, index?: number) {
+    try {
+      return original.call(this, rule, index);
+    } catch {
       try {
-        return original.call(this, rule, index);
+        return original.call(this, ".pap13002-noop{}", index);
       } catch {
-        try {
-          return original.call(this, ".pap13002-noop{}", index);
-        } catch {
-          return this.cssRules?.length ?? 0;
-        }
+        return this.cssRules?.length ?? 0;
       }
-    };
-    sheetProto.__pap13002Patched = true;
-  }
-});
+    }
+  };
+  sheetProto.__pap13002Patched = true;
+}
 
 // Real Layout renders the full authenticated shell (sidebar, data queries) and
 // owns the "No company matches prefix" NotFound. For routing we only need it to
@@ -92,6 +90,8 @@ vi.mock("./context/CompanyContext", () => ({
   CompanyProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
 
+const { App } = await import("./App");
+
 async function flushReact() {
   for (let i = 0; i < 20; i += 1) {
     await Promise.resolve();
@@ -109,7 +109,6 @@ async function waitForText(container: HTMLElement, text: string) {
 }
 
 async function renderAppAt(container: HTMLElement, path: string) {
-  const { App } = await import("./App");
   const root = createRoot(container);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   flushSync(() => {
