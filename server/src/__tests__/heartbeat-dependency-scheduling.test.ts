@@ -688,6 +688,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     const secondAgentId = randomUUID();
     const firstIssueId = randomUUID();
     const secondIssueId = randomUUID();
+    const competingHeartbeat = heartbeatService(db);
     let finishFirstRun!: () => void;
     const firstRunFinished = new Promise<void>((resolve) => {
       finishFirstRun = resolve;
@@ -759,41 +760,33 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     ]);
 
     try {
-      const firstWake = await heartbeat.wakeup(firstAgentId, {
-        source: "assignment",
-        triggerDetail: "system",
-        reason: "issue_assigned",
-        payload: { issueId: firstIssueId },
-        contextSnapshot: { issueId: firstIssueId, wakeReason: "issue_assigned" },
-      });
+      // Competing service instances must not both observe the same free global
+      // slot and transition their queued runs to running.
+      const [firstWake, secondWake] = await Promise.all([
+        heartbeat.wakeup(firstAgentId, {
+          source: "assignment",
+          triggerDetail: "system",
+          reason: "issue_assigned",
+          payload: { issueId: firstIssueId },
+          contextSnapshot: { issueId: firstIssueId, wakeReason: "issue_assigned" },
+        }),
+        competingHeartbeat.wakeup(secondAgentId, {
+          source: "assignment",
+          triggerDetail: "system",
+          reason: "issue_assigned",
+          payload: { issueId: secondIssueId },
+          contextSnapshot: { issueId: secondIssueId, wakeReason: "issue_assigned" },
+        }),
+      ]);
       expect(firstWake).not.toBeNull();
-
-      const firstRunStarted = await waitForCondition(async () => {
-        const run = await db
-          .select({ status: heartbeatRuns.status })
-          .from(heartbeatRuns)
-          .where(eq(heartbeatRuns.id, firstWake!.id))
-          .then((rows) => rows[0] ?? null);
-        return run?.status === "running";
-      });
-      expect(firstRunStarted).toBe(true);
-      expect(await waitForCondition(async () => mockAdapterExecute.mock.calls.length === 1, 30_000)).toBe(true);
-
-      const secondWake = await heartbeat.wakeup(secondAgentId, {
-        source: "assignment",
-        triggerDetail: "system",
-        reason: "issue_assigned",
-        payload: { issueId: secondIssueId },
-        contextSnapshot: { issueId: secondIssueId, wakeReason: "issue_assigned" },
-      });
       expect(secondWake).not.toBeNull();
-
-      const secondRunWhileFirstRunning = await db
+      expect(await waitForCondition(async () => mockAdapterExecute.mock.calls.length === 1, 30_000)).toBe(true);
+      const competingStatuses = await db
         .select({ status: heartbeatRuns.status })
         .from(heartbeatRuns)
-        .where(eq(heartbeatRuns.id, secondWake!.id))
-        .then((rows) => rows[0] ?? null);
-      expect(secondRunWhileFirstRunning?.status).toBe("queued");
+        .where(sql`${heartbeatRuns.id} in (${firstWake!.id}, ${secondWake!.id})`)
+        .then((rows) => rows.map((row) => row.status).sort());
+      expect(competingStatuses).toEqual(["queued", "running"]);
       expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
     } finally {
       if (originalPremiumCap === undefined) {

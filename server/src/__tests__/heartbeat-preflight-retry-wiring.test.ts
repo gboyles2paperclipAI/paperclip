@@ -179,8 +179,10 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
       provider: "test",
       model: "test-model",
     });
-    // executeRun starts follow-up work asynchronously; wait for it to leave the
-    // run/lease tables idle before taking AccessExclusive locks for cleanup.
+    // A terminal row and released lease can precede the last activity/event
+    // writes. Use the service's explicit finalization boundary before cleanup.
+    const runIds = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns);
+    await Promise.all(runIds.map(({ id }) => heartbeat.waitForRunExecutionDrain(id)));
     await waitForHeartbeatIdle(db);
     await truncateCompaniesWithDeadlockRetry(db);
   });

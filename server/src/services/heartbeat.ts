@@ -10252,24 +10252,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(count ?? 0);
   }
 
-  async function listPremiumManagedRunningRuns() {
-    return db
-      .select({
-        id: heartbeatRuns.id,
-        agentId: heartbeatRuns.agentId,
-        processGroupId: heartbeatRuns.processGroupId,
-      })
-      .from(heartbeatRuns)
-      .innerJoin(agents, and(eq(heartbeatRuns.agentId, agents.id), eq(heartbeatRuns.companyId, agents.companyId)))
-      .where(
-        and(
-          eq(heartbeatRuns.status, "running"),
-          inArray(agents.adapterType, [...PREMIUM_MANAGED_ADAPTER_TYPES]),
-          sql`coalesce(${heartbeatRuns.contextSnapshot} ->> 'modelProfile', '') != 'cheap'`,
-        ),
-      );
-  }
-
   async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect, companyAgents?: AgentOrgRow[]) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
@@ -10303,32 +10285,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (dailyCapBlock) {
       await cancelQueuedRunForHeartbeatDailyCap(run, dailyCapBlock);
       return null;
-    }
-
-    // Premium managed adapters share a bounded host-level pool. Cheap-profile
-    // runs are deliberately exempt so routine low-cost work can continue. A
-    // dead local process group does not consume a slot; recovery will settle
-    // its still-running database row independently.
-    if (isPremiumManagedRun(agent.adapterType, readContextModelProfile(context))) {
-      const premiumRunningRuns = await listPremiumManagedRunningRuns();
-      let activePremiumRunningCount = 0;
-      for (const premiumRun of premiumRunningRuns) {
-        if (premiumRun.processGroupId && !isProcessGroupAlive(premiumRun.processGroupId)) {
-          logger.warn(
-            {
-              runId: premiumRun.id,
-              agentId: premiumRun.agentId,
-              processGroupId: premiumRun.processGroupId,
-            },
-            "Detected premium managed run with a dead process group; excluding it from the concurrency cap",
-          );
-          continue;
-        }
-        activePremiumRunningCount++;
-      }
-      if (activePremiumRunningCount >= premiumManagedMaxConcurrentRuns()) {
-        return null;
-      }
     }
 
     const issueId = readNonEmptyString(context.issueId);
@@ -10391,7 +10347,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueContext: issueId ? await getIssueExecutionContext(run.companyId, issueId) : null,
       routineEnvContext: { routineId: null, env: null, responsibleUserId: null },
     });
-    const claimed = await db
+    const claimRun = async (executor: Pick<typeof db, "update">) => executor
       .update(heartbeatRuns)
       .set({
         status: "running",
@@ -10402,6 +10358,54 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")))
       .returning()
       .then((rows) => rows[0] ?? null);
+
+    const premiumManaged = isPremiumManagedRun(agent.adapterType, readContextModelProfile(context));
+    const claimed = premiumManaged
+      ? await db.transaction(async (tx) => {
+          // Serialize the global premium count and queued-to-running transition
+          // across agents and service instances. A newly claimed row has a null
+          // process group but still consumes a slot before this transaction
+          // commits, closing the former check-then-claim race.
+          await tx.execute(
+            sql`SELECT pg_advisory_xact_lock(hashtextextended('paperclip:premium-managed-admission', 0))`,
+          );
+          const premiumRunningRuns = await tx
+            .select({
+              id: heartbeatRuns.id,
+              agentId: heartbeatRuns.agentId,
+              processGroupId: heartbeatRuns.processGroupId,
+            })
+            .from(heartbeatRuns)
+            .innerJoin(
+              agents,
+              and(eq(heartbeatRuns.agentId, agents.id), eq(heartbeatRuns.companyId, agents.companyId)),
+            )
+            .where(
+              and(
+                eq(heartbeatRuns.status, "running"),
+                inArray(agents.adapterType, [...PREMIUM_MANAGED_ADAPTER_TYPES]),
+                sql`coalesce(${heartbeatRuns.contextSnapshot} ->> 'modelProfile', '') != 'cheap'`,
+              ),
+            );
+          let activePremiumRunningCount = 0;
+          for (const premiumRun of premiumRunningRuns) {
+            if (premiumRun.processGroupId && !isProcessGroupAlive(premiumRun.processGroupId)) {
+              logger.warn(
+                {
+                  runId: premiumRun.id,
+                  agentId: premiumRun.agentId,
+                  processGroupId: premiumRun.processGroupId,
+                },
+                "Detected premium managed run with a dead process group; excluding it from the concurrency cap",
+              );
+              continue;
+            }
+            activePremiumRunningCount++;
+          }
+          if (activePremiumRunningCount >= premiumManagedMaxConcurrentRuns()) return null;
+          return claimRun(tx);
+        })
+      : await claimRun(db);
     if (!claimed) return null;
 
     publishLiveEvent({
