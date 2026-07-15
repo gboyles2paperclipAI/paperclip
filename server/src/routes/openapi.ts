@@ -691,6 +691,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "PATCH /api/companies/{companyId}/members/{memberId}/permissions",
   "GET /api/companies/{companyId}/user-directory",
   "POST /api/execution-workspaces/{id}/reconcile-branch",
+  "POST /api/issues/{id}/admin/repair-recovery-action",
   "GET /api/board-api-keys",
   "POST /api/board-api-keys",
   "DELETE /api/board-api-keys/{keyId}",
@@ -3501,6 +3502,32 @@ registry.registerPath({
   summary: "Force-release an issue (admin)",
   request: { params: z.object({ id: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/admin/repair-recovery-action",
+  tags: ["issues"],
+  summary: "Repair a stale recovery action for a terminal issue (admin)",
+  request: { params: z.object({ id: z.string() }) },
+  responses: {
+    200: r.ok(),
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: { description: "Issue is not in a terminal status" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/admin/recovery-actions/repair",
+  tags: ["issues"],
+  summary: "Repair stale recovery actions for terminal issues in a company (admin)",
+  request: {
+    body: jsonBody(z.object({ companyId: z.string().trim().min(1) })),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
 });
 
 registry.registerPath({
