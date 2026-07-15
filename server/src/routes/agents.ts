@@ -1331,10 +1331,59 @@ export function agentRoutes(
     return ensureGatewayDeviceKey(adapterType, next);
   }
 
+  function isValidClaudeLocalModel(model: unknown): boolean {
+    if (typeof model !== "string" || !model.trim()) return true;
+    const m = model.trim();
+    return (
+      m.startsWith("claude-") ||
+      /^\w+\.anthropic\./.test(m) ||
+      m.startsWith("arn:aws:bedrock:")
+    );
+  }
+
+  function isValidGeminiLocalModel(model: unknown): boolean {
+    if (typeof model !== "string" || !model.trim()) return true;
+    const m = model.trim();
+    return m === "auto" || m.startsWith("gemini-");
+  }
+
+  function isValidCodexLocalModel(model: unknown): boolean {
+    if (typeof model !== "string" || !model.trim()) return true;
+    const m = model.trim();
+    return !m.startsWith("claude-") && !m.startsWith("gemini-") && !m.includes("/");
+  }
+
   async function assertAdapterConfigConstraints(
     adapterType: string | null | undefined,
     adapterConfig: Record<string, unknown>,
   ) {
+    if (adapterType === "claude_local") {
+      if (!isValidClaudeLocalModel(adapterConfig.model)) {
+        throw unprocessable(
+          `Invalid claude_local adapterConfig: model "${adapterConfig.model}" is not compatible with the Claude CLI. ` +
+          `Use a Claude model id (e.g. "claude-sonnet-4-6") or leave model unset to use the CLI default.`,
+        );
+      }
+      return;
+    }
+    if (adapterType === "gemini_local") {
+      if (!isValidGeminiLocalModel(adapterConfig.model)) {
+        throw unprocessable(
+          `Invalid gemini_local adapterConfig: model "${adapterConfig.model}" is not compatible with the Gemini CLI. ` +
+          `Use a Gemini model id (e.g. "gemini-2.5-flash") or "auto", or leave model unset.`,
+        );
+      }
+      return;
+    }
+    if (adapterType === "codex_local") {
+      if (!isValidCodexLocalModel(adapterConfig.model)) {
+        throw unprocessable(
+          `Invalid codex_local adapterConfig: model "${adapterConfig.model}" is not compatible with the Codex CLI. ` +
+          `Use an OpenAI model id (e.g. "gpt-5.3-codex") or leave model unset to use the default.`,
+        );
+      }
+      return;
+    }
     if (adapterType !== "opencode_local") return;
     try {
       requireOpenCodeModelId(adapterConfig.model);
