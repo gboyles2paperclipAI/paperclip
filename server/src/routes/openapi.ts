@@ -5063,6 +5063,14 @@ registerCurrentRoute({
 });
 
 registerCurrentRoute({
+  method: "get",
+  path: "/api/heartbeat-runs/live",
+  tags: ["runs"],
+  summary: "Deprecated unscoped live heartbeat runs endpoint",
+  responses: { 404: r.notFound },
+});
+
+registerCurrentRoute({
   method: "post",
   path: "/api/integrations/slack/interactions",
   tags: ["integrations"],
