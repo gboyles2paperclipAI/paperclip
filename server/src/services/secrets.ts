@@ -3832,6 +3832,12 @@ export function secretService(db: Db) {
       const resolved: Record<string, string> = {};
       const secretKeys = new Set<string>();
       const manifest: RuntimeSecretManifestEntry[] = [];
+      const envConfigPath = (key: string) => {
+        const prefix = typeof context?.configPathPrefix === "string" && context.configPathPrefix.trim().length > 0
+          ? context.configPathPrefix.trim().replace(/\.$/, "")
+          : "env";
+        return `${prefix}.${key}`;
+      };
 
       for (const [key, rawBinding] of Object.entries(record)) {
         if (!ENV_KEY_RE.test(key)) {
@@ -3851,8 +3857,8 @@ export function secretService(db: Db) {
             binding.version,
             context
               ? {
-                  bindingContext: { ...context, configPath: `env.${key}` },
-                  accessContext: { ...context, configPath: `env.${key}` },
+                  bindingContext: { ...context, configPath: envConfigPath(key) },
+                  accessContext: { ...context, configPath: envConfigPath(key) },
                 }
               : undefined,
           );
@@ -3871,7 +3877,7 @@ export function secretService(db: Db) {
             context
               ? {
                   ...context,
-                  configPath: `env.${key}`,
+                  configPath: envConfigPath(key),
                   responsibleUserId: context.responsibleUserId ?? null,
                 }
               : undefined,
@@ -3893,17 +3899,23 @@ export function secretService(db: Db) {
     collectMissingRuntimeBindings: async (
       companyId: string,
       envValue: unknown,
-      context: Omit<SecretBindingContext, "configPath">,
+      context: ResolveAdapterConfigContext,
     ): Promise<MissingRuntimeBinding[]> => {
       const record = asRecord(envValue);
       if (!record) return [];
+      const envConfigPath = (key: string) => {
+        const prefix = typeof context?.configPathPrefix === "string" && context.configPathPrefix.trim().length > 0
+          ? context.configPathPrefix.trim().replace(/\.$/, "")
+          : "env";
+        return `${prefix}.${key}`;
+      };
       const secretRefs = Object.entries(record).flatMap(([key, rawBinding]) => {
         if (!ENV_KEY_RE.test(key)) return [];
         const parsed = envBindingSchema.safeParse(rawBinding);
         if (!parsed.success) return [];
         const binding = canonicalizeBinding(parsed.data as EnvBinding);
         if (binding.type !== "secret_ref") return [];
-        return [{ key, configPath: `env.${key}`, secretId: binding.secretId }];
+        return [{ key, configPath: envConfigPath(key), secretId: binding.secretId }];
       });
       const userSecretRefs = Object.entries(record).flatMap(([key, rawBinding]) => {
         if (!ENV_KEY_RE.test(key)) return [];
@@ -3912,7 +3924,7 @@ export function secretService(db: Db) {
         const binding = canonicalizeBinding(parsed.data as EnvBinding);
         if (binding.type !== "user_secret_ref") return [];
         if (!binding.required || binding.allowMissingOverride) return [];
-        return [{ key, configPath: `env.${key}`, binding }];
+        return [{ key, configPath: envConfigPath(key), binding }];
       });
       if (secretRefs.length === 0 && userSecretRefs.length === 0) return [];
 

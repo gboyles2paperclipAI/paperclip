@@ -313,6 +313,70 @@ function buildPreRealizationExecutionWorkspaceSettings(raw: unknown): Record<str
   return Object.keys(next).length > 0 ? next : null;
 }
 
+async function cancelAcceptedPlanSourceRetryRuns(
+  tx: Db,
+  input: {
+    companyId: string;
+    sourceIssueId: string;
+  },
+) {
+  const now = new Date();
+  const reason =
+    "Cancelled because the accepted plan has been decomposed into child work; the child issues own the next execution path";
+  const staleRuns = await tx
+    .update(heartbeatRuns)
+    .set({
+      status: "cancelled",
+      finishedAt: now,
+      error: reason,
+      errorCode: "accepted_plan_decomposition_has_children",
+      updatedAt: now,
+    })
+    .where(and(
+      eq(heartbeatRuns.companyId, input.companyId),
+      inArray(heartbeatRuns.status, ["queued", "scheduled_retry"]),
+      sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${input.sourceIssueId}`,
+      sql`(
+        ${heartbeatRuns.contextSnapshot} ->> 'wakeReason' in ('finish_successful_run_handoff', 'missing_issue_comment', 'issue_continuation_needed')
+        or ${heartbeatRuns.contextSnapshot} ->> 'retryReason' in ('finish_successful_run_handoff', 'missing_issue_comment', 'issue_continuation_needed')
+      )`,
+    ))
+    .returning({
+      id: heartbeatRuns.id,
+      wakeupRequestId: heartbeatRuns.wakeupRequestId,
+    });
+  if (staleRuns.length === 0) return;
+
+  const wakeupRequestIds = staleRuns
+    .map((run) => run.wakeupRequestId)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  if (wakeupRequestIds.length > 0) {
+    await tx
+      .update(agentWakeupRequests)
+      .set({
+        status: "cancelled",
+        finishedAt: now,
+        error: reason,
+        updatedAt: now,
+      })
+      .where(inArray(agentWakeupRequests.id, wakeupRequestIds));
+  }
+
+  await tx
+    .update(issues)
+    .set({
+      executionRunId: null,
+      executionAgentNameKey: null,
+      executionLockedAt: null,
+      updatedAt: now,
+    })
+    .where(and(
+      eq(issues.companyId, input.companyId),
+      eq(issues.id, input.sourceIssueId),
+      inArray(issues.executionRunId, staleRuns.map((run) => run.id)),
+    ));
+}
+
 function toTimestampMs(value: Date | string | null | undefined) {
   if (!value) return null;
   const date = value instanceof Date ? value : new Date(value);
@@ -5661,7 +5725,7 @@ export function issueService(db: Db) {
         ...issueData,
         parentId: parent.id,
         projectId: issueData.projectId ?? parent.projectId,
-        projectWorkspaceId: issueData.projectWorkspaceId ?? (inheritStrategyOnly ? parent.projectWorkspaceId : undefined),
+        projectWorkspaceId: issueData.projectWorkspaceId,
         goalId: issueData.goalId ?? parent.goalId,
         actorResponsibleUserId: issueData.actorResponsibleUserId ?? null,
         trustExplicitResponsibleUserId: issueData.trustExplicitResponsibleUserId === true,
@@ -5812,6 +5876,12 @@ export function issueService(db: Db) {
           if (claim.status === "completed" || existingChildIssueIds.length >= data.children.length) {
             const nextIds = existingChildIssueIds.slice(0, data.children.length);
             if (claim.status === "completed" && nextIds.length === data.children.length) {
+              if (nextIds.length > 0) {
+                await cancelAcceptedPlanSourceRetryRuns(tx as unknown as Db, {
+                  companyId: sourceIssue.companyId,
+                  sourceIssueId: sourceIssue.id,
+                });
+              }
               return {
                 claim,
                 createdIssue: null,
@@ -5838,6 +5908,12 @@ export function issueService(db: Db) {
               .where(eq(issuePlanDecompositions.id, claim.id))
               .returning();
             if (!completed) throw new Error("Failed to complete accepted-plan decomposition claim");
+            if (nextIds.length > 0) {
+              await cancelAcceptedPlanSourceRetryRuns(tx as unknown as Db, {
+                companyId: sourceIssue.companyId,
+                sourceIssueId: sourceIssue.id,
+              });
+            }
             return {
               claim: completed,
               createdIssue: null,
@@ -5875,6 +5951,12 @@ export function issueService(db: Db) {
             .where(eq(issuePlanDecompositions.id, claim.id))
             .returning();
           if (!updatedClaim) throw new Error("Failed to persist accepted-plan decomposition progress");
+          if (nextIds.length > 0) {
+            await cancelAcceptedPlanSourceRetryRuns(tx as unknown as Db, {
+              companyId: sourceIssue.companyId,
+              sourceIssueId: sourceIssue.id,
+            });
+          }
           return {
             claim: updatedClaim,
             createdIssue: createdChild.issue,

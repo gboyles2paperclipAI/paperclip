@@ -98,6 +98,8 @@ function workspaceBranchIncoherenceFingerprintForTest(input: {
 }
 
 const leasedRunIds = new Set<string>();
+const defaultTestPaperclipHome = process.env.PAPERCLIP_HOME;
+const defaultTestPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
@@ -348,6 +350,8 @@ afterEach(async () => {
   delete process.env.PAPERCLIP_WORKTREES_DIR;
   delete process.env.PAPERCLIP_WORKTREE_INIT_SKIP_HOST_CLI;
   delete process.env.DATABASE_URL;
+  if (defaultTestPaperclipHome) process.env.PAPERCLIP_HOME = defaultTestPaperclipHome;
+  if (defaultTestPaperclipInstanceId) process.env.PAPERCLIP_INSTANCE_ID = defaultTestPaperclipInstanceId;
   await resetRuntimeServicesForTests();
 });
 
@@ -1622,6 +1626,7 @@ describe("realizeExecutionWorkspace", () => {
     const fakePnpmPath = path.join(fakeBin, "pnpm");
     const scriptPath = path.join(worktreeRoot, "provision-worktree.sh");
     const installLogPath = path.join(tempRoot, "install.log");
+    const worktreesDir = path.join(tempRoot, "paperclip-worktrees");
 
     try {
       await fs.mkdir(path.join(baseRoot, "node_modules"), { recursive: true });
@@ -1679,6 +1684,8 @@ describe("realizeExecutionWorkspace", () => {
           PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
           PAPERCLIP_WORKSPACE_BASE_CWD: baseRoot,
           PAPERCLIP_WORKSPACE_CWD: worktreeRoot,
+          PAPERCLIP_WORKTREES_DIR: worktreesDir,
+          PAPERCLIP_WORKTREE_INIT_SKIP_HOST_CLI: "1",
         },
       });
 

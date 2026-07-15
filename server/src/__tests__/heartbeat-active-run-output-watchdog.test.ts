@@ -327,7 +327,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
 
     const result = await recovery.scanSilentActiveRuns({ now, companyId });
 
-    expect(result.created).toBe(1);
+    expect(result).toMatchObject({ created: 1, autoCancelled: 0 });
     const [evaluation] = await db
       .select()
       .from(issues)

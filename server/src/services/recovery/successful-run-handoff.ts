@@ -55,6 +55,7 @@ type IssueRow = Pick<
   | "identifier"
   | "title"
   | "status"
+  | "workMode"
   | "assigneeAgentId"
   | "assigneeUserId"
   | "executionPolicy"
@@ -394,6 +395,7 @@ export function decideSuccessfulRunHandoff(input: {
   }
   if (issue.assigneeUserId) return { kind: "skip", reason: "issue is human-owned" };
   if (issue.status !== "in_progress") return { kind: "skip", reason: `issue status ${issue.status} is a valid disposition` };
+  if (issue.workMode === "planning") return { kind: "skip", reason: "planning issue continuation is owned by plan approval or decomposition" };
   if (isPermanentWatcherIssue(issue)) return { kind: "skip", reason: "permanent watcher owns its own lifecycle" };
   if (issue.executionState) return { kind: "skip", reason: "issue has execution policy state" };
   if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") {

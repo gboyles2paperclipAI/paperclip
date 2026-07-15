@@ -1380,6 +1380,116 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     }
   }
 
+  async function autoCancelNoProcessSilentRun(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    sourceIssue: typeof issues.$inferSelect | null;
+    runningAgent: typeof agents.$inferSelect;
+    now: Date;
+    silenceAgeMs: number;
+  }) {
+    if ((input.silenceAgeMs ?? 0) < ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS) return null;
+    if (input.run.processStartedAt || input.run.processPid || input.run.processGroupId) return null;
+    if (runningProcesses.has(input.run.id)) return null;
+
+    const cleanup = await cleanupSourceResolvedRunProcess({
+      run: input.run,
+      runningAgent: input.runningAgent,
+    });
+    if (cleanup.outcome !== "no_process_metadata") return null;
+
+    const resultJson = {
+      ...parseObject(input.run.resultJson),
+      activeRunWatchdogAutoCancel: {
+        sourceIssueId: input.sourceIssue?.id ?? null,
+        processStartedAt: input.run.processStartedAt ?? null,
+        processPid: input.run.processPid ?? null,
+        processGroupId: input.run.processGroupId ?? null,
+        lastOutputAt: input.run.lastOutputAt ?? null,
+        lastOutputSeq: input.run.lastOutputSeq ?? 0,
+        cleanup,
+      },
+    };
+
+    const finalizedRun = await db.transaction(async (tx) => {
+      const [updatedRun] = await tx
+        .update(heartbeatRuns)
+        .set({
+          status: "cancelled",
+          finishedAt: input.now,
+          error: "Watchdog auto-cancelled no-process silent run",
+          errorCode: "watchdog_no_process_output_silence",
+          resultJson,
+          updatedAt: input.now,
+        })
+        .where(and(
+          eq(heartbeatRuns.id, input.run.id),
+          eq(heartbeatRuns.companyId, input.run.companyId),
+          eq(heartbeatRuns.status, "running"),
+        ))
+        .returning();
+      if (!updatedRun) return null;
+
+      if (input.run.wakeupRequestId) {
+        await tx
+          .update(agentWakeupRequests)
+          .set({
+            status: "cancelled",
+            finishedAt: input.now,
+            error: "Watchdog auto-cancelled no-process silent run",
+            updatedAt: input.now,
+          })
+          .where(and(
+            eq(agentWakeupRequests.id, input.run.wakeupRequestId),
+            eq(agentWakeupRequests.companyId, input.run.companyId),
+          ));
+      }
+
+      if (input.sourceIssue) {
+        await tx
+          .update(issues)
+          .set({
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+            updatedAt: input.now,
+          })
+          .where(and(
+            eq(issues.id, input.sourceIssue.id),
+            eq(issues.companyId, input.run.companyId),
+            eq(issues.executionRunId, input.run.id),
+          ));
+      }
+
+      return updatedRun;
+    });
+    if (!finalizedRun) return null;
+
+    await appendRecoveryRunEvent(finalizedRun, {
+      level: "warn",
+      message: "Watchdog auto-cancelled no-process silent run",
+      payload: resultJson.activeRunWatchdogAutoCancel,
+    });
+    await logActivity(db, {
+      companyId: input.run.companyId,
+      actorType: "system",
+      actorId: "system",
+      agentId: input.run.agentId,
+      runId: input.run.id,
+      action: "heartbeat.output_stale_no_process_auto_cancelled",
+      entityType: "heartbeat_run",
+      entityId: input.run.id,
+      details: {
+        source: "recovery.scan_silent_active_runs",
+        sourceIssueId: input.sourceIssue?.id ?? null,
+        sourceIssueIdentifier: input.sourceIssue?.identifier ?? null,
+        silenceAgeMs: input.silenceAgeMs,
+        cleanup,
+      },
+    });
+    await finalizeAgentAfterSourceResolvedRun(finalizedRun, "cancelled");
+    return { kind: "auto_cancelled" as const };
+  }
+
   async function finalizeAgentAfterSourceResolvedRun(run: typeof heartbeatRuns.$inferSelect, status: "succeeded" | "cancelled") {
     const [runningCountRow] = await db
       .select({ count: sql<number>`count(*)::int` })
@@ -1896,6 +2006,14 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       now: input.now,
     });
     const level = (evidence.silenceAgeMs ?? 0) >= ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS ? "critical" : "suspicious";
+    const autoCancelled = await autoCancelNoProcessSilentRun({
+      run: input.run,
+      sourceIssue,
+      runningAgent,
+      now: input.now,
+      silenceAgeMs: evidence.silenceAgeMs ?? 0,
+    });
+    if (autoCancelled) return autoCancelled;
     if (existing) {
       if (level === "critical" && existing.priority !== "high") {
         await issuesSvc.update(existing.id, {
@@ -2053,6 +2171,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       escalated: 0,
       folded: 0,
       snoozed: 0,
+      autoCancelled: 0,
       skipped: 0,
       evaluationIssueIds: [] as string[],
     };
@@ -2067,6 +2186,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       else if (outcome.kind === "existing") result.existing += 1;
       else if (outcome.kind === "escalated") result.escalated += 1;
       else if (outcome.kind === "folded") result.folded += 1;
+      else if (outcome.kind === "auto_cancelled") result.autoCancelled += 1;
       else result.skipped += 1;
       if ("evaluationIssueId" in outcome && outcome.evaluationIssueId) {
         result.evaluationIssueIds.push(outcome.evaluationIssueId);

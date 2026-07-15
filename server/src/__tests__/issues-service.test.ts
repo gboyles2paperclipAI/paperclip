@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import {
   activityLog,
+  agentWakeupRequests,
   agents,
   companies,
   createDb,
@@ -5166,6 +5167,7 @@ describeEmbeddedPostgres("accepted plan decomposition", () => {
     await db.delete(projects);
     await db.delete(goals);
     await db.delete(heartbeatRuns);
+    await db.delete(agentWakeupRequests);
     await db.delete(agents);
     await db.delete(instanceSettings);
     await db.delete(companies);
@@ -5448,6 +5450,137 @@ describeEmbeddedPostgres("accepted plan decomposition", () => {
     expect(result.childIssueIds).toHaveLength(1);
     expect(result.newlyCreatedIssues).toHaveLength(1);
     expect(result.decomposition.status).toBe("completed");
+  });
+
+  it("cancels only non-started accepted-plan source retry runs after children are created", async () => {
+    const { companyId, sourceIssueId, acceptedPlanRevisionId, assigneeAgentId } = await seedAcceptedPlanIssue();
+    const queuedWakeId = randomUUID();
+    const scheduledWakeId = randomUUID();
+    const runningWakeId = randomUUID();
+    const queuedRunId = randomUUID();
+    const scheduledRunId = randomUUID();
+    const runningRunId = randomUUID();
+    const contextSnapshot = {
+      issueId: sourceIssueId,
+      wakeReason: "issue_continuation_needed",
+    };
+
+    await db.insert(agentWakeupRequests).values([
+      {
+        id: queuedWakeId,
+        companyId,
+        agentId: assigneeAgentId,
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_continuation_needed",
+        status: "queued",
+      },
+      {
+        id: scheduledWakeId,
+        companyId,
+        agentId: assigneeAgentId,
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_continuation_needed",
+        status: "queued",
+      },
+      {
+        id: runningWakeId,
+        companyId,
+        agentId: assigneeAgentId,
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_continuation_needed",
+        status: "claimed",
+      },
+    ]);
+    await db.insert(heartbeatRuns).values([
+      {
+        id: queuedRunId,
+        companyId,
+        agentId: assigneeAgentId,
+        invocationSource: "automation",
+        triggerDetail: "system",
+        status: "queued",
+        wakeupRequestId: queuedWakeId,
+        contextSnapshot,
+      },
+      {
+        id: scheduledRunId,
+        companyId,
+        agentId: assigneeAgentId,
+        invocationSource: "automation",
+        triggerDetail: "system",
+        status: "scheduled_retry",
+        wakeupRequestId: scheduledWakeId,
+        contextSnapshot,
+      },
+      {
+        id: runningRunId,
+        companyId,
+        agentId: assigneeAgentId,
+        invocationSource: "automation",
+        triggerDetail: "system",
+        status: "running",
+        wakeupRequestId: runningWakeId,
+        contextSnapshot,
+        startedAt: new Date(),
+        processStartedAt: new Date(),
+      },
+    ]);
+    await db
+      .update(issues)
+      .set({ executionRunId: runningRunId, executionAgentNameKey: "codexcoder", executionLockedAt: new Date() })
+      .where(eq(issues.id, sourceIssueId));
+
+    const result = await svc.decomposeAcceptedPlan(sourceIssueId, {
+      acceptedPlanRevisionId,
+      children: [
+        {
+          title: "Implement the approved child",
+          status: "todo",
+          workMode: "standard",
+          priority: "medium",
+        },
+      ],
+      actorAgentId: assigneeAgentId,
+    });
+
+    expect(result.childIssueIds).toHaveLength(1);
+    const runRows = await db
+      .select({ id: heartbeatRuns.id, status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId));
+    expect(Object.fromEntries(runRows.map((run) => [run.id, run.status]))).toMatchObject({
+      [queuedRunId]: "cancelled",
+      [scheduledRunId]: "cancelled",
+      [runningRunId]: "running",
+    });
+    expect(Object.fromEntries(runRows.map((run) => [run.id, run.errorCode]))).toMatchObject({
+      [queuedRunId]: "accepted_plan_decomposition_has_children",
+      [scheduledRunId]: "accepted_plan_decomposition_has_children",
+      [runningRunId]: null,
+    });
+    const wakeRows = await db
+      .select({ id: agentWakeupRequests.id, status: agentWakeupRequests.status })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+    expect(Object.fromEntries(wakeRows.map((wake) => [wake.id, wake.status]))).toMatchObject({
+      [queuedWakeId]: "cancelled",
+      [scheduledWakeId]: "cancelled",
+      [runningWakeId]: "claimed",
+    });
+    const [sourceIssue] = await db
+      .select({
+        executionRunId: issues.executionRunId,
+        executionAgentNameKey: issues.executionAgentNameKey,
+        executionLockedAt: issues.executionLockedAt,
+      })
+      .from(issues)
+      .where(eq(issues.id, sourceIssueId));
+    expect(sourceIssue?.executionRunId).toBe(runningRunId);
+    expect(sourceIssue?.executionAgentNameKey).toBe("codexcoder");
+    expect(sourceIssue?.executionLockedAt).toBeTruthy();
   });
 
   it("serializes concurrent accepted-plan retries for the same parent issue without duplicate children", async () => {

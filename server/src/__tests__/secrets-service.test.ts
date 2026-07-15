@@ -193,6 +193,45 @@ describeEmbeddedPostgres("secretService", () => {
     });
   });
 
+  it("resolves env bindings from a provided config path prefix", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+    const secret = await svc.create(companyId, {
+      name: `project-env-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "project-runtime-value",
+    });
+    const env = {
+      PROJECT_API_KEY: {
+        type: "secret_ref" as const,
+        secretId: secret.id,
+        version: "latest" as const,
+      },
+    };
+
+    await svc.createBinding({
+      companyId,
+      secretId: secret.id,
+      targetType: "project",
+      targetId: "project-1",
+      configPath: "project.env.PROJECT_API_KEY",
+    });
+
+    const result = await svc.resolveEnvBindings(companyId, env, {
+      consumerType: "project",
+      consumerId: "project-1",
+      configPathPrefix: "project.env",
+    });
+
+    expect(result.env).toEqual({ PROJECT_API_KEY: "project-runtime-value" });
+    expect(result.secretKeys.has("PROJECT_API_KEY")).toBe(true);
+    expect(result.manifest[0]).toMatchObject({
+      configPath: "project.env.PROJECT_API_KEY",
+      envKey: "PROJECT_API_KEY",
+      bindingId: expect.any(String),
+    });
+  });
+
   it("reports reference counts and resolves binding target labels", async () => {
     const companyId = await seedCompany();
     const svc = secretService(db);
@@ -309,6 +348,35 @@ describeEmbeddedPostgres("secretService", () => {
       consumerId: "agent-1",
     });
     expect(afterBinding).toEqual([]);
+  });
+
+  it("collects missing runtime bindings from the provided config path prefix", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+    const secret = await svc.create(companyId, {
+      name: `profile-missing-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "runtime-secret",
+    });
+    const env = {
+      GEMINI_API_KEY: { type: "secret_ref" as const, secretId: secret.id, version: "latest" as const },
+    };
+
+    const missing = await svc.collectMissingRuntimeBindings(companyId, env, {
+      consumerType: "agent",
+      consumerId: "agent-1",
+      configPathPrefix: "runtimeConfig.modelProfiles.cheap.adapterConfig.env",
+    });
+
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toMatchObject({
+      consumerType: "agent",
+      consumerId: "agent-1",
+      configPath: "runtimeConfig.modelProfiles.cheap.adapterConfig.env.GEMINI_API_KEY",
+      envKey: "GEMINI_API_KEY",
+      secretId: secret.id,
+    });
+    expect(await svc.listAccessEvents(companyId, secret.id)).toHaveLength(0);
   });
 
   it("denies runtime secret resolution outside the low-trust binding allowlist", async () => {

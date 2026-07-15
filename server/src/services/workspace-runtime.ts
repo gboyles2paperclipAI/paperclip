@@ -1354,6 +1354,11 @@ async function quarantineDirtyWorktreeBranchIncoherence(input: {
   let rescueBranchCreated = false;
   let expectedBranchRestored = false;
   try {
+    const commonDirRaw = await runGit(["rev-parse", "--git-common-dir"], input.worktreePath);
+    const commonDir = path.isAbsolute(commonDirRaw)
+      ? commonDirRaw
+      : path.resolve(input.worktreePath, commonDirRaw);
+    const hooksPath = path.join(commonDir, "hooks");
     await assertGitIndexIsUnlocked(input.worktreePath);
     await recordGitOperation(input.recorder, {
       phase: input.phase ?? "worktree_prepare",
@@ -1375,6 +1380,8 @@ async function quarantineDirtyWorktreeBranchIncoherence(input: {
     await recordGitOperation(input.recorder, {
       phase: input.phase ?? "worktree_prepare",
       args: [
+        "-c",
+        `core.hooksPath=${hooksPath}`,
         "commit",
         "-m",
         "Paperclip dirty workspace rescue",

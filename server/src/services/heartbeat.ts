@@ -646,6 +646,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
   projectId?: string | null;
   routineId?: string | null;
   executionRunConfig: Record<string, unknown>;
+  executionRunEnvConfigPathPrefix?: string | null;
   projectEnv: unknown;
   routineEnv?: unknown;
   secretsSvc: RuntimeConfigSecretResolver;
@@ -711,6 +712,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
             consumerType: "environment",
             consumerId: input.environmentId,
             responsibleUserId: input.responsibleUserId ?? null,
+            configPathPrefix: "env",
           },
         )),
       );
@@ -724,6 +726,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
             consumerType: "agent",
             consumerId: input.agentId,
             responsibleUserId: input.responsibleUserId ?? null,
+            configPathPrefix: input.executionRunEnvConfigPathPrefix ?? "env",
           },
         )),
       );
@@ -751,6 +754,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
             consumerType: "project",
             consumerId: input.projectId,
             responsibleUserId: input.responsibleUserId ?? null,
+            configPathPrefix: "env",
           },
         )),
       );
@@ -764,6 +768,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
             consumerType: "routine",
             consumerId: input.routineId,
             responsibleUserId: input.responsibleUserId ?? null,
+            configPathPrefix: "env",
           },
         )),
       );
@@ -823,6 +828,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
               responsibleUserId: input.responsibleUserId ?? null,
               issueId: input.issueId ?? null,
               heartbeatRunId: input.heartbeatRunId ?? null,
+              configPathPrefix: "env",
               ...(lowTrustAllowedBindingIds !== undefined ? { allowedBindingIds: lowTrustAllowedBindingIds } : {}),
             }
           : undefined,
@@ -840,6 +846,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
           responsibleUserId: input.responsibleUserId ?? null,
           issueId: input.issueId ?? null,
           heartbeatRunId: input.heartbeatRunId ?? null,
+          configPathPrefix: input.executionRunEnvConfigPathPrefix ?? null,
           ...(lowTrustAllowedBindingIds !== undefined ? { allowedBindingIds: lowTrustAllowedBindingIds } : {}),
         }
       : undefined,
@@ -867,6 +874,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
               responsibleUserId: input.responsibleUserId ?? null,
               issueId: input.issueId ?? null,
               heartbeatRunId: input.heartbeatRunId ?? null,
+              configPathPrefix: "env",
               ...(lowTrustAllowedBindingIds !== undefined ? { allowedBindingIds: lowTrustAllowedBindingIds } : {}),
             }
           : undefined,
@@ -894,6 +902,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
               responsibleUserId: input.responsibleUserId ?? null,
               issueId: input.issueId ?? null,
               heartbeatRunId: input.heartbeatRunId ?? null,
+              configPathPrefix: "env",
               ...(lowTrustAllowedBindingIds !== undefined ? { allowedBindingIds: lowTrustAllowedBindingIds } : {}),
             }
           : undefined,
@@ -2697,6 +2706,11 @@ export function shouldResetTaskSessionForWake(
   if (contextSnapshot?.forceFreshSession === true) return true;
 
   const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
+  const wakeSource = readNonEmptyString(contextSnapshot?.wakeSource);
+  const wakeTriggerDetail = readNonEmptyString(contextSnapshot?.wakeTriggerDetail);
+  if (wakeSource === "on_demand" && (wakeTriggerDetail === "manual" || wakeTriggerDetail === "callback")) {
+    return true;
+  }
   if (
     wakeReason === "issue_assigned" ||
     wakeReason === "execution_review_requested" ||
@@ -7600,6 +7614,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         identifier: issues.identifier,
         title: issues.title,
         status: issues.status,
+        workMode: issues.workMode,
         assigneeAgentId: issues.assigneeAgentId,
         assigneeUserId: issues.assigneeUserId,
         executionPolicy: issues.executionPolicy,
@@ -8594,6 +8609,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .select({
         id: issues.id,
         status: issues.status,
+        workMode: issues.workMode,
         assigneeAgentId: issues.assigneeAgentId,
         executionRunId: issues.executionRunId,
         executionState: issues.executionState,
@@ -10240,7 +10256,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           | "issue_not_in_progress"
           | "issue_execution_lock_changed"
           | "issue_review_participant_changed"
-          | "issue_continuation_waiting_on_review";
+          | "issue_continuation_waiting_on_review"
+          | "accepted_plan_decomposition_has_children";
         details: Record<string, unknown>;
       };
 
@@ -10253,6 +10270,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .select({
         id: issues.id,
         status: issues.status,
+        workMode: issues.workMode,
         assigneeAgentId: issues.assigneeAgentId,
         executionRunId: issues.executionRunId,
         executionState: issues.executionState,
@@ -10275,6 +10293,48 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const resumeIntent = context.resumeIntent === true || context.followUpRequested === true;
     const wakeReason = readNonEmptyString(context.wakeReason);
     const retryReason = readNonEmptyString(context.retryReason) ?? run.scheduledRetryReason ?? null;
+    const isPlanningSourceRetryWake =
+      wakeReason === "issue_continuation_needed" ||
+      retryReason === "issue_continuation_needed" ||
+      wakeReason === "missing_issue_comment" ||
+      retryReason === "missing_issue_comment" ||
+      wakeReason === FINISH_SUCCESSFUL_RUN_HANDOFF_REASON ||
+      retryReason === FINISH_SUCCESSFUL_RUN_HANDOFF_REASON;
+
+    if (issue.workMode === "planning" && isPlanningSourceRetryWake) {
+      const decomposition = await db
+        .select({
+          id: issuePlanDecompositions.id,
+          status: issuePlanDecompositions.status,
+          childCount: sql<number>`jsonb_array_length(${issuePlanDecompositions.childIssueIds})::int`,
+        })
+        .from(issuePlanDecompositions)
+        .where(and(
+          eq(issuePlanDecompositions.companyId, run.companyId),
+          eq(issuePlanDecompositions.sourceIssueId, issueId),
+          sql`jsonb_array_length(${issuePlanDecompositions.childIssueIds}) > 0`,
+        ))
+        .orderBy(desc(issuePlanDecompositions.updatedAt), asc(issuePlanDecompositions.createdAt))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+
+      if (decomposition) {
+        return {
+          stale: true,
+          errorCode: "accepted_plan_decomposition_has_children",
+          reason:
+            "Cancelled because the accepted plan has already been decomposed into child work; the child issues own the next execution path",
+          details: {
+            issueId,
+            wakeReason,
+            retryReason,
+            decompositionId: decomposition.id,
+            decompositionStatus: decomposition.status,
+            childCount: decomposition.childCount,
+          },
+        };
+      }
+    }
 
     if (
       issue.status === "in_progress" &&

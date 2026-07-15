@@ -95,6 +95,7 @@ describe("resolveExecutionRunAdapterConfig", () => {
       executionRunConfig: { env: { SHARED_KEY: "agent" } },
       environmentId: "environment-1",
       environmentEnv: { SHARED_KEY: "environment" },
+      projectId: "project-1",
       projectEnv: { SHARED_KEY: "project" },
       routineEnv: { SHARED_KEY: "routine" },
       routineId: "routine-1",
@@ -128,10 +129,17 @@ describe("resolveExecutionRunAdapterConfig", () => {
     expect(resolveEnvBindings.mock.calls[0]?.[2]).toMatchObject({
       consumerType: "environment",
       consumerId: "environment-1",
+      configPathPrefix: "env",
+    });
+    expect(resolveEnvBindings.mock.calls[1]?.[2]).toMatchObject({
+      consumerType: "project",
+      consumerId: "project-1",
+      configPathPrefix: "env",
     });
     expect(resolveEnvBindings.mock.calls[2]?.[2]).toMatchObject({
       consumerType: "routine",
       consumerId: "routine-1",
+      configPathPrefix: "env",
     });
   });
 
@@ -157,6 +165,7 @@ describe("resolveExecutionRunAdapterConfig", () => {
       ],
     });
     const resolveEnvBindings = vi.fn();
+    const collectMissingRuntimeBindings = vi.fn().mockResolvedValue([]);
 
     const result = await resolveExecutionRunAdapterConfig({
       companyId: "company-1",
@@ -178,9 +187,15 @@ describe("resolveExecutionRunAdapterConfig", () => {
       secretsSvc: {
         resolveAdapterConfigForRuntime,
         resolveEnvBindings,
+        collectMissingRuntimeBindings,
       } as any,
     });
 
+    expect(collectMissingRuntimeBindings.mock.calls[0]?.[2]).toMatchObject({
+      consumerType: "agent",
+      consumerId: "agent-1",
+      configPathPrefix: "runtimeConfig.modelProfiles.cheap.adapterConfig.env",
+    });
     expect(resolveAdapterConfigForRuntime.mock.calls[0]?.[2]).toMatchObject({
       consumerType: "agent",
       consumerId: "agent-1",
@@ -409,6 +424,7 @@ describe("resolveExecutionRunAdapterConfig", () => {
     });
     expect(collectMissingRuntimeBindings.mock.calls[0]?.[2]).toMatchObject({
       responsibleUserId: "user-1",
+      configPathPrefix: "env",
     });
     expect(resolveAdapterConfigForRuntime).not.toHaveBeenCalled();
     expect(resolveEnvBindings).not.toHaveBeenCalled();
@@ -515,9 +531,15 @@ describe("resolveExecutionRunAdapterConfig", () => {
     });
     expect(resolveEnvBindings).toHaveBeenCalledOnce();
     expect(collectMissingRuntimeBindings).toHaveBeenCalledTimes(2);
+    expect(collectMissingRuntimeBindings.mock.calls[0]?.[2]).toMatchObject({
+      consumerType: "agent",
+      consumerId: "agent-1",
+      configPathPrefix: "env",
+    });
     expect(collectMissingRuntimeBindings.mock.calls[1]?.[2]).toMatchObject({
       consumerType: "project",
       consumerId: "project-1",
+      configPathPrefix: "env",
     });
   });
 });
