@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadShardDurations, selectGeneralServerShard } from "./general-server-shard.mjs";
@@ -265,11 +265,16 @@ function runVitest(args, label) {
   };
   mkdirSync(env.PAPERCLIP_HOME, { recursive: true });
   mkdirSync(env.TMPDIR, { recursive: true });
-  const result = spawnSync("pnpm", ["exec", "vitest", "run", ...args], {
-    cwd: repoRoot,
-    env,
-    stdio: "inherit",
-  });
+  let result;
+  try {
+    result = spawnSync("pnpm", ["exec", "vitest", "run", ...args], {
+      cwd: repoRoot,
+      env,
+      stdio: "inherit",
+    });
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
   if (result.error) {
     console.error(`[test:run] Failed to start Vitest: ${result.error.message}`);
     process.exit(1);
