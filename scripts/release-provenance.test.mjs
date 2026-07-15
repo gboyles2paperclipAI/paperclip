@@ -33,6 +33,7 @@ test("builds a stable sorted manifest and rejects version drift", () => {
     buildTimestamp: "2026-07-15T13:15:00.000Z",
     builderId: "github:gboyles2paperclipAI/paperclip/actions/runs/123",
     lockfile: { filename: "package-lock.json", sha256: "a".repeat(64) },
+    sourceLockfiles: { filename: "source-lockfiles.sha256", sha256: "f".repeat(64) },
     releaseMap: { filename: "release-package-manifest.json", sha256: "b".repeat(64) },
     sbom: { filename: "sbom.cdx.json", sha256: "c".repeat(64) },
     artifacts: [
@@ -43,6 +44,7 @@ test("builds a stable sorted manifest and rejects version drift", () => {
   const manifest = buildReleaseManifest(input);
   assert.deepEqual(manifest.artifacts.map((item) => item.package), ["@paperclipai/server", "paperclipai"]);
   assert.equal(manifest.distribution, "help2day");
+  assert.deepEqual(manifest.sourceLockfiles, input.sourceLockfiles);
 
   assert.throws(
     () => buildReleaseManifest({

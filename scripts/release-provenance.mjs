@@ -53,6 +53,7 @@ export function buildReleaseManifest({
   buildTimestamp,
   builderId,
   lockfile,
+  sourceLockfiles,
   sbom,
   releaseMap,
   artifacts,
@@ -98,6 +99,7 @@ export function buildReleaseManifest({
       builderId: normalizedBuilder,
     },
     lockfile,
+    sourceLockfiles,
     releaseMap,
     sbom,
     artifacts: normalizedArtifacts,
@@ -155,9 +157,11 @@ function parseArgs(argv) {
     "--build-timestamp",
     "--builder-id",
     "--lockfile",
+    "--source-lockfiles",
     "--release-map",
     "--sbom",
     "--artifact-index",
+    "--installed-packages",
     "--output",
   ];
   for (const flag of required) {
@@ -186,9 +190,17 @@ function main() {
       buildTimestamp: args.get("--build-timestamp"),
       builderId: args.get("--builder-id"),
       lockfile: { filename: basename(lockfilePath), sha256: sha256File(lockfilePath) },
+      sourceLockfiles: {
+        filename: basename(resolve(args.get("--source-lockfiles"))),
+        sha256: sha256File(resolve(args.get("--source-lockfiles"))),
+      },
       releaseMap: { filename: basename(releaseMapPath), sha256: sha256File(releaseMapPath) },
       sbom: { filename: basename(sbomPath), sha256: sha256File(sbomPath) },
       artifacts,
+      evidence: [{
+        filename: basename(resolve(args.get("--installed-packages"))),
+        sha256: sha256File(resolve(args.get("--installed-packages"))),
+      }],
     });
     writeFileSync(outputPath, `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" });
   } catch (error) {

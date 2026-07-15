@@ -197,8 +197,34 @@ run_logged production-lock npm install --prefix "$AUDIT_ROOT" --package-lock-onl
   --no-audit --no-fund --omit=dev --legacy-peer-deps
 cp -p "$AUDIT_ROOT/package-lock.json" "$OUTPUT/package-inventory/package-lock.json"
 cp -p "$REPO_ROOT/pnpm-lock.yaml" "$OUTPUT/package-inventory/pnpm-lock.yaml"
+mkdir -p "$OUTPUT/package-inventory/source-lockfiles"
+SOURCE_LOCKFILES=(
+  pnpm-lock.yaml
+  packages/plugins/sandbox-providers/cloudflare/pnpm-lock.yaml
+  packages/plugins/sandbox-providers/daytona/pnpm-lock.yaml
+  packages/plugins/sandbox-providers/e2b/pnpm-lock.yaml
+  packages/plugins/sandbox-providers/exe-dev/pnpm-lock.yaml
+  packages/plugins/sandbox-providers/kubernetes/pnpm-lock.yaml
+  packages/plugins/sandbox-providers/modal/pnpm-lock.yaml
+  packages/plugins/sandbox-providers/novita/pnpm-lock.yaml
+)
+for lockfile in "${SOURCE_LOCKFILES[@]}"; do
+  [[ -f "$REPO_ROOT/$lockfile" ]] || fail "required source lockfile is missing: $lockfile"
+  mkdir -p "$OUTPUT/package-inventory/source-lockfiles/$(dirname "$lockfile")"
+  cp -p "$REPO_ROOT/$lockfile" "$OUTPUT/package-inventory/source-lockfiles/$lockfile"
+done
+(
+  cd "$OUTPUT/package-inventory/source-lockfiles"
+  sha256sum "${SOURCE_LOCKFILES[@]}" > ../source-lockfiles.sha256
+)
 cp -p "$REPO_ROOT/scripts/release-package-manifest.json" \
   "$OUTPUT/package-inventory/release-package-manifest.json"
+
+run_logged production-install npm ci --prefix "$AUDIT_ROOT" --ignore-scripts \
+  --no-audit --no-fund --omit=dev --legacy-peer-deps
+node scripts/verify-installed-release-packages.mjs \
+  "$OUTPUT/package-inventory/artifacts.tsv" "$AUDIT_ROOT" \
+  "$OUTPUT/package-inventory/installed-packages.json"
 
 "$REPO_ROOT/node_modules/.bin/cyclonedx-npm" \
   --package-lock-only --omit dev --output-reproducible --spec-version 1.6 \
@@ -248,9 +274,11 @@ node scripts/release-provenance.mjs \
   --build-timestamp "$BUILD_TIMESTAMP" \
   --builder-id "$BUILDER_ID" \
   --lockfile "$OUTPUT/package-inventory/package-lock.json" \
+  --source-lockfiles "$OUTPUT/package-inventory/source-lockfiles.sha256" \
   --release-map "$OUTPUT/package-inventory/release-package-manifest.json" \
   --sbom "$OUTPUT/sbom.cdx.json" \
   --artifact-index "$OUTPUT/package-inventory/artifacts.tsv" \
+  --installed-packages "$OUTPUT/package-inventory/installed-packages.json" \
   --output "$OUTPUT/release-manifest.json"
 
 security_status=0

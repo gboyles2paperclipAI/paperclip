@@ -104,14 +104,17 @@ The governed evidence command requires a clean exact source commit and emits:
 
 - `release-manifest.json` binding the distribution version, full source commit,
   frozen upstream base, fork anchor, builder identity, UTC build timestamp,
-  production lock hash, release-map hash, SBOM hash, and every tarball hash
+  production lock hash, complete source-lock inventory hash, release-map hash,
+  SBOM hash, installed-package proof hash, and every tarball hash
 - `checksums.sha256` over the retained evidence files
 - `sbom.cdx.json`, generated reproducibly from the lifecycle-disabled production
   graph resolved from the exact staged tarballs
 - `security-results/` containing npm, OSV-Scanner, Grype, source-range gitleaks,
   package-content gitleaks, and a normalized fail-closed result
-- `package-inventory/`, `test-results/`, `runtime-proof/`, and
-  `release-report.md`
+- `package-inventory/` containing all root and standalone lockfiles, their
+  checksums, exact artifacts, and verification of every installed manifest and
+  concrete entrypoint
+- `test-results/`, `runtime-proof/`, and `release-report.md`
 
 An unavailable or malformed scanner result is an error. npm and Grype must have
 no high or critical production findings, and OSV findings require explicit

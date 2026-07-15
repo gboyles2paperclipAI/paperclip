@@ -170,7 +170,7 @@ function containsToken(value, normalizedTokens) {
   return normalizedTokens.some((token) => normalizedValue.includes(token));
 }
 
-function collectEntrypointTargets(value, targets) {
+export function collectEntrypointTargets(value, targets = new Set()) {
   if (typeof value === "string") {
     if (value.startsWith("./")) targets.add(value.slice(2));
     return;
@@ -182,6 +182,7 @@ function collectEntrypointTargets(value, targets) {
   if (value && typeof value === "object") {
     for (const entry of Object.values(value)) collectEntrypointTargets(entry, targets);
   }
+  return targets;
 }
 
 function wildcardPattern(target) {
