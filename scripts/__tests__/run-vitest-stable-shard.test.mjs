@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -169,4 +170,24 @@ test("the stable runner fail-closes when owned fixture cleanup cannot be verifie
   assert.equal(result.status, 1, result.stderr || result.stdout);
   assert.match(result.stdout, /fixture-cleanup-runner-settlement-target ok/);
   assert.doesNotMatch(result.stderr, /unhandled rejection/i);
+});
+
+test("compiled dist tests cannot be recollected by workspace Vitest projects", () => {
+  const sourceOnlyProjects = [
+    "server",
+    "packages/adapter-utils",
+    "packages/adapters/claude-local",
+    "packages/adapters/codex-local",
+    "packages/adapters/cursor-cloud",
+    "packages/adapters/cursor-local",
+    "packages/adapters/gemini-local",
+    "packages/adapters/grok-local",
+    "packages/adapters/opencode-local",
+    "packages/adapters/pi-local",
+  ];
+
+  for (const project of sourceOnlyProjects) {
+    const config = readFileSync(path.join(repoRoot, project, "vitest.config.ts"), "utf8");
+    assert.match(config, /include:\s*\["src\/\*\*\/\*\.test\.ts"\]/, project);
+  }
 });
