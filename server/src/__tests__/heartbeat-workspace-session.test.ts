@@ -1371,8 +1371,10 @@ describe("effective run execution workspace config freshness", () => {
     { name: "archived", status: "archived" },
   ])("fails loudly when the inherited workspace row is $name", async ({ status }) => {
     const reuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
+      issueId: "issue-1",
       issueExecutionWorkspaceId: "workspace-old",
       issueExecutionWorkspacePreference: "reuse_existing",
+      existingExecutionWorkspaceSourceIssueId: "issue-1",
       existingExecutionWorkspaceStatus: status,
     });
 
@@ -1403,6 +1405,20 @@ describe("effective run execution workspace config freshness", () => {
       realizeWorkspace,
     })).rejects.toThrow(/could not be restored/);
     expect(realizeWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("refuses to reuse an execution workspace owned by another issue", () => {
+    expect(resolveExecutionWorkspaceReuseRequestForIssue({
+      issueId: "issue-child",
+      issueExecutionWorkspaceId: "workspace-parent",
+      issueExecutionWorkspacePreference: "reuse_existing",
+      existingExecutionWorkspaceSourceIssueId: "issue-parent",
+      existingExecutionWorkspaceStatus: "active",
+    })).toEqual({
+      requestedExecutionWorkspaceId: "workspace-parent",
+      requestedShouldReuseExisting: true,
+      existingExecutionWorkspaceAvailable: false,
+    });
   });
 
   it("fails loudly when explicit reuse restore returns no workspace", async () => {

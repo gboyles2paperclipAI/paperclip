@@ -3081,19 +3081,27 @@ export type ExecutionWorkspaceReuseRequestForIssue = {
 };
 
 export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
+  issueId?: string | null;
   issueExecutionWorkspaceId?: string | null;
   issueExecutionWorkspacePreference?: string | null;
+  existingExecutionWorkspaceSourceIssueId?: string | null;
   existingExecutionWorkspaceStatus?: string | null;
 }): ExecutionWorkspaceReuseRequestForIssue {
   const requestedExecutionWorkspaceId = readNonEmptyString(input.issueExecutionWorkspaceId);
   const requestedShouldReuseExisting =
     input.issueExecutionWorkspacePreference === "reuse_existing" && requestedExecutionWorkspaceId !== null;
+  const issueId = readNonEmptyString(input.issueId);
+  const existingExecutionWorkspaceSourceIssueId = readNonEmptyString(
+    input.existingExecutionWorkspaceSourceIssueId,
+  );
 
   return {
     requestedExecutionWorkspaceId,
     requestedShouldReuseExisting,
     existingExecutionWorkspaceAvailable:
       requestedShouldReuseExisting &&
+      issueId !== null &&
+      existingExecutionWorkspaceSourceIssueId === issueId &&
       input.existingExecutionWorkspaceStatus !== null &&
       input.existingExecutionWorkspaceStatus !== undefined &&
       input.existingExecutionWorkspaceStatus !== "archived",
@@ -10524,6 +10532,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           | "issue_not_found"
           | "issue_assignee_changed"
           | "issue_terminal_status"
+          | "issue_blocked_status"
           | "issue_not_in_progress"
           | "issue_execution_lock_changed"
           | "issue_review_participant_changed"
@@ -10651,14 +10660,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     if (issue.status === "done" || issue.status === "cancelled") {
-      if (!resumeIntent && !wakeCommentId) {
-        return {
-          stale: true,
-          errorCode: "issue_terminal_status",
-          reason: `Cancelled because issue reached terminal status (${issue.status}) before the queued run could start`,
-          details: { issueId, currentStatus: issue.status },
-        };
-      }
+      return {
+        stale: true,
+        errorCode: "issue_terminal_status",
+        reason: `Cancelled because issue reached terminal status (${issue.status}) before the queued run could start`,
+        details: { issueId, currentStatus: issue.status },
+      };
     }
 
     if (retryReason === MAX_TURN_CONTINUATION_RETRY_REASON && issue.status !== "in_progress") {
@@ -10681,6 +10688,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           expectedExecutionRunId: run.id,
           currentExecutionRunId: issue.executionRunId,
         },
+      };
+    }
+
+    if (issue.status === "blocked" && !resumeIntent && !wakeCommentId && !isInteractionWake) {
+      return {
+        stale: true,
+        errorCode: "issue_blocked_status",
+        reason: "Cancelled because the issue is blocked and this queued run has no explicit resume, comment, or interaction intent",
+        details: { issueId, currentStatus: issue.status },
       };
     }
 
@@ -11771,8 +11787,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const existingExecutionWorkspace =
       requestedExecutionWorkspaceId ? await executionWorkspacesSvc.getById(requestedExecutionWorkspaceId) : null;
     const workspaceReuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
+      issueId: issueRef?.id ?? null,
       issueExecutionWorkspaceId: requestedExecutionWorkspaceId,
       issueExecutionWorkspacePreference: issueRef?.executionWorkspacePreference ?? null,
+      existingExecutionWorkspaceSourceIssueId: existingExecutionWorkspace?.sourceIssueId ?? null,
       existingExecutionWorkspaceStatus: existingExecutionWorkspace?.status ?? null,
     });
     const requestedShouldReuseExisting = workspaceReuseRequest.requestedShouldReuseExisting;
@@ -15577,20 +15595,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             legacyUseProjectWorkspace: null,
           });
           const resolvedStrategy = resolveEffectiveWorkspaceStrategyType(resolvedMode, workspaceManagedConfig);
-          const existingExecutionWorkspaceStatus = issue.executionWorkspaceId
+          const existingExecutionWorkspace = issue.executionWorkspaceId
             ? await tx
-              .select({ status: executionWorkspaces.status })
+              .select({
+                sourceIssueId: executionWorkspaces.sourceIssueId,
+                status: executionWorkspaces.status,
+              })
               .from(executionWorkspaces)
               .where(and(
                 eq(executionWorkspaces.id, issue.executionWorkspaceId),
                 eq(executionWorkspaces.companyId, issue.companyId),
               ))
-              .then((rows) => rows[0]?.status ?? null)
+              .then((rows) => rows[0] ?? null)
             : null;
           const reuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
+            issueId: issue.id,
             issueExecutionWorkspaceId: issue.executionWorkspaceId,
             issueExecutionWorkspacePreference: issue.executionWorkspacePreference,
-            existingExecutionWorkspaceStatus,
+            existingExecutionWorkspaceSourceIssueId: existingExecutionWorkspace?.sourceIssueId ?? null,
+            existingExecutionWorkspaceStatus: existingExecutionWorkspace?.status ?? null,
           });
           const hasResolvablePriorSessionWorkspace = await resolveHasResolvablePriorSessionWorkspace();
 
