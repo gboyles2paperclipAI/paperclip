@@ -155,6 +155,26 @@ describe("paperclip MCP tools", () => {
     });
   });
 
+  it("normalizes the legacy comment alias through the shared comment parser", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockJsonResponse({ id: "comment-1" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const tool = getTool("paperclipAddComment");
+    await tool.execute({
+      issueId: "PAP-1135",
+      comment: "Legacy comment body",
+      resume: true,
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({
+      body: "Legacy comment body",
+      resume: true,
+    });
+  });
+
   it("controls issue workspace services through the current execution workspace", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(mockJsonResponse({
