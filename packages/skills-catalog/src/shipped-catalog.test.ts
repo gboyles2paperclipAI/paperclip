@@ -33,11 +33,19 @@ const SKILL_FRONTMATTER_ROOTS = [
   path.join(REPO_ROOT, "packages/skills-catalog/catalog"),
   path.join(REPO_ROOT, "packages/teams-catalog/catalog"),
 ];
+const GENERATED_OR_DEPENDENCY_DIRS = new Set([
+  ".turbo",
+  "coverage",
+  "dist",
+  "node_modules",
+]);
 
 function listSkillFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const entryPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) return listSkillFiles(entryPath);
+    if (entry.isDirectory()) {
+      return GENERATED_OR_DEPENDENCY_DIRS.has(entry.name) ? [] : listSkillFiles(entryPath);
+    }
     if (entry.isFile() && entry.name === "SKILL.md") return [entryPath];
     return [];
   });
