@@ -345,6 +345,31 @@ describe("agent auth middleware", () => {
     });
   });
 
+  it("rejects malformed run headers on bearer auth before agent-key lookup", async () => {
+    const db = {
+      select() {
+        throw new Error("database lookup should not run for malformed run headers");
+      },
+      update() {
+        throw new Error("database update should not run for malformed run headers");
+      },
+      insert() {
+        throw new Error("database insert should not run for malformed run headers");
+      },
+    } as any;
+
+    const res = await request(createApp(db))
+      .get("/actor")
+      .set("Authorization", "Bearer pcp_test_agent_key")
+      .set("X-Paperclip-Run-Id", "not-a-real-heartbeat-run");
+
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({
+      error: "X-Paperclip-Run-Id must be a UUID",
+      code: "invalid_run_id_header",
+    });
+  });
+
   it("rejects agent keys that lack a responsible user binding and audits the denial", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

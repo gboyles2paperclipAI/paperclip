@@ -7,6 +7,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
+  agentRuntimeState,
   agentWakeupRequests,
   agents,
   approvals,
@@ -405,13 +406,14 @@ describe("Slack integration utilities", () => {
         "-E",
         `${legacyName}|${legacyName.toLowerCase()}|${legacyEnv}`,
         "--",
-        ".",
-        ":(exclude)packages/db/src/migrations/meta",
+        "server/src",
       ],
       { cwd: fileURLToPath(new URL("../../..", import.meta.url)), encoding: "utf8" },
     );
+    expect(result.error).toBeUndefined();
     expect(result.status).toBe(1);
     expect(result.stdout.trim()).toBe("");
+    expect(result.stderr.trim()).toBe("");
   });
 });
 
@@ -431,6 +433,7 @@ describeEmbeddedPostgres("Slack approval interactions", () => {
     await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
+    await db.delete(agentRuntimeState);
     await db.delete(issueApprovals);
     await db.delete(approvals);
     await db.delete(issues);

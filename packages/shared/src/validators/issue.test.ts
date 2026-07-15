@@ -91,7 +91,7 @@ describe("issue validators", () => {
     ).toBe(false);
   });
 
-  it("allows restored recovery resolutions to return the source issue to todo", () => {
+  it("allows restored recovery resolutions to return the source issue to todo or intentionally park it", () => {
     expect(
       resolveIssueRecoveryActionSchema.parse({
         outcome: "restored",
@@ -100,6 +100,16 @@ describe("issue validators", () => {
     ).toMatchObject({
       outcome: "restored",
       sourceIssueStatus: "todo",
+    });
+
+    expect(
+      resolveIssueRecoveryActionSchema.parse({
+        outcome: "restored",
+        sourceIssueStatus: "backlog",
+      }),
+    ).toMatchObject({
+      outcome: "restored",
+      sourceIssueStatus: "backlog",
     });
 
     expect(

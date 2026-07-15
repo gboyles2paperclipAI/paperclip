@@ -18,7 +18,7 @@ import type {
   SkillTestAgentKeyScope,
   TaskBridgeAgentKeyScope,
 } from "@paperclipai/shared";
-import { LOW_TRUST_REVIEW_PRESET, extractAgentMentionIds, type LowTrustBoundary } from "@paperclipai/shared";
+import { LOW_TRUST_REVIEW_PRESET, extractAgentMentionIds, isUuidLike, type LowTrustBoundary } from "@paperclipai/shared";
 import {
   LOW_TRUST_ISSUE_ANCESTRY_MAX_DEPTH,
   isIssueWithinLowTrustBoundary,
@@ -719,6 +719,7 @@ export function authorizationService(db: Db) {
 
   async function loadRunPolicy(runId: string | null | undefined, companyId: string, agentId: string) {
     if (!runId) return null;
+    if (!isUuidLike(runId)) return null;
     const row = await db
       .select({
         id: heartbeatRuns.id,
@@ -1607,6 +1608,13 @@ export function authorizationService(db: Db) {
         explanation: "Agent key cannot access another company.",
       });
     }
+    if (input.actor.runId && !isUuidLike(input.actor.runId)) {
+      return deny({
+        action: input.action,
+        reason: "deny_scope",
+        explanation: "Agent run id is malformed.",
+      });
+    }
 
     const actorAgent = await loadAgent(actorAgentId);
     if (!actorAgent || actorAgent.companyId !== companyId) {
@@ -1803,6 +1811,14 @@ export function authorizationService(db: Db) {
         scope: input.scope,
       });
       if (grantDecision.allowed) return grantDecision;
+    }
+
+    if (input.action === "issue:mutate" && input.resource.type === "issue" && canCreateAgentsLegacy(actorAgent)) {
+      return allow({
+        action: input.action,
+        reason: "allow_legacy_agent_creator",
+        explanation: "Allowed by legacy agent creator authority.",
+      });
     }
 
     if (

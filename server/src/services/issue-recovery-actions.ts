@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issueRecoveryActions } from "@paperclipai/db";
 import type {
@@ -47,6 +47,9 @@ export type ResolveIssueRecoveryActionInput = {
   status: Extract<IssueRecoveryActionStatus, "resolved" | "cancelled">;
   outcome: IssueRecoveryActionOutcome;
   resolutionNote?: string | null;
+  expectedOwnerType?: IssueRecoveryActionOwnerType | null;
+  expectedOwnerAgentId?: string | null;
+  expectedOwnerUserId?: string | null;
 };
 
 function toReadModel(row: IssueRecoveryActionRow): IssueRecoveryAction {
@@ -281,6 +284,23 @@ export function issueRecoveryActionService(db: Db) {
     }
     if (input.fingerprint) {
       predicates.push(eq(issueRecoveryActions.fingerprint, input.fingerprint));
+    }
+    if (input.expectedOwnerType) {
+      predicates.push(eq(issueRecoveryActions.ownerType, input.expectedOwnerType));
+    }
+    if (input.expectedOwnerAgentId !== undefined) {
+      predicates.push(
+        input.expectedOwnerAgentId === null
+          ? isNull(issueRecoveryActions.ownerAgentId)
+          : eq(issueRecoveryActions.ownerAgentId, input.expectedOwnerAgentId),
+      );
+    }
+    if (input.expectedOwnerUserId !== undefined) {
+      predicates.push(
+        input.expectedOwnerUserId === null
+          ? isNull(issueRecoveryActions.ownerUserId)
+          : eq(issueRecoveryActions.ownerUserId, input.expectedOwnerUserId),
+      );
     }
 
     const [updated] = await dbOrTx

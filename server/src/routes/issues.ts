@@ -4195,12 +4195,6 @@ export function issueRoutes(
       return true;
     }
     if (activeRecoveryAction.ownerAgentId === actorAgentId) return true;
-    if (
-      activeRecoveryAction.ownerAgentId &&
-      await hasActiveCheckoutManagementOverride(actorAgentId, issue.companyId, activeRecoveryAction.ownerAgentId)
-    ) {
-      return true;
-    }
 
     res.status(403).json({
       error: "Agent cannot resolve another owner's recovery action",
@@ -5564,8 +5558,16 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, existing.companyId);
-    if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
+    const { actionId, outcome, sourceIssueStatus, resolutionNote } = req.body;
     const activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(existing.companyId, existing.id);
+    const submittedActionMatchesActive =
+      Boolean(activeRecoveryAction) && (!actionId || actionId === activeRecoveryAction?.id);
+    const actorIsCurrentRecoveryOwner =
+      req.actor.type === "agent" &&
+      submittedActionMatchesActive &&
+      activeRecoveryAction?.ownerType === "agent" &&
+      activeRecoveryAction.ownerAgentId === req.actor.agentId;
+    if (!actorIsCurrentRecoveryOwner && !(await assertAgentIssueMutationAllowed(req, res, existing))) return;
     if (
       !(await assertRecoveryActionAuthority(
         req,
@@ -5578,7 +5580,6 @@ export function issueRoutes(
       return;
     }
 
-    const { actionId, outcome, sourceIssueStatus, resolutionNote } = req.body;
     if (outcome === "false_positive" || outcome === "cancelled") {
       assertBoard(req);
     }
@@ -5635,6 +5636,9 @@ export function issueRoutes(
           status: actionStatus,
           outcome,
           resolutionNote: resolutionNote ?? null,
+          expectedOwnerType: activeRecoveryAction?.ownerType ?? null,
+          expectedOwnerAgentId: activeRecoveryAction?.ownerAgentId ?? null,
+          expectedOwnerUserId: activeRecoveryAction?.ownerUserId ?? null,
         },
         tx,
       );

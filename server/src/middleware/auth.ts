@@ -28,6 +28,16 @@ function normalizeOptionalString(value: string | null | undefined) {
   return value?.trim() || null;
 }
 
+function normalizeOptionalRunId(value: string | null | undefined) {
+  const trimmed = normalizeOptionalString(value);
+  return trimmed && isUuidLike(trimmed) ? trimmed : null;
+}
+
+function malformedOptionalRunId(value: string | null | undefined) {
+  const trimmed = normalizeOptionalString(value);
+  return Boolean(trimmed && !isUuidLike(trimmed));
+}
+
 async function resolveLegacyRunResponsibleUserId(
   db: Db,
   input: { companyId: string; agentId: string; runId: string },
@@ -153,6 +163,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         : { type: "none", source: "none" };
 
     const runIdHeader = req.header("x-paperclip-run-id");
+    const normalizedRunIdHeader = normalizeOptionalRunId(runIdHeader);
 
     const authHeader = req.header("authorization");
     if (!authHeader?.toLowerCase().startsWith("bearer ")) {
@@ -161,7 +172,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         if (cloudTenantActor) {
           req.actor = {
             ...cloudTenantActor,
-            runId: runIdHeader ?? undefined,
+            runId: normalizedRunIdHeader ?? undefined,
           };
           next();
           return;
@@ -207,14 +218,14 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
             companyIds: memberships.map((row) => row.companyId),
             memberships,
             isInstanceAdmin: Boolean(roleRow),
-            runId: runIdHeader ?? undefined,
+            runId: normalizedRunIdHeader ?? undefined,
             source: "session",
           };
           next();
           return;
         }
       }
-      if (runIdHeader) req.actor.runId = runIdHeader;
+      if (normalizedRunIdHeader) req.actor.runId = normalizedRunIdHeader;
       next();
       return;
     }
@@ -222,6 +233,15 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
     const token = authHeader.slice("bearer ".length).trim();
     if (!token) {
       next();
+      return;
+    }
+
+    if (malformedOptionalRunId(runIdHeader)) {
+      next(
+        unprocessable("X-Paperclip-Run-Id must be a UUID", {
+          code: "invalid_run_id_header",
+        }),
+      );
       return;
     }
 
@@ -239,7 +259,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
           memberships: access.memberships,
           isInstanceAdmin: access.isInstanceAdmin,
           keyId: boardKey.id,
-          runId: runIdHeader || undefined,
+          runId: normalizedRunIdHeader || undefined,
           source: "board_key",
         };
         next();
@@ -277,7 +297,6 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         return;
       }
 
-      const normalizedRunIdHeader = normalizeOptionalString(runIdHeader);
       if (normalizedRunIdHeader && normalizedRunIdHeader !== claims.run_id) {
         await auditAgentJwtRunHeaderMismatch(db, {
           companyId: claims.company_id,
@@ -366,7 +385,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         companyId: key.companyId,
         userId: responsibleUserId,
       }),
-      runId: runIdHeader || undefined,
+      runId: normalizedRunIdHeader || undefined,
       source: "agent_key",
     };
 
