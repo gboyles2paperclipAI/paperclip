@@ -159,3 +159,14 @@ test("POSIX temp root falls back to /tmp when TMPDIR is absent", () => {
 test("Windows temp root keeps the platform default", () => {
   assert.equal(selectVitestTempRootParent({ TMPDIR: "/ignored" }, "win32"), os.tmpdir());
 });
+
+test("the stable runner fail-closes when owned fixture cleanup cannot be verified", () => {
+  const result = spawnSync(process.execPath, [script, "--fixture-cleanup-runner-settlement-target"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stdout, /fixture-cleanup-runner-settlement-target ok/);
+  assert.doesNotMatch(result.stderr, /unhandled rejection/i);
+});
