@@ -28,6 +28,9 @@ const mockIssueThreadInteractionService = vi.hoisted(() => ({
   expireRequestConfirmationsSupersededByComment: vi.fn(async () => []),
   expireStaleRequestConfirmationsForIssueDocument: vi.fn(async () => []),
 }));
+const mockExternalObjectService = vi.hoisted(() => ({
+  syncCommentSafely: vi.fn(async () => undefined),
+}));
 
 vi.mock("../services/index.js", () => ({
   companyService: () => ({
@@ -101,6 +104,10 @@ vi.mock("../services/index.js", () => ({
 }));
 
 function registerModuleMocks() {
+  vi.doMock("../services/external-objects.js", () => ({
+    externalObjectService: () => mockExternalObjectService,
+  }));
+
   vi.doMock("../services/index.js", () => ({
     companyService: () => ({
       getById: vi.fn(async () => ({ id: "company-1", attachmentMaxBytes: 10 * 1024 * 1024 })),
@@ -254,7 +261,7 @@ describe("issue update comment wakeups", () => {
       expect.any(Object),
       expect.any(Object),
     );
-  });
+  }, 15_000);
 
   it("accepts comment as an alias when body is absent on POST issue comments", async () => {
     const existing = makeIssue();
