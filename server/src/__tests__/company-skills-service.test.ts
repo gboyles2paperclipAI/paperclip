@@ -1594,7 +1594,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
       slug: "runtime-coach",
       name: "Runtime Coach",
       description: null,
-      markdown: "# Runtime Coach\n\nRecovered from DB.\n",
+      markdown: "---\nname: Runtime Coach\n---\n\n# Runtime Coach\n\nRecovered from DB.\n",
       sourceType: "local_path",
       sourceLocator: missingSkillDir,
       trustLevel: "markdown_only",
@@ -1624,7 +1624,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
       sourceStatus: "available",
     });
     await expect(fs.readFile(path.join(entry!.source, "SKILL.md"), "utf8")).resolves.toBe(
-      "# Runtime Coach\n\nRecovered from DB.\n",
+      "---\nname: Runtime Coach\n---\n\n# Runtime Coach\n\nRecovered from DB.\n",
     );
   });
 

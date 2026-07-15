@@ -49,6 +49,7 @@ import {
   heartbeatRuns,
   issueApprovals,
   issueComments,
+  issueExecutionDecisions,
   issuePlanDecompositions,
   issueRecoveryActions,
   issueRelations,
@@ -294,6 +295,7 @@ const LIVENESS_BOOKKEEPING_ACTIVITY_ACTIONS = [
 ];
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 const WAKE_COMMENT_IDS_KEY = "wakeCommentIds";
+const STALE_IN_REVIEW_WINDOW_MS = 2 * 60 * 60 * 1000;
 const PAPERCLIP_WAKE_PAYLOAD_KEY = "paperclipWake";
 const PAPERCLIP_HARNESS_CHECKOUT_KEY = "paperclipHarnessCheckedOut";
 const DETACHED_PROCESS_ERROR_CODE = "process_detached";
@@ -6660,6 +6662,210 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     return {
       checked: dueMonitors.length,
+      triggered,
+      skipped,
+    };
+  }
+
+  async function tickStaleInReviewEscalations(now = new Date()) {
+    const staleThreshold = new Date(now.getTime() - STALE_IN_REVIEW_WINDOW_MS);
+    const staleIssues = await db
+      .select({
+        id: issues.id,
+        companyId: issues.companyId,
+        identifier: issues.identifier,
+        title: issues.title,
+        assigneeAgentId: issues.assigneeAgentId,
+        updatedAt: issues.updatedAt,
+      })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.status, "in_review"),
+          isNull(issues.assigneeUserId),
+          sql`${issues.assigneeAgentId} is not null`,
+          isNull(issues.hiddenAt),
+          lte(issues.updatedAt, staleThreshold),
+        ),
+      )
+      .orderBy(asc(issues.updatedAt))
+      .limit(50);
+
+    let triggered = 0;
+    let skipped = 0;
+
+    for (const issue of staleIssues) {
+      const staleSince = issue.updatedAt;
+      const hasRecentReviewerComment = await db
+        .select({ id: issueComments.id })
+        .from(issueComments)
+        .where(
+          and(
+            eq(issueComments.companyId, issue.companyId),
+            eq(issueComments.issueId, issue.id),
+            gt(issueComments.createdAt, staleSince),
+            lte(issueComments.createdAt, now),
+            or(
+              sql`${issueComments.authorUserId} is not null`,
+              sql`${issueComments.authorAgentId} is null`,
+              issue.assigneeAgentId ? sql`${issueComments.authorAgentId} <> ${issue.assigneeAgentId}` : sql`true`,
+            ),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (hasRecentReviewerComment) {
+        skipped += 1;
+        continue;
+      }
+
+      const hasRecentReviewerDecision = await db
+        .select({ id: issueExecutionDecisions.id })
+        .from(issueExecutionDecisions)
+        .where(
+          and(
+            eq(issueExecutionDecisions.companyId, issue.companyId),
+            eq(issueExecutionDecisions.issueId, issue.id),
+            gt(issueExecutionDecisions.createdAt, staleSince),
+            lte(issueExecutionDecisions.createdAt, now),
+            or(
+              sql`${issueExecutionDecisions.actorUserId} is not null`,
+              sql`${issueExecutionDecisions.actorAgentId} is null`,
+              issue.assigneeAgentId
+                ? sql`${issueExecutionDecisions.actorAgentId} <> ${issue.assigneeAgentId}`
+                : sql`true`,
+            ),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (hasRecentReviewerDecision) {
+        skipped += 1;
+        continue;
+      }
+
+      const assignee = issue.assigneeAgentId
+        ? await db
+          .select({ id: agents.id, status: agents.status })
+          .from(agents)
+          .where(and(eq(agents.companyId, issue.companyId), eq(agents.id, issue.assigneeAgentId)))
+          .limit(1)
+          .then((rows) => rows[0] ?? null)
+        : null;
+      const cto = await db
+        .select({ id: agents.id, status: agents.status })
+        .from(agents)
+        .where(and(eq(agents.companyId, issue.companyId), eq(agents.role, "cto")))
+        .orderBy(asc(agents.createdAt))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      const assigneeIsRunnable = assignee && assignee.status === "active";
+      const targetAgentId = assigneeIsRunnable ? assignee.id : (cto?.status === "active" ? cto.id : null);
+      if (!targetAgentId) {
+        skipped += 1;
+        continue;
+      }
+
+      const staleSinceIso = staleSince.toISOString();
+      const idempotencyKey = `issue-review-stale:${issue.id}:${staleSinceIso}`;
+      const existingWake = await db
+        .select({ id: agentWakeupRequests.id })
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, issue.companyId),
+            eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (existingWake) {
+        skipped += 1;
+        continue;
+      }
+
+      const staleHours = ((now.getTime() - staleSince.getTime()) / (60 * 60 * 1000)).toFixed(1);
+      const wake = await enqueueWakeup(targetAgentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_review_stale",
+        idempotencyKey,
+        payload: {
+          issueId: issue.id,
+          issueIdentifier: issue.identifier,
+          staleSince: staleSinceIso,
+          staleHours,
+          escalatedToCto: !assigneeIsRunnable,
+        },
+        requestedByActorType: "system",
+        requestedByActorId: "heartbeat_scheduler",
+        contextSnapshot: {
+          issueId: issue.id,
+          source: "review.stale",
+          wakeReason: "issue_review_stale",
+          staleSince: staleSinceIso,
+          staleHours,
+          escalatedToCto: !assigneeIsRunnable,
+        },
+      });
+      if (!wake) {
+        skipped += 1;
+        continue;
+      }
+
+      const existingComment = await db
+        .select({ id: issueComments.id })
+        .from(issueComments)
+        .where(
+          and(
+            eq(issueComments.companyId, issue.companyId),
+            eq(issueComments.issueId, issue.id),
+            eq(issueComments.authorType, "system"),
+            sql`${issueComments.body} like ${`%stale in_review auto-escalation%`}`,
+            gt(issueComments.createdAt, staleSince),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (!existingComment) {
+        const notice = [
+          "System monitor: stale in_review auto-escalation",
+          `Issue has been in \`in_review\` for ~${staleHours}h without reviewer action since ${staleSinceIso}.`,
+          assigneeIsRunnable
+            ? "Queued a deduplicated wake to the assignee (`issue_review_stale`)."
+            : "Assignee is not runnable; queued a deduplicated wake to CTO (`issue_review_stale`).",
+        ].join("\n");
+        await issuesSvc.addComment(
+          issue.id,
+          notice,
+          {},
+          { authorType: "system" },
+        );
+      }
+
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: "system",
+        actorId: "heartbeat_scheduler",
+        agentId: null,
+        runId: null,
+        action: "issue.review_stale_wake_queued",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          identifier: issue.identifier,
+          staleSince: staleSinceIso,
+          staleHours,
+          targetAgentId,
+          escalatedToCto: !assigneeIsRunnable,
+        },
+      });
+
+      triggered += 1;
+    }
+
+    return {
+      checked: staleIssues.length,
       triggered,
       skipped,
     };
@@ -16593,11 +16799,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
 
       const issueMonitors = await tickDueIssueMonitors(now);
+      const staleInReview = await tickStaleInReviewEscalations(now);
 
       return {
-        checked: checked + issueMonitors.checked,
-        enqueued: enqueued + issueMonitors.triggered,
-        skipped: skipped + issueMonitors.skipped,
+        checked: checked + issueMonitors.checked + staleInReview.checked,
+        enqueued: enqueued + issueMonitors.triggered + staleInReview.triggered,
+        skipped: skipped + issueMonitors.skipped + staleInReview.skipped,
       };
     },
 
