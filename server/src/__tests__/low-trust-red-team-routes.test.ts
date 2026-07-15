@@ -44,7 +44,10 @@ import { parseWakePayloadFromMessage } from "./helpers/wake-message.js";
 import { errorHandler } from "../middleware/index.js";
 import { agentRoutes } from "../routes/agents.js";
 import { issueRoutes } from "../routes/issues.js";
-import { heartbeatService } from "../services/heartbeat.js";
+import {
+  heartbeatService,
+  waitForAllHeartbeatRunExecutionsDrain,
+} from "../services/heartbeat.js";
 import { LOW_TRUST_QUARANTINED_BODY } from "../services/source-trust.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -651,6 +654,7 @@ describeEmbeddedPostgres("low-trust red-team HTTP route regression suite", () =>
   }, 20_000);
 
   afterEach(async () => {
+    await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs: 15_000 });
     await db.delete(issueThreadInteractions);
     await db.delete(issueApprovals);
     await db.delete(approvals);

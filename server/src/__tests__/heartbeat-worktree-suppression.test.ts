@@ -22,7 +22,11 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { heartbeatService, resolveHeartbeatSchedulingSuppression } from "../services/heartbeat.ts";
+import {
+  heartbeatService,
+  resolveHeartbeatSchedulingSuppression,
+  waitForAllHeartbeatRunExecutionsDrain,
+} from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -66,6 +70,7 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs: 15_000 });
     await db.delete(issueComments);
     await db.delete(issueDocuments);
     await db.delete(documentRevisions);

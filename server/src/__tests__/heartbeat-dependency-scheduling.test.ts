@@ -27,7 +27,10 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { heartbeatService } from "../services/heartbeat.ts";
+import {
+  heartbeatService,
+  waitForAllHeartbeatRunExecutionsDrain,
+} from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
 
 const mockAdapterExecute = vi.hoisted(() =>
@@ -100,6 +103,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
   }, 20_000);
 
   afterEach(async () => {
+    await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs: 15_000 });
     mockAdapterExecute.mockReset();
     mockAdapterExecute.mockImplementation(async () => ({
       exitCode: 0,
