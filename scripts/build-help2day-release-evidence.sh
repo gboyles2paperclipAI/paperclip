@@ -103,6 +103,9 @@ mkdir -p "$OUTPUT/packages" "$OUTPUT/package-inventory" "$OUTPUT/security-result
   "$OUTPUT/test-results" "$OUTPUT/runtime-proof" "$OUTPUT/work"
 
 restore_sources() {
+  if [[ -f "$REPO_ROOT/cli/package.dev.json" ]]; then
+    mv "$REPO_ROOT/cli/package.dev.json" "$REPO_ROOT/cli/package.json"
+  fi
   if [[ -n "$BACKUP_ROOT" && -d "$BACKUP_ROOT" ]]; then
     while IFS=$'\t' read -r pkg_dir _name _version; do
       [[ -n "$pkg_dir" ]] || continue
@@ -110,14 +113,14 @@ restore_sources() {
     done < "$BACKUP_ROOT/release-packages.tsv"
     cp -p "$BACKUP_ROOT/cli-src-index.ts" "$REPO_ROOT/cli/src/index.ts"
   fi
-  if [[ -f "$REPO_ROOT/cli/package.dev.json" ]]; then
-    mv "$REPO_ROOT/cli/package.dev.json" "$REPO_ROOT/cli/package.json"
-  fi
   if [[ -f "$BACKUP_ROOT/cli-README.md" ]]; then
     cp -p "$BACKUP_ROOT/cli-README.md" "$REPO_ROOT/cli/README.md"
   else
     rm -f "$REPO_ROOT/cli/README.md"
   fi
+  for pkg_dir in server packages/adapters/claude-local packages/adapters/codex-local; do
+    rm -rf "$REPO_ROOT/$pkg_dir/skills"
+  done
 }
 
 cleanup() {
@@ -212,7 +215,7 @@ writeFileSync(outputPath, `${JSON.stringify({ name: "paperclip-help2day-release-
 NODE
 
 run_logged production-lock npm install --prefix "$AUDIT_ROOT" --package-lock-only --ignore-scripts \
-  --no-audit --no-fund --omit=dev --legacy-peer-deps
+  --no-audit --no-fund --omit=dev
 cp -p "$AUDIT_ROOT/package-lock.json" "$OUTPUT/package-inventory/package-lock.json"
 cp -p "$REPO_ROOT/pnpm-lock.yaml" "$OUTPUT/package-inventory/pnpm-lock.yaml"
 mkdir -p "$OUTPUT/package-inventory/source-lockfiles"
@@ -239,7 +242,7 @@ cp -p "$REPO_ROOT/scripts/release-package-manifest.json" \
   "$OUTPUT/package-inventory/release-package-manifest.json"
 
 run_logged production-install npm ci --prefix "$AUDIT_ROOT" --ignore-scripts \
-  --no-audit --no-fund --omit=dev --legacy-peer-deps
+  --no-audit --no-fund --omit=dev
 node scripts/verify-installed-release-packages.mjs \
   "$OUTPUT/package-inventory/artifacts.tsv" "$AUDIT_ROOT" \
   "$OUTPUT/package-inventory/installed-packages.json"

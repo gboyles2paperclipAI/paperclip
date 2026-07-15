@@ -164,6 +164,16 @@ test("Help2day source evidence is isolated from publication and runtime activati
   assert.match(evidence, /heartbeat-settlement-errors\.log/);
   assert.match(evidence, /CONNECTION_\(ENDED\|DESTROYED\)/);
   assert.match(evidence, /skipping late \(setup failure\|adapter failure\|run\) finalization/);
+  assert.doesNotMatch(evidence, /--legacy-peer-deps/);
+  assert.ok(
+    evidence.indexOf('mv "$REPO_ROOT/cli/package.dev.json" "$REPO_ROOT/cli/package.json"') <
+      evidence.indexOf('cp -p "$BACKUP_ROOT/$pkg_dir/package.json" "$REPO_ROOT/$pkg_dir/package.json"'),
+    "the authoritative package backup must be restored after the temporary CLI development manifest",
+  );
+  assert.match(
+    evidence,
+    /for pkg_dir in server packages\/adapters\/claude-local packages\/adapters\/codex-local; do[\s\S]*rm -rf "\$REPO_ROOT\/\$pkg_dir\/skills"/,
+  );
   assert.match(evidence, /BACKUP_ROOT\/cli-README\.md/);
   assert.match(
     evidence,
