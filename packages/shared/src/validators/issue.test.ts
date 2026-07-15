@@ -48,6 +48,14 @@ describe("issue validators", () => {
     expect(parsed.comment).toBe("Done\n\n- Verified the route");
   });
 
+  it("normalizes generated client issue update comment payloads", () => {
+    const parsed = updateIssueSchema.parse({
+      comment: { body: "Done\\n\\n- Verified the route" },
+    });
+
+    expect(parsed.comment).toBe("Done\n\n- Verified the route");
+  });
+
   it("keeps issue attribution fields create-only", () => {
     const created = createIssueSchema.parse({
       title: "Preserve attribution input for route checks",
@@ -165,6 +173,29 @@ describe("issue validators", () => {
     });
 
     expect(parsed.body).toBe("Progress update\n\nNext action.");
+  });
+
+  it("accepts legacy issue comment payloads and normalizes comment to body", () => {
+    const parsed = addIssueCommentSchema.parse({
+      comment: "Progress update\\n\\nNext action.",
+    });
+
+    expect(parsed.body).toBe("Progress update\n\nNext action.");
+  });
+
+  it("keeps canonical issue comment body when body and comment are both provided", () => {
+    const parsed = addIssueCommentSchema.parse({
+      body: "Canonical body",
+      comment: "Legacy comment",
+    });
+
+    expect(parsed.body).toBe("Canonical body");
+  });
+
+  it("rejects issue comment payloads missing body and comment", () => {
+    expect(addIssueCommentSchema.safeParse({
+      authorType: "agent",
+    }).success).toBe(false);
   });
 
   it("accepts structured issue comment presentation and metadata", () => {

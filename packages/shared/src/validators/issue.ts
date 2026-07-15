@@ -458,6 +458,22 @@ export const createIssueLabelSchema = z.object({
 
 export type CreateIssueLabel = z.infer<typeof createIssueLabelSchema>;
 
+function normalizeIssueCommentBodyInput(input: unknown) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const raw = input as Record<string, unknown>;
+  if (raw.body !== undefined || typeof raw.comment !== "string") return input;
+  return {
+    ...raw,
+    body: raw.comment,
+  };
+}
+
+const issueCommentTextInputSchema = z.preprocess((input) => {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const raw = input as Record<string, unknown>;
+  return typeof raw.body === "string" ? raw.body : input;
+}, multilineTextSchema.pipe(z.string().min(1)));
+
 export const updateIssueSchema = createIssueBaseSchema.omit({
   createdByUserId: true,
   responsibleUserId: true,
@@ -465,7 +481,7 @@ export const updateIssueSchema = createIssueBaseSchema.omit({
 }).partial().extend({
   requestDepth: issueRequestDepthInputSchema.optional(),
   assigneeAgentId: z.string().trim().min(1).optional().nullable(),
-  comment: multilineTextSchema.pipe(z.string().min(1)).optional(),
+  comment: issueCommentTextInputSchema.optional(),
   reviewRequest: issueReviewRequestSchema.optional().nullable(),
   reopen: z.boolean().optional(),
   resume: z.boolean().optional(),
@@ -568,7 +584,7 @@ export const issueCommentMetadataSchema = z.object({
 
 export type IssueCommentMetadata = z.infer<typeof issueCommentMetadataSchema>;
 
-export const addIssueCommentSchema = z.object({
+export const addIssueCommentSchema = z.preprocess(normalizeIssueCommentBodyInput, z.object({
   body: multilineTextSchema.pipe(z.string().min(1)),
   authorType: issueCommentAuthorTypeSchema.optional(),
   presentation: issueCommentPresentationSchema.nullable().optional(),
@@ -576,7 +592,7 @@ export const addIssueCommentSchema = z.object({
   reopen: z.boolean().optional(),
   resume: z.boolean().optional(),
   interrupt: z.boolean().optional(),
-});
+}));
 
 export type AddIssueComment = z.infer<typeof addIssueCommentSchema>;
 
