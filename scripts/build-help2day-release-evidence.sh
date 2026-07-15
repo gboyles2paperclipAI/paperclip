@@ -51,7 +51,7 @@ for value in VERSION OUTPUT UPSTREAM_BASE FORK_ANCHOR BUILD_TIMESTAMP BUILDER_ID
   [[ -n "${!value}" ]] || fail "missing required ${value,,}"
 done
 
-for command in git node pnpm npm jq sha256sum tar gitleaks osv-scanner grype; do
+for command in git node pnpm npm jq rg sha256sum tar gitleaks osv-scanner grype; do
   command -v "$command" >/dev/null 2>&1 || fail "required tool is unavailable: $command"
 done
 
@@ -141,6 +141,11 @@ fi
 cd "$REPO_ROOT"
 run_logged typecheck pnpm -r typecheck
 run_logged tests pnpm test:run
+if rg -n \
+  'CONNECTION_ENDED|violates foreign key constraint|failed to refresh issue continuation summary|queued heartbeat execution failed|failed to release environment lease for heartbeat run' \
+  "$OUTPUT/test-results/tests.log" > "$OUTPUT/test-results/heartbeat-settlement-errors.log"; then
+  fail "test output contains late heartbeat settlement errors"
+fi
 run_logged standalone-tests node scripts/test-standalone-public-packages.mjs
 run_logged workspace-build pnpm build
 run_logged standalone-build node scripts/build-standalone-public-packages.mjs
