@@ -33,7 +33,10 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { heartbeatService } from "../services/heartbeat.ts";
+import {
+  heartbeatService,
+  waitForAllHeartbeatRunExecutionsDrain,
+} from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import { issueService } from "../services/issues.ts";
 
@@ -112,6 +115,7 @@ describeEmbeddedPostgres("accepted plan workspace refresh", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs: 15_000 });
     adapterExecute.mockClear();
     let idlePolls = 0;
     for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -162,6 +166,7 @@ describeEmbeddedPostgres("accepted plan workspace refresh", () => {
   });
 
   afterAll(async () => {
+    await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs: 15_000 });
     await db.$client.end();
     await tempDb?.cleanup();
   });

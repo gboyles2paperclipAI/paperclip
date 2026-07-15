@@ -99,6 +99,7 @@ import {
   INTERACTION_CONTINUATION_INFRA_WAKE_REASON,
   heartbeatService,
   redactDetectedSuccessfulRunProgressSummaryForBoard,
+  waitForAllHeartbeatRunExecutionsDrain,
 } from "../services/heartbeat.ts";
 import { secretService } from "../services/secrets.ts";
 import {
@@ -184,6 +185,7 @@ async function waitForHeartbeatIdle(
       })
       .from(heartbeatRuns);
     if (!runs.some((run) => run.status === "queued" || run.status === "running")) {
+      await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs });
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 50));

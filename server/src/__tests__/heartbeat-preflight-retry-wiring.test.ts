@@ -59,7 +59,10 @@ vi.mock("../adapters/index.ts", async () => {
   };
 });
 
-import { heartbeatService } from "../services/heartbeat.ts";
+import {
+  heartbeatService,
+  waitForAllHeartbeatRunExecutionsDrain,
+} from "../services/heartbeat.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -121,7 +124,10 @@ async function waitForHeartbeatIdle(
       .select({ total: sql<number>`count(*)::integer` })
       .from(environmentLeases)
       .where(eq(environmentLeases.status, "active"));
-    if (Number(activeRunRow?.total ?? 0) === 0 && Number(activeLeaseRow?.total ?? 0) === 0) return;
+    if (Number(activeRunRow?.total ?? 0) === 0 && Number(activeLeaseRow?.total ?? 0) === 0) {
+      await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs });
+      return;
+    }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }

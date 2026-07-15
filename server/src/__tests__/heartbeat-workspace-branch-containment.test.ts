@@ -35,7 +35,10 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { heartbeatService } from "../services/heartbeat.ts";
+import {
+  heartbeatService,
+  waitForAllHeartbeatRunExecutionsDrain,
+} from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import {
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_CODE,
@@ -177,7 +180,10 @@ async function waitForHeartbeatIdle(db: Db, timeoutMs = 5_000) {
     const runs = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns);
     if (!runs.some((run) => run.status === "queued" || run.status === "running")) {
       idleSince ??= Date.now();
-      if (Date.now() - idleSince >= 250) return;
+      if (Date.now() - idleSince >= 250) {
+        await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs });
+        return;
+      }
     } else {
       idleSince = null;
     }
@@ -915,6 +921,7 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
   });
 
   afterAll(async () => {
+    await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs: 15_000 });
     await db.$client.end();
     await tempDb?.cleanup();
   });

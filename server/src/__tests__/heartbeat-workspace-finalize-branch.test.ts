@@ -34,7 +34,10 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { heartbeatService } from "../services/heartbeat.ts";
+import {
+  heartbeatService,
+  waitForAllHeartbeatRunExecutionsDrain,
+} from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 
 const execFileAsync = promisify(execFile);
@@ -111,7 +114,10 @@ async function waitForHeartbeatIdle(db: Db, timeoutMs = 10_000) {
     ]);
     const runActive = runs.some((run) => run.status === "queued" || run.status === "running");
     const agentFinalizing = agentRows.some((agent) => agent.status === "running");
-    if (!runActive && !agentFinalizing) return;
+    if (!runActive && !agentFinalizing) {
+      await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs });
+      return;
+    }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error("Timed out waiting for heartbeat execution post-processing to finish");
@@ -318,6 +324,7 @@ describeEmbeddedPostgres("heartbeat workspace finalization branch guard", () => 
   });
 
   afterAll(async () => {
+    await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs: 15_000 });
     await db.$client.end();
     await tempDb?.cleanup();
   });

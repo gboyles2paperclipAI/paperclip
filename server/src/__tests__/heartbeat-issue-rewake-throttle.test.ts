@@ -21,7 +21,10 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { heartbeatService } from "../services/heartbeat.ts";
+import {
+  heartbeatService,
+  waitForAllHeartbeatRunExecutionsDrain,
+} from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
 
 const mockAdapterExecute = vi.hoisted(() =>
@@ -68,16 +71,15 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
   }, 20_000);
 
   afterEach(async () => {
-    runningProcesses.clear();
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const runs = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns);
       if (!runs.some((run) => run.status === "queued" || run.status === "running")) break;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    // Post-run bookkeeping (run-event records, follow-up wake scheduling) can
-    // still write for a moment after a run reaches a terminal status, so a
-    // single delete sweep can hit a foreign-key violation when a late insert
-    // lands between two deletes. Retry the sweep until it goes through clean.
+    await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs: 15_000 });
+    runningProcesses.clear();
+    // Execution settlement above is the required late-write barrier. Retain a
+    // bounded retry only for transactional cleanup contention.
     for (let attempt = 0; ; attempt += 1) {
       try {
         await db.delete(environmentLeases);
