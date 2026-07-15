@@ -83,6 +83,11 @@ import { costService } from "./costs.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { companySkillService } from "./company-skills.js";
+import {
+  activeHeartbeatRunExecutionPromises,
+  activeHeartbeatRunExecutions,
+  waitForAllHeartbeatRunExecutionsDrain,
+} from "./heartbeat-execution-registry.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService, type MissingRuntimeBinding } from "./secrets.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
@@ -552,28 +557,7 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
   "opencode_local",
   "pi_local",
 ]);
-// Routes and the scheduler construct separate heartbeatService instances, but
-// they must agree on in-process adapter executions when reaping stale runs.
-const activeRunExecutions = new Set<string>();
-const activeRunExecutionPromises = new Set<Promise<void>>();
-
-export async function waitForAllHeartbeatRunExecutionsDrain(
-  options: { timeoutMs?: number; intervalMs?: number } = {},
-) {
-  const timeoutMs = options.timeoutMs ?? 10_000;
-  const intervalMs = options.intervalMs ?? 25;
-  const deadline = Date.now() + timeoutMs;
-  while (activeRunExecutionPromises.size > 0) {
-    if (Date.now() >= deadline) {
-      const runIds = [...activeRunExecutions].sort();
-      throw new Error(
-        `Timed out waiting for ${activeRunExecutionPromises.size} heartbeat execution(s) to drain; ` +
-        `run ids: ${runIds.length > 0 ? runIds.join(", ") : "registration pending"}`,
-      );
-    }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-}
+export { waitForAllHeartbeatRunExecutionsDrain };
 const INLINE_BASE64_IMAGE_DATA_RE = /("type":"image","source":\{"type":"base64","data":")([A-Za-z0-9+/=]{1024,})(")/g;
 
 type RuntimeConfigSecretResolver = Pick<
@@ -5265,7 +5249,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const workspaceOperationsSvc = workspaceOperationService(db);
   const liveRunExecutions = {
     has(id: string) {
-      return runningProcesses.has(id) || activeRunExecutions.has(id);
+      return runningProcesses.has(id) || activeHeartbeatRunExecutions.has(id);
     },
   };
   const budgetHooks = {
@@ -11106,7 +11090,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const reaped: string[] = [];
 
     for (const { run, adapterType, adapterConfig } of activeRuns) {
-      if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) continue;
+      if (runningProcesses.has(run.id) || activeHeartbeatRunExecutions.has(run.id)) continue;
 
       // Apply staleness threshold to avoid false positives
       if (staleThresholdMs > 0) {
@@ -11456,11 +11440,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       for (const claimedRun of claimedRuns) {
         const execution = executeRun(claimedRun.id);
-        activeRunExecutionPromises.add(execution);
+        activeHeartbeatRunExecutionPromises.add(execution);
         void execution.catch((err) => {
           logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
         }).finally(() => {
-          activeRunExecutionPromises.delete(execution);
+          activeHeartbeatRunExecutionPromises.delete(execution);
         });
       }
       return claimedRuns;
@@ -11483,7 +11467,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       run = claimed;
     }
 
-    activeRunExecutions.add(run.id);
+    activeHeartbeatRunExecutions.add(run.id);
     let runScratch: HeartbeatRunScratch | null = null;
 
     try {
@@ -13978,7 +13962,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           try {
             await startNextQueuedRunForAgent(run.agentId);
           } finally {
-            activeRunExecutions.delete(run.id);
+            activeHeartbeatRunExecutions.delete(run.id);
           }
         }
   }

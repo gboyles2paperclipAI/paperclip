@@ -4,7 +4,7 @@ import {
   type EmbeddedPostgresTestSupport,
 } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase as startDb } from "@paperclipai/db";
-import { waitForAllHeartbeatRunExecutionsDrain } from "../../services/heartbeat.ts";
+import { waitForAllHeartbeatRunExecutionsDrain } from "../../services/heartbeat-execution-registry.js";
 
 export { getEmbeddedPostgresTestSupport };
 export type { EmbeddedPostgresTestDatabase, EmbeddedPostgresTestSupport };
