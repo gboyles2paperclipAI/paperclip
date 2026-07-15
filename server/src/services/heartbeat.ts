@@ -10660,12 +10660,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     if (issue.status === "done" || issue.status === "cancelled") {
-      return {
-        stale: true,
-        errorCode: "issue_terminal_status",
-        reason: `Cancelled because issue reached terminal status (${issue.status}) before the queued run could start`,
-        details: { issueId, currentStatus: issue.status },
-      };
+      if (!resumeIntent && !wakeCommentId) {
+        return {
+          stale: true,
+          errorCode: "issue_terminal_status",
+          reason: `Cancelled because issue reached terminal status (${issue.status}) before the queued run could start`,
+          details: { issueId, currentStatus: issue.status },
+        };
+      }
     }
 
     if (retryReason === MAX_TURN_CONTINUATION_RETRY_REASON && issue.status !== "in_progress") {
@@ -10691,7 +10693,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
     }
 
-    if (issue.status === "blocked" && !resumeIntent && !wakeCommentId && !isInteractionWake) {
+    if (
+      issue.status === "blocked" &&
+      (wakeReason === "issue_continuation_needed" || retryReason === "issue_continuation_needed") &&
+      !resumeIntent &&
+      !wakeCommentId &&
+      !isInteractionWake
+    ) {
       return {
         stale: true,
         errorCode: "issue_blocked_status",
