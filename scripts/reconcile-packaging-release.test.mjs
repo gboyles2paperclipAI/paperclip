@@ -149,8 +149,10 @@ test("Help2day source evidence is isolated from publication and runtime activati
   assert.doesNotMatch(workflow, /npm[_ -]stable|paperclip\.service|db:migrate/);
 
   const evidence = readText("scripts/build-help2day-release-evidence.sh");
+  const standaloneTests = evidence.indexOf("test-standalone-public-packages.mjs");
   const standaloneBuild = evidence.indexOf("build-standalone-public-packages.mjs");
   const immutableStage = evidence.indexOf("stage-release-packages.mjs stage");
+  assert.ok(standaloneTests >= 0 && standaloneBuild > standaloneTests);
   assert.ok(standaloneBuild >= 0 && immutableStage > standaloneBuild);
   assert.match(evidence, /cyclonedx-npm/);
   assert.match(evidence, /osv-scanner/);
@@ -162,4 +164,11 @@ test("Help2day source evidence is isolated from publication and runtime activati
     evidence,
     /if \[\[ -f "\$BACKUP_ROOT\/cli-README\.md" \]\]; then[\s\S]*cp -p "\$BACKUP_ROOT\/cli-README\.md" "\$REPO_ROOT\/cli\/README\.md"[\s\S]*else[\s\S]*rm -f "\$REPO_ROOT\/cli\/README\.md"/,
   );
+
+  const standaloneTestRunner = readText("scripts/test-standalone-public-packages.mjs");
+  assert.match(standaloneTestRunner, /listStandalonePublicPackages/);
+  assert.match(standaloneTestRunner, /"--ignore-workspace", "--frozen-lockfile", "--ignore-scripts"/);
+  assert.match(standaloneTestRunner, /missing its reproducibility lockfile/);
+  assert.match(standaloneTestRunner, /"pnpm",\s*\n\s*\["exec", "vitest"/);
+  assert.match(standaloneTestRunner, /"--root", packageRoot, "--config", configPath/);
 });

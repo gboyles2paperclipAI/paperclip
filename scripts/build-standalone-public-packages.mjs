@@ -90,6 +90,12 @@ function listPublicPackages() {
     });
 }
 
+export function listStandalonePublicPackages() {
+  const workspaceEntries = parseWorkspaceEntries(readFileSync(workspacePath, "utf8"));
+  return listPublicPackages()
+    .filter(({ dir }) => !isWorkspacePackage(dir, workspaceEntries));
+}
+
 function readPackageJson(pkgDir) {
   return JSON.parse(
     readFileSync(path.join(repoRoot, pkgDir, "package.json"), "utf8"),
@@ -221,9 +227,7 @@ export async function runWithConcurrency(items, limit, worker) {
 }
 
 async function main() {
-  const workspaceEntries = parseWorkspaceEntries(readFileSync(workspacePath, "utf8"));
-  const standalonePackages = listPublicPackages()
-    .filter(({ dir }) => !isWorkspacePackage(dir, workspaceEntries));
+  const standalonePackages = listStandalonePublicPackages();
 
   if (standalonePackages.length === 0) {
     console.log("  i No standalone public packages detected outside the pnpm workspace");

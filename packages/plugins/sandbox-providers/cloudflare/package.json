@@ -46,13 +46,12 @@
     "build": "rm -rf dist && tsc",
     "clean": "rm -rf dist",
     "typecheck": "pnpm -C ../../../.. --filter @paperclipai/plugin-sdk ensure-build-deps && tsc --noEmit",
-    "test": "pnpm -C ../../../.. --filter @paperclipai/plugin-sdk ensure-build-deps && vitest run --config vitest.config.ts",
+    "test": "pnpm -C ../../../.. run test:standalone-public-packages -- packages/plugins/sandbox-providers/cloudflare",
     "prepack": "rm -f package.dev.json && cp package.json package.dev.json && node ../../../../scripts/generate-plugin-package-json.mjs",
     "postpack": "if [ -f package.dev.json ]; then mv package.dev.json package.json; fi"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",
-    "typescript": "^5.7.3",
-    "vitest": "^4.1.8"
+    "typescript": "^5.7.3"
   }
 }

@@ -141,6 +141,7 @@ fi
 cd "$REPO_ROOT"
 run_logged typecheck pnpm -r typecheck
 run_logged tests pnpm test:run
+run_logged standalone-tests node scripts/test-standalone-public-packages.mjs
 run_logged workspace-build pnpm build
 run_logged standalone-build node scripts/build-standalone-public-packages.mjs
 run_logged prepare-server-ui bash scripts/prepare-server-ui-dist.sh
