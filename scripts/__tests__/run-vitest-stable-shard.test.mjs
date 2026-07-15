@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -9,6 +10,7 @@ import {
   loadShardDurations,
   partitionGeneralServerSuites,
 } from "../general-server-shard.mjs";
+import { selectVitestTempRootParent } from "../vitest-stable-temp.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const script = path.join(repoRoot, "scripts", "run-vitest-stable.mjs");
@@ -144,4 +146,16 @@ test("the real shard partition is duration-balanced", () => {
     maxTotal - minTotal <= heaviest,
     `shard weight spread ${maxTotal - minTotal}ms exceeds heaviest suite ${heaviest}ms: ${totals.join(", ")}`,
   );
+});
+
+test("POSIX temp root honors an explicit TMPDIR override", () => {
+  assert.equal(selectVitestTempRootParent({ TMPDIR: "/home/runner/tmp" }, "linux"), "/home/runner/tmp");
+});
+
+test("POSIX temp root falls back to /tmp when TMPDIR is absent", () => {
+  assert.equal(selectVitestTempRootParent({}, "linux"), "/tmp");
+});
+
+test("Windows temp root keeps the platform default", () => {
+  assert.equal(selectVitestTempRootParent({ TMPDIR: "/ignored" }, "win32"), os.tmpdir());
 });
