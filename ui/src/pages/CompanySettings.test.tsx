@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { flushSync } from "react-dom";
+import { act as reactAct } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -103,17 +103,19 @@ class ResizeObserverStub {
 (globalThis as any).ResizeObserver = (globalThis as any).ResizeObserver ?? ResizeObserverStub;
 
 async function act(callback: () => void | Promise<void>) {
-  let result: void | Promise<void> = undefined;
-  flushSync(() => {
-    result = callback();
+  await reactAct(async () => {
+    await callback();
+    await Promise.resolve();
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
   });
-  await result;
 }
 
 async function flushReact() {
-  await act(async () => {
-    await Promise.resolve();
-    await new Promise((resolve) => window.setTimeout(resolve, 0));
+  await reactAct(async () => {
+    for (let i = 0; i < 3; i += 1) {
+      await Promise.resolve();
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    }
   });
 }
 

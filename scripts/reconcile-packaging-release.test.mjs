@@ -161,6 +161,7 @@ test("Help2day source evidence is isolated from publication and runtime activati
   assert.match(evidence, /package-gitleaks/);
   assert.match(evidence, /heartbeat-settlement-errors\.log/);
   assert.match(evidence, /CONNECTION_\(ENDED\|DESTROYED\)/);
+  assert.match(evidence, /skipping late \(setup failure\|adapter failure\|run\) finalization/);
   assert.match(evidence, /BACKUP_ROOT\/cli-README\.md/);
   assert.match(
     evidence,
