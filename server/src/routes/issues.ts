@@ -8208,6 +8208,23 @@ export function issueRoutes(
       actorType: req.actor.type,
     });
 
+    if (updateFields.status === "done" && existing.status !== "done") {
+      const interactions = await issueThreadInteractionsSvc.listForIssue(existing.id);
+      const pendingInteraction = interactions.find((interaction) => interaction.status === "pending");
+      if (pendingInteraction) {
+        res.status(422).json({
+          error: "Cannot mark issue done while an issue-thread interaction is pending",
+          details: {
+            code: "pending_issue_thread_interaction",
+            interactionId: pendingInteraction.id,
+            interactionKind: pendingInteraction.kind,
+            fix: "Resolve, reject, cancel, dismiss, or supersede the pending interaction before closing the issue.",
+          },
+        });
+        return;
+      }
+    }
+
     const nextAssigneeAgentId =
       updateFields.assigneeAgentId === undefined ? existing.assigneeAgentId : (updateFields.assigneeAgentId as string | null);
     const nextAssigneeUserId =
