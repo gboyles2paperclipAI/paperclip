@@ -11445,12 +11445,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (claimedRuns.length === 0) return [];
 
       for (const claimedRun of claimedRuns) {
+        activeHeartbeatRunExecutions.add(claimedRun.id);
         const execution = executeRun(claimedRun.id);
         activeHeartbeatRunExecutionPromises.add(execution);
         void execution.catch((err) => {
           logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
         }).finally(() => {
           activeHeartbeatRunExecutionPromises.delete(execution);
+          activeHeartbeatRunExecutions.delete(claimedRun.id);
         });
       }
       return claimedRuns;
@@ -11473,7 +11475,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       run = claimed;
     }
 
-    activeHeartbeatRunExecutions.add(run.id);
     let runScratch: HeartbeatRunScratch | null = null;
 
     try {
@@ -13965,11 +13966,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             status: latestRun?.status,
             failureReason: latestRun?.error ?? undefined,
           });
-          try {
-            await startNextQueuedRunForAgent(run.agentId);
-          } finally {
-            activeHeartbeatRunExecutions.delete(run.id);
-          }
+          await startNextQueuedRunForAgent(run.agentId);
         }
   }
 

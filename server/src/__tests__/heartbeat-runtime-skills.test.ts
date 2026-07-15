@@ -12,6 +12,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { companySkillService } from "../services/company-skills.ts";
 import { heartbeatService } from "../services/heartbeat.ts";
+import { waitForAllHeartbeatRunExecutionsDrain } from "../services/heartbeat-execution-registry.ts";
 import { registerServerAdapter, unregisterServerAdapter } from "../adapters/index.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -32,7 +33,10 @@ async function waitForRunToFinish(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const run = await heartbeat.getRun(runId);
-    if (run && !["queued", "running"].includes(run.status)) return run;
+    if (run && !["queued", "running"].includes(run.status)) {
+      await heartbeat.waitForRunExecutionDrain(runId);
+      return await heartbeat.getRun(runId);
+    }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   return await heartbeat.getRun(runId);
@@ -76,6 +80,7 @@ describeEmbeddedPostgres("heartbeat runtime skill version pins", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs: 15_000 });
     capturedRuns.length = 0;
     await db.execute(sql.raw(`
       TRUNCATE TABLE
