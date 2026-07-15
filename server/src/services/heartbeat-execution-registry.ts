@@ -29,6 +29,15 @@ export const activeHeartbeatRunExecutions = registry.runIds;
 export const activeHeartbeatRunExecutionPromises = registry.executions;
 export const activeHeartbeatSchedulingPromises = registry.scheduling;
 
+export function trackHeartbeatSchedulingPromise<T>(scheduling: Promise<T>) {
+  activeHeartbeatSchedulingPromises.add(scheduling);
+  void scheduling.then(
+    () => activeHeartbeatSchedulingPromises.delete(scheduling),
+    () => activeHeartbeatSchedulingPromises.delete(scheduling),
+  );
+  return scheduling;
+}
+
 export async function waitForAllHeartbeatRunExecutionsDrain(
   options: { timeoutMs?: number; intervalMs?: number } = {},
 ) {

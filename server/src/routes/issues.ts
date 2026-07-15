@@ -186,6 +186,7 @@ import {
 } from "../services/trust-preset-resolver.js";
 import { externalObjectService } from "../services/external-objects.js";
 import { loadMatchingAgentRun, type MatchingAgentRun } from "../services/agent-run-context.js";
+import { trackHeartbeatSchedulingPromise } from "../services/heartbeat-execution-registry.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -8870,7 +8871,7 @@ export function issueRoutes(
     });
 
     // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
-    void (async () => {
+    void trackHeartbeatSchedulingPromise((async () => {
       type WakeupRequest = NonNullable<Parameters<typeof heartbeat.wakeup>[1]>;
       type DependencyReadinessProvider = {
         getDependencyReadiness?: typeof svc.getDependencyReadiness;
@@ -9130,7 +9131,7 @@ export function issueRoutes(
         }
       }
 
-      for (const { agentId, wakeup } of wakeups.values()) {
+      await Promise.all([...wakeups.values()].map(({ agentId, wakeup }) =>
         heartbeat
           .wakeup(agentId, wakeup)
           .then((wakeRun) => {
@@ -9157,9 +9158,9 @@ export function issueRoutes(
               },
             });
           })
-          .catch((err) => logger.warn({ err, issueId: issue.id, agentId }, "failed to wake agent on issue update"));
-      }
-    })();
+          .catch((err) => logger.warn({ err, issueId: issue.id, agentId }, "failed to wake agent on issue update")),
+      ));
+    })()).catch((err) => logger.warn({ err, issueId: issue.id }, "failed to schedule issue update wakeups"));
 
     await queueTaskWatchdogEvaluation(issue, actor.runId);
     res.json({ ...issueResponse, comment });
@@ -10656,7 +10657,7 @@ export function issueRoutes(
     });
 
     // Merge all wakeups from this comment into one enqueue per agent to avoid duplicate runs.
-    void (async () => {
+    void trackHeartbeatSchedulingPromise((async () => {
       type WakeupRequest = NonNullable<Parameters<typeof heartbeat.wakeup>[1]>;
       const wakeups = new Map<string, { agentId: string; wakeup: WakeupRequest }>();
       const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
@@ -10857,7 +10858,7 @@ export function issueRoutes(
         }
       }
 
-      for (const { agentId, wakeup } of wakeups.values()) {
+      await Promise.all([...wakeups.values()].map(({ agentId, wakeup }) =>
         heartbeat
           .wakeup(agentId, wakeup)
           .then((wakeRun) => {
@@ -10884,9 +10885,9 @@ export function issueRoutes(
               },
             });
           })
-          .catch((err) => logger.warn({ err, issueId: currentIssue.id, agentId }, "failed to wake agent on issue comment"));
-      }
-    })();
+          .catch((err) => logger.warn({ err, issueId: currentIssue.id, agentId }, "failed to wake agent on issue comment")),
+      ));
+    })()).catch((err) => logger.warn({ err, issueId: currentIssue.id }, "failed to schedule issue comment wakeups"));
 
     await queueTaskWatchdogEvaluation(currentIssue, actor.runId);
     res.status(201).json(comment);

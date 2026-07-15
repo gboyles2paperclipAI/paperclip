@@ -86,7 +86,7 @@ import { companySkillService } from "./company-skills.js";
 import {
   activeHeartbeatRunExecutionPromises,
   activeHeartbeatRunExecutions,
-  activeHeartbeatSchedulingPromises,
+  trackHeartbeatSchedulingPromise,
   waitForAllHeartbeatRunExecutionsDrain,
 } from "./heartbeat-execution-registry.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
@@ -11365,12 +11365,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
   function startNextQueuedRunForAgent(agentId: string) {
     const scheduling = startNextQueuedRunForAgentInternal(agentId);
-    activeHeartbeatSchedulingPromises.add(scheduling);
-    void scheduling.then(
-      () => activeHeartbeatSchedulingPromises.delete(scheduling),
-      () => activeHeartbeatSchedulingPromises.delete(scheduling),
-    );
-    return scheduling;
+    return trackHeartbeatSchedulingPromise(scheduling);
   }
 
   async function startNextQueuedRunForAgentInternal(agentId: string) {
