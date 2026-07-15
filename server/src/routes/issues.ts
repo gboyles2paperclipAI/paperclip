@@ -7311,12 +7311,13 @@ export function issueRoutes(
         : {}),
     };
     if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, { companyId }, createBody))) return;
+    const resolvedProjectId = await resolveAssignmentProjectId({
+      companyId,
+      projectId: createBody.projectId,
+      parentIssueId: createBody.parentId,
+    });
     const createAssignmentScope = {
-      projectId: await resolveAssignmentProjectId({
-        companyId,
-        projectId: createBody.projectId,
-        parentIssueId: createBody.parentId,
-      }),
+      projectId: resolvedProjectId,
       parentIssueId: createBody.parentId ?? null,
       assigneeAgentId: createBody.assigneeAgentId ?? null,
       assigneeUserId: rawCreateBody.assigneeUserId ?? null,
@@ -7336,11 +7337,12 @@ export function issueRoutes(
     const sourceTrust = await sourceTrustForActorWrite({
       id: issueId,
       companyId,
-      projectId: createBody.projectId ?? null,
+      projectId: resolvedProjectId,
       executionPolicy,
     }, actor);
     const issue = await svc.create(companyId, {
       ...createBody,
+      projectId: resolvedProjectId,
       ...(taskBridgeOriginForActor(req) ?? {}),
       id: issueId,
       executionPolicy,
