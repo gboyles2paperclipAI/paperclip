@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -46,7 +46,13 @@ export function writeBuildCommit({ output = defaultOutput, ...options } = {}) {
   }
 
   mkdirSync(dirname(output), { recursive: true });
-  writeFileSync(output, `${commit}\n`, { mode: 0o444 });
+  const temporaryOutput = `${output}.tmp-${process.pid}`;
+  try {
+    writeFileSync(temporaryOutput, `${commit}\n`, { mode: 0o444, flag: "wx" });
+    renameSync(temporaryOutput, output);
+  } finally {
+    rmSync(temporaryOutput, { force: true });
+  }
   return commit;
 }
 

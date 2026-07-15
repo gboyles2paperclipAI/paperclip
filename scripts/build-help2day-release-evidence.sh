@@ -8,6 +8,9 @@ UPSTREAM_BASE=""
 FORK_ANCHOR=""
 BUILD_TIMESTAMP=""
 BUILDER_ID=""
+RUNTIME_PROOF_MODE="isolated"
+RUNTIME_PORT="31853"
+LIVE_PREFIX=""
 STAGE_ROOT=""
 EXTRACT_ROOT=""
 BACKUP_ROOT=""
@@ -16,6 +19,7 @@ usage() {
   printf '%s\n' \
     "Usage: $0 --version YYYY.MDD.P-help2day.N --output DIR \\" \
     "  --upstream-base SHA --fork-anchor SHA --build-timestamp ISO_UTC --builder-id ID" \
+    "  [--runtime-proof-mode isolated|host] [--runtime-port PORT] [--live-prefix DIR]" \
     "" \
     "Builds and retains source-release evidence only. It has no registry, GitHub, or runtime write path."
 }
@@ -27,7 +31,7 @@ fail() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --version|--output|--upstream-base|--fork-anchor|--build-timestamp|--builder-id)
+    --version|--output|--upstream-base|--fork-anchor|--build-timestamp|--builder-id|--runtime-proof-mode|--runtime-port|--live-prefix)
       [[ $# -ge 2 ]] || fail "$1 requires a value"
       case "$1" in
         --version) VERSION="$2" ;;
@@ -36,6 +40,9 @@ while [[ $# -gt 0 ]]; do
         --fork-anchor) FORK_ANCHOR="$2" ;;
         --build-timestamp) BUILD_TIMESTAMP="$2" ;;
         --builder-id) BUILDER_ID="$2" ;;
+        --runtime-proof-mode) RUNTIME_PROOF_MODE="$2" ;;
+        --runtime-port) RUNTIME_PORT="$2" ;;
+        --live-prefix) LIVE_PREFIX="$2" ;;
       esac
       shift 2
       ;;
@@ -46,6 +53,12 @@ while [[ $# -gt 0 ]]; do
     *) fail "unexpected argument: $1" ;;
   esac
 done
+
+[[ "$RUNTIME_PROOF_MODE" == "isolated" || "$RUNTIME_PROOF_MODE" == "host" ]] \
+  || fail "runtime proof mode must be isolated or host"
+if [[ "$RUNTIME_PROOF_MODE" == "host" && -z "$LIVE_PREFIX" ]]; then
+  fail "host runtime proof requires --live-prefix"
+fi
 
 for value in VERSION OUTPUT UPSTREAM_BASE FORK_ANCHOR BUILD_TIMESTAMP BUILDER_ID; do
   [[ -n "${!value}" ]] || fail "missing required ${value,,}"
@@ -231,6 +244,20 @@ node scripts/verify-installed-release-packages.mjs \
   "$OUTPUT/package-inventory/artifacts.tsv" "$AUDIT_ROOT" \
   "$OUTPUT/package-inventory/installed-packages.json"
 
+runtime_proof_args=(
+  --install-root "$AUDIT_ROOT"
+  --output "$OUTPUT/runtime-proof"
+  --version "$VERSION"
+  --source-commit "$SOURCE_COMMIT"
+  --port "$RUNTIME_PORT"
+  --mode "$RUNTIME_PROOF_MODE"
+)
+if [[ "$RUNTIME_PROOF_MODE" == "host" ]]; then
+  runtime_proof_args+=(--live-prefix "$LIVE_PREFIX")
+fi
+run_logged isolated-runtime-proof \
+  bash scripts/prove-isolated-release-runtime.sh "${runtime_proof_args[@]}"
+
 "$REPO_ROOT/node_modules/.bin/cyclonedx-npm" \
   --package-lock-only --omit dev --output-reproducible --spec-version 1.6 \
   --output-format JSON --validate --output-file "$OUTPUT/sbom.cdx.json" \
@@ -317,6 +344,7 @@ import { join } from "node:path";
 const [root, source, version, count, security, sourceScan, packageScan] = process.argv.slice(2);
 const scanner = JSON.parse(readFileSync(join(root, "security-results/summary.json"), "utf8"));
 const status = security === "0" && sourceScan === "0" && packageScan === "0" ? "PASS" : "BLOCKED";
+const runtime = JSON.parse(readFileSync(join(root, "runtime-proof/result.json"), "utf8"));
 writeFileSync(join(root, "release-report.md"), [
   "# Help2day Paperclip source-release evidence",
   "",
@@ -327,6 +355,7 @@ writeFileSync(join(root, "release-report.md"), [
   `- Dependency security: ${scanner.status}`,
   `- Source-range gitleaks exit: ${sourceScan}`,
   `- Package-content gitleaks exit: ${packageScan}`,
+  `- Isolated runtime proof: ${runtime.status} (${runtime.mode})`,
   "- Runtime activation: not performed",
   "",
 ].join("\n"));

@@ -133,12 +133,19 @@ heavy-validation wrapper. For example:
   --upstream-base <full-upstream-sha> \
   --fork-anchor <full-fork-sha> \
   --build-timestamp <canonical-utc-timestamp> \
-  --builder-id <reviewable-builder-identity>
+  --builder-id <reviewable-builder-identity> \
+  --runtime-proof-mode host \
+  --runtime-port <unused-port> \
+  --live-prefix <current-live-node-prefix>
 ```
 
 The output directory must be outside the source worktree and must not already
 exist. The command restores temporary version rewrites and fails if the source
-tree is not clean afterward.
+tree is not clean afterward. CI uses the default `isolated` proof. The shared
+Help2day host uses `host` proof, which additionally hashes the complete live
+CLI and scoped package trees before and after, verifies systemd ownership and
+the single port 3100 listener, requires staging to remain inactive, and proves
+the disposable process group and listener terminate.
 
 Forbidden-token policy uses optional stable, explicit entries from the local
 Git common directory's `hooks/forbidden-tokens.txt` (one per line, `#` comments

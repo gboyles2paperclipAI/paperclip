@@ -159,6 +159,8 @@ test("Help2day source evidence is isolated from publication and runtime activati
   assert.match(evidence, /grype/);
   assert.match(evidence, /source-range-gitleaks/);
   assert.match(evidence, /package-gitleaks/);
+  assert.match(evidence, /prove-isolated-release-runtime\.sh/);
+  assert.match(evidence, /--runtime-proof-mode/);
   assert.match(evidence, /heartbeat-settlement-errors\.log/);
   assert.match(evidence, /CONNECTION_\(ENDED\|DESTROYED\)/);
   assert.match(evidence, /skipping late \(setup failure\|adapter failure\|run\) finalization/);
@@ -167,6 +169,15 @@ test("Help2day source evidence is isolated from publication and runtime activati
     evidence,
     /if \[\[ -f "\$BACKUP_ROOT\/cli-README\.md" \]\]; then[\s\S]*cp -p "\$BACKUP_ROOT\/cli-README\.md" "\$REPO_ROOT\/cli\/README\.md"[\s\S]*else[\s\S]*rm -f "\$REPO_ROOT\/cli\/README\.md"/,
   );
+
+  const runtimeProof = readText("scripts/prove-isolated-release-runtime.sh");
+  assert.match(runtimeProof, /setsid env -i/);
+  assert.match(runtimeProof, /kill -TERM -- "-\$SMOKE_PID"/);
+  assert.match(runtimeProof, /pgrep -g "\$SMOKE_PID"/);
+  assert.match(runtimeProof, /before-live-runtime\.sha256/);
+  assert.match(runtimeProof, /paperclip-staging\.service/);
+  assert.match(runtimeProof, /sport = :3101 or sport = :3102/);
+  assert.match(runtimeProof, /live runtime bytes changed during isolated proof/);
 
   const standaloneTestRunner = readText("scripts/test-standalone-public-packages.mjs");
   assert.match(standaloneTestRunner, /listStandalonePublicPackages/);

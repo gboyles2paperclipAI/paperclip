@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -47,6 +47,11 @@ test("writes an immutable newline-terminated build marker", () => {
   try {
     assert.equal(writeBuildCommit({ output, explicitCommit: commit }), commit);
     assert.equal(readFileSync(output, "utf8"), `${commit}\n`);
+    assert.equal(statSync(output).mode & 0o777, 0o444);
+
+    assert.equal(writeBuildCommit({ output, explicitCommit: commit }), commit);
+    assert.equal(readFileSync(output, "utf8"), `${commit}\n`);
+    assert.equal(statSync(output).mode & 0o777, 0o444);
 
     assert.equal(
       writeBuildCommit({
