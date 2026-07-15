@@ -142,7 +142,7 @@ cd "$REPO_ROOT"
 run_logged typecheck pnpm -r typecheck
 run_logged tests pnpm test:run
 if rg -n \
-  'CONNECTION_ENDED|violates foreign key constraint|failed to refresh issue continuation summary|queued heartbeat execution failed|failed to release environment lease for heartbeat run' \
+  'CONNECTION_(ENDED|DESTROYED)|violates foreign key constraint|failed to refresh issue continuation summary|queued heartbeat execution failed|failed to release environment lease for heartbeat run' \
   "$OUTPUT/test-results/tests.log" > "$OUTPUT/test-results/heartbeat-settlement-errors.log"; then
   fail "test output contains late heartbeat settlement errors"
 fi

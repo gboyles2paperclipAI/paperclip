@@ -23,6 +23,7 @@ import {
   ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS,
   ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS,
   heartbeatService,
+  waitForAllHeartbeatRunExecutionsDrain,
 } from "../services/heartbeat.ts";
 import { recoveryService } from "../services/recovery/service.ts";
 import { getRunLogStore } from "../services/run-log-store.ts";
@@ -116,6 +117,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
       if (activeRuns.length === 0) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
+    await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs: 15_000 });
     await truncateCompaniesWithDeadlockRetry(db);
   });
 
