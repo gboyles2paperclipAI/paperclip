@@ -555,6 +555,25 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
 // Routes and the scheduler construct separate heartbeatService instances, but
 // they must agree on in-process adapter executions when reaping stale runs.
 const activeRunExecutions = new Set<string>();
+const activeRunExecutionPromises = new Set<Promise<void>>();
+
+export async function waitForAllHeartbeatRunExecutionsDrain(
+  options: { timeoutMs?: number; intervalMs?: number } = {},
+) {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const intervalMs = options.intervalMs ?? 25;
+  const deadline = Date.now() + timeoutMs;
+  while (activeRunExecutionPromises.size > 0) {
+    if (Date.now() >= deadline) {
+      const runIds = [...activeRunExecutions].sort();
+      throw new Error(
+        `Timed out waiting for ${activeRunExecutionPromises.size} heartbeat execution(s) to drain; ` +
+        `run ids: ${runIds.length > 0 ? runIds.join(", ") : "registration pending"}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
 const INLINE_BASE64_IMAGE_DATA_RE = /("type":"image","source":\{"type":"base64","data":")([A-Za-z0-9+/=]{1024,})(")/g;
 
 type RuntimeConfigSecretResolver = Pick<
@@ -11436,8 +11455,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (claimedRuns.length === 0) return [];
 
       for (const claimedRun of claimedRuns) {
-        void executeRun(claimedRun.id).catch((err) => {
+        const execution = executeRun(claimedRun.id);
+        activeRunExecutionPromises.add(execution);
+        void execution.catch((err) => {
           logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
+        }).finally(() => {
+          activeRunExecutionPromises.delete(execution);
         });
       }
       return claimedRuns;
@@ -13952,8 +13975,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             status: latestRun?.status,
             failureReason: latestRun?.error ?? undefined,
           });
-          activeRunExecutions.delete(run.id);
-          await startNextQueuedRunForAgent(run.agentId);
+          try {
+            await startNextQueuedRunForAgent(run.agentId);
+          } finally {
+            activeRunExecutions.delete(run.id);
+          }
         }
   }
 
