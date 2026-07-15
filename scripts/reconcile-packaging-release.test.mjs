@@ -106,6 +106,16 @@ test("dependency override policy preserves fork security pins and frozen upstrea
   }
 });
 
+test("Cursor Cloud pins the newest SDK release without the vulnerable Node transport chain", () => {
+  const cursorPkg = readJson("packages/adapters/cursor-cloud/package.json");
+  assert.equal(cursorPkg.dependencies["@cursor/sdk"], "1.0.20");
+
+  const lockfile = readText("pnpm-lock.yaml");
+  assert.match(lockfile, /'@cursor\/sdk@1\.0\.20':/);
+  assert.doesNotMatch(lockfile, /'@connectrpc\/connect-node@/);
+  assert.doesNotMatch(lockfile, /undici@5\.29\.0/);
+});
+
 test("release and governance controls stay wired into focused PR verification", () => {
   const rootPkg = readJson("package.json");
   assert.match(rootPkg.scripts["test:release-registry"], /reconcile-packaging-release\.test\.mjs/);
