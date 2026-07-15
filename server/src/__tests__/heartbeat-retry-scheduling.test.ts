@@ -244,7 +244,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       .where(eq(heartbeatRuns.retryOfRunId, run!.id))
       .then((rows) => rows[0] ?? null);
     expect(retryRun?.status).toBe("scheduled_retry");
-    expect(retryRun?.scheduledRetryReason).toBe("transient_failure");
+    expect(retryRun?.scheduledRetryReason).toBe("retry_deferred_quota:provider_quota_test");
     expect(retryRun?.scheduledRetryAt?.toISOString()).toBe("2030-04-22T21:00:00.000Z");
     expect((retryRun?.contextSnapshot as Record<string, unknown> | null)?.errorFamily).toBe("provider_quota");
     expect((retryRun?.contextSnapshot as Record<string, unknown> | null)?.providerQuotaRetryNotBefore).toBe(
@@ -447,6 +447,61 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       .where(eq(heartbeatRuns.id, scheduled.run.id))
       .then((rows) => rows[0] ?? null);
     expect(promotedRun?.status).toBe("queued");
+  });
+
+  it("preserves provider-quota reset time for opt-in deferred retry reasons", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const sourceRunId = randomUUID();
+    const now = new Date("2026-04-20T12:00:00.000Z");
+    const retryNotBefore = "2030-04-22T21:00:00.000Z";
+
+    await seedRetryFixture({
+      runId: sourceRunId,
+      companyId,
+      agentId,
+      now,
+      errorCode: "adapter_failed",
+      errorFamily: "provider_quota",
+      retryNotBefore,
+      resultJson: {
+        errorFamily: "provider_quota",
+        retryNotBefore,
+        providerQuotaRetryNotBefore: retryNotBefore,
+      },
+    });
+
+    const scheduled = await heartbeat.scheduleBoundedRetry(sourceRunId, {
+      now,
+      random: () => 0.5,
+      retryReason: "retry_deferred_quota:codex_local",
+      wakeReason: "failure_retry_deferred",
+      preserveTransientRecoveryContract: true,
+    });
+
+    expect(scheduled.outcome).toBe("scheduled");
+    if (scheduled.outcome !== "scheduled") return;
+    expect(scheduled.dueAt.toISOString()).toBe(retryNotBefore);
+
+    const retryRun = await db
+      .select({
+        scheduledRetryAt: heartbeatRuns.scheduledRetryAt,
+        scheduledRetryReason: heartbeatRuns.scheduledRetryReason,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, scheduled.run.id))
+      .then((rows) => rows[0] ?? null);
+
+    expect(retryRun?.scheduledRetryReason).toBe("retry_deferred_quota:codex_local");
+    expect(retryRun?.scheduledRetryAt?.toISOString()).toBe(retryNotBefore);
+    expect(retryRun?.contextSnapshot).toMatchObject({
+      retryReason: "retry_deferred_quota:codex_local",
+      wakeReason: "failure_retry_deferred",
+      errorFamily: "provider_quota",
+      transientRetryNotBefore: retryNotBefore,
+      providerQuotaRetryNotBefore: retryNotBefore,
+    });
   });
 
   it("schedules max-turn continuations with distinct retry metadata", async () => {

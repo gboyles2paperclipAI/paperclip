@@ -326,11 +326,17 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
     expect(adapterExecute).toHaveBeenCalledTimes(1);
 
     const issue = await db
-      .select({ status: issues.status })
+      .select({
+        status: issues.status,
+        executionRunId: issues.executionRunId,
+        checkoutRunId: issues.checkoutRunId,
+      })
       .from(issues)
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0] ?? null);
     expect(issue?.status).toBe("blocked");
+    expect(issue?.executionRunId).toBeNull();
+    expect(issue?.checkoutRunId).toBeNull();
 
     const retries = await scheduledRetryRunsForAgent(agentId);
     expect(retries).toHaveLength(0);
@@ -338,12 +344,15 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
 
   it("defers (schedules a bounded retry) on a quota failure and does NOT block the issue", async () => {
     const { agentId, issueId } = await seedRunnableIssue();
+    const retryNotBefore = new Date(Date.now() + 60_000).toISOString();
     adapterExecute.mockResolvedValue({
       exitCode: 1,
       signal: null,
       timedOut: false,
       errorCode: "adapter_failed",
-      errorMessage: "insufficient quota for billing window",
+      errorMessage: "429 insufficient quota for billing window",
+      errorFamily: "transient_upstream",
+      retryNotBefore,
       provider: "test",
       model: "test-model",
     });
@@ -359,8 +368,15 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
     expect(issue?.status).not.toBe("blocked");
 
     const retries = await scheduledRetryRunsForAgent(agentId);
-    expect(retries.length).toBeGreaterThanOrEqual(1);
+    expect(retries).toHaveLength(1);
     expect(retries[0]?.scheduledRetryReason ?? "").toContain("retry_deferred_quota");
+    expect(retries[0]?.contextSnapshot).toMatchObject({
+      wakeReason: "failure_retry_deferred",
+      retryReason: expect.stringContaining("retry_deferred_quota"),
+      errorFamily: "transient_upstream",
+      transientRetryNotBefore: retryNotBefore,
+    });
+    expect(retries[0]?.contextSnapshot).not.toHaveProperty("codexTransientFallbackMode");
   });
 
   it("preserves existing behavior on a transient failure (no deterministic block, no defer)", async () => {

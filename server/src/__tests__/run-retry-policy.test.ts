@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyErrorClass,
   classifyFailureRetryability,
+  shouldApplyCodexTransientFallbackMode,
   shouldRetryProcessLoss,
   PROCESS_LOSS_CHAIN_CAP,
   type FailureErrorClass,
@@ -75,6 +76,26 @@ describe("classifyErrorClass", () => {
       "unsupported-model",
     );
     expect(classifyErrorClass("missing_secret", "429 rate limited")).toBe("missing-secret");
+  });
+});
+
+describe("shouldApplyCodexTransientFallbackMode", () => {
+  it("requires the generic transient retry reason, even with transient upstream recovery metadata", () => {
+    expect(
+      shouldApplyCodexTransientFallbackMode({
+        adapterType: "codex_local",
+        isGenericTransientRetry: true,
+        errorFamily: "transient_upstream",
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldApplyCodexTransientFallbackMode({
+        adapterType: "codex_local",
+        isGenericTransientRetry: false,
+        errorFamily: "transient_upstream",
+      }),
+    ).toBe(false);
   });
 });
 

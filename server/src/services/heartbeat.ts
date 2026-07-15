@@ -262,6 +262,11 @@ import {
   type EffectiveRunConfigFingerprints,
   type EffectiveRunConfigSecretManifestEntry,
 } from "./effective-run-config-fingerprints.js";
+import {
+  classifyErrorClass,
+  classifyFailureRetryability,
+  shouldApplyCodexTransientFallbackMode,
+} from "./run-retry-policy.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
@@ -8925,6 +8930,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       wakeReason?: string;
       maxAttempts?: number;
       delayMs?: number;
+      preserveTransientRecoveryContract?: boolean;
     },
   ) {
     const now = opts?.now ?? new Date();
@@ -8952,14 +8958,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             maxAttempts,
           }
         : null;
+    const isGenericTransientRetry = retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON;
     const transientRecovery =
-      retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON
+      isGenericTransientRetry || opts?.preserveTransientRecoveryContract === true
         ? readTransientRecoveryContractFromRun(run)
         : null;
-    const codexTransientFallbackMode =
-      agent.adapterType === "codex_local" && transientRecovery?.errorFamily === "transient_upstream"
-        ? resolveCodexTransientFallbackMode(nextAttempt)
-        : null;
+    const codexTransientFallbackMode = shouldApplyCodexTransientFallbackMode({
+      adapterType: agent.adapterType,
+      isGenericTransientRetry,
+      errorFamily: transientRecovery?.errorFamily,
+    })
+      ? resolveCodexTransientFallbackMode(nextAttempt)
+      : null;
     const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
@@ -13242,42 +13252,57 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             );
           }
         }
-        if (outcome === "failed" && isMaxTurnExhaustionRun(livenessRun)) {
-          const policy = parseMaxTurnContinuationPolicy(agent);
-          if (policy.enabled && policy.maxAttempts > 0) {
-            await scheduleBoundedRetryForRun(livenessRun, agent, {
-              retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
-              wakeReason: MAX_TURN_CONTINUATION_WAKE_REASON,
-              maxAttempts: policy.maxAttempts,
-              delayMs: policy.delayMs,
-            });
-          } else {
-            await appendRunEvent(livenessRun, await nextRunEventSeq(livenessRun.id), {
-              eventType: "lifecycle",
-              stream: "system",
-              level: "warn",
-              message: "Max-turn continuation suppressed because the policy is disabled",
-              payload: {
+        const failureRetryPolicyDisposition = outcome === "failed"
+          ? await applyFailureRetryPolicyForRun(livenessRun, agent)
+          : { action: "not_applicable" as const };
+        const failurePolicyStopsFallthrough =
+          failureRetryPolicyDisposition.action === "deferred" ||
+          failureRetryPolicyDisposition.action === "suppressed";
+
+        if (outcome === "failed" && failureRetryPolicyDisposition.action === "retry") {
+          if (isMaxTurnExhaustionRun(livenessRun)) {
+            const policy = parseMaxTurnContinuationPolicy(agent);
+            if (policy.enabled && policy.maxAttempts > 0) {
+              await scheduleBoundedRetryForRun(livenessRun, agent, {
                 retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
-                policy,
-              },
-            });
-          }
-        } else if (outcome === "failed" && readTransientRecoveryContractFromRun(livenessRun)) {
-          await scheduleBoundedRetryForRun(livenessRun, agent);
-        }
-        const issueCommentPolicyResult = await finalizeIssueCommentPolicy(livenessRun, agent);
-        await releaseIssueExecutionAndPromote(livenessRun);
-        await handleRunLivenessContinuation(livenessRun);
-        await handleSuccessfulRunHandoff(
-          issueCommentPolicyResult.outcome === "retry_queued" || issueCommentPolicyResult.outcome === "retry_exhausted"
-            ? {
-              ...livenessRun,
-              issueCommentStatus: issueCommentPolicyResult.outcome,
+                wakeReason: MAX_TURN_CONTINUATION_WAKE_REASON,
+                maxAttempts: policy.maxAttempts,
+                delayMs: policy.delayMs,
+              });
+            } else {
+              await appendRunEvent(livenessRun, await nextRunEventSeq(livenessRun.id), {
+                eventType: "lifecycle",
+                stream: "system",
+                level: "warn",
+                message: "Max-turn continuation suppressed because the policy is disabled",
+                payload: {
+                  retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
+                  policy,
+                },
+              });
             }
-            : livenessRun,
-          agent,
-        );
+          } else if (readTransientRecoveryContractFromRun(livenessRun)) {
+            await scheduleBoundedRetryForRun(livenessRun, agent);
+          }
+        }
+        const issueCommentPolicyResult = failurePolicyStopsFallthrough
+          ? { outcome: "not_applicable" as const, queuedRun: null }
+          : await finalizeIssueCommentPolicy(livenessRun, agent);
+        await releaseIssueExecutionAndPromote(livenessRun, {
+          suppressImmediateRecovery: failurePolicyStopsFallthrough,
+        });
+        if (!failurePolicyStopsFallthrough) {
+          await handleRunLivenessContinuation(livenessRun);
+          await handleSuccessfulRunHandoff(
+            issueCommentPolicyResult.outcome === "retry_queued" || issueCommentPolicyResult.outcome === "retry_exhausted"
+              ? {
+                ...livenessRun,
+                issueCommentStatus: issueCommentPolicyResult.outcome,
+              }
+              : livenessRun,
+            agent,
+          );
+        }
 
         // Dependency wake re-check: if this run's issue was marked done mid-run,
         // the route-time `issue_blockers_resolved` wake may have been gated by
@@ -13434,11 +13459,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           );
         }
         await refreshContinuationSummaryForRun(livenessRun, agent);
-        if (!isWorkspaceValidationFailedRun(livenessRun) && !isConfigurationIncompleteFailedRun(livenessRun)) {
+        const failureRetryPolicyDisposition = await applyFailureRetryPolicyForRun(livenessRun, agent);
+        const failurePolicyStopsFallthrough =
+          failureRetryPolicyDisposition.action === "deferred" ||
+          failureRetryPolicyDisposition.action === "suppressed";
+        if (
+          !failurePolicyStopsFallthrough &&
+          !isWorkspaceValidationFailedRun(livenessRun) &&
+          !isConfigurationIncompleteFailedRun(livenessRun)
+        ) {
           await finalizeIssueCommentPolicy(livenessRun, agent);
         }
-        await scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, agent);
-        await releaseIssueExecutionAndPromote(livenessRun);
+        if (!failurePolicyStopsFallthrough) {
+          await scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, agent);
+        }
+        await releaseIssueExecutionAndPromote(livenessRun, {
+          suppressImmediateRecovery: failurePolicyStopsFallthrough,
+        });
 
         await updateRuntimeState(agent, livenessRun, {
           exitCode: null,
@@ -13571,13 +13608,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           }
         } finally {
           const latestRun = await getRun(run.id).catch(() => null);
-          await releaseEnvironmentLeasesForRun({
-            runId: run.id,
-            companyId: run.companyId,
-            agentId: run.agentId,
-            status: latestRun?.status,
-            failureReason: latestRun?.error ?? undefined,
-          });
           await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
           if (runScratch && latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
             const scratchForCleanup = runScratch;
@@ -13631,6 +13661,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               });
             }
           }
+          await releaseEnvironmentLeasesForRun({
+            runId: run.id,
+            companyId: run.companyId,
+            agentId: run.agentId,
+            status: latestRun?.status,
+            failureReason: latestRun?.error ?? undefined,
+          });
           activeRunExecutions.delete(run.id);
           await startNextQueuedRunForAgent(run.agentId);
         }
@@ -13676,6 +13713,90 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       `Resolving them as a runtime failure would only produce repeated opaque setup failures.${failureSummary ?? ""} ` +
       "Moving it to `blocked` with a source-scoped recovery action so an operator can bind the missing secret(s) before resuming."
     );
+  }
+
+  function buildRetrySuppressedRecoveryComment(input: {
+    latestRun: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode"> | null | undefined;
+    reason: string;
+  }) {
+    const failureSummary = summarizeRunFailureForIssueComment(input.latestRun);
+    return (
+      "Paperclip suppressed automatic retry because the latest run failed with a deterministic adapter/runtime error. " +
+      `Retrying the same run is not expected to recover.${failureSummary ?? ""} ` +
+      `Moving it to \`blocked\` for operator intervention. Reason: \`${input.reason}\`.`
+    );
+  }
+
+  async function applyFailureRetryPolicyForRun(
+    run: typeof heartbeatRuns.$inferSelect,
+    agent: typeof agents.$inferSelect,
+  ) {
+    if (run.status !== "failed") return { action: "not_applicable" as const };
+    if (isWorkspaceValidationFailedRun(run) || isConfigurationIncompleteFailedRun(run)) {
+      return { action: "not_applicable" as const };
+    }
+
+    const contextSnapshot = parseObject(run.contextSnapshot);
+    const issueId = readNonEmptyString(contextSnapshot.issueId);
+    const resultJson = parseObject(run.resultJson);
+    const model = readNonEmptyString(resultJson.model) ?? readNonEmptyString(contextSnapshot.model);
+    const errorClass = classifyErrorClass(run.errorCode, run.error);
+    const retryDecision = classifyFailureRetryability(agent.adapterType, model, errorClass);
+
+    if (retryDecision.action === "retry") {
+      return { action: "retry" as const, retryDecision };
+    }
+
+    await appendRunEvent(run, await nextRunEventSeq(run.id), {
+      eventType: "lifecycle",
+      stream: "system",
+      level: retryDecision.action === "defer" ? "info" : "warn",
+      message: retryDecision.action === "defer"
+        ? "Failure retry policy deferred the run"
+        : "Failure retry policy suppressed automatic retry",
+      payload: {
+        reason: retryDecision.reason,
+        errorClass: retryDecision.errorClass,
+        retryable: retryDecision.retryable,
+        block: retryDecision.block,
+      },
+    });
+
+    if (retryDecision.action === "defer") {
+      const retryOutcome = await scheduleBoundedRetryForRun(run, agent, {
+        retryReason: retryDecision.reason,
+        wakeReason: "failure_retry_deferred",
+        preserveTransientRecoveryContract: true,
+      });
+      return { action: "deferred" as const, retryDecision, retryOutcome };
+    }
+
+    if (!issueId) return { action: "suppressed" as const, retryDecision, blocked: false };
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
+      .then((rows) => rows[0] ?? null);
+    if (!issue) return { action: "suppressed" as const, retryDecision, blocked: false };
+    if (issue.assigneeAgentId !== run.agentId) {
+      return { action: "suppressed" as const, retryDecision, blocked: false };
+    }
+    if (issue.status !== "todo" && issue.status !== "in_progress") {
+      return { action: "suppressed" as const, retryDecision, blocked: false };
+    }
+
+    await issuesSvc.update(issue.id, {
+      status: "blocked",
+    });
+    await issuesSvc.addComment(issue.id, buildRetrySuppressedRecoveryComment({
+      latestRun: run,
+      reason: retryDecision.reason,
+    }), {
+      agentId: run.agentId,
+      runId: run.id,
+    });
+    return { action: "suppressed" as const, retryDecision, blocked: true };
   }
 
   function buildExecutionReviewParticipantRecoveryComment(input: {
@@ -16383,6 +16504,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         wakeReason?: string;
         maxAttempts?: number;
         delayMs?: number;
+        preserveTransientRecoveryContract?: boolean;
       },
     ) => {
       const run = await getRun(runId, { unsafeFullResultJson: true });

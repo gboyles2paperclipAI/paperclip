@@ -44,6 +44,20 @@ export interface RetryClassification {
   block: boolean;
 }
 
+export interface CodexTransientFallbackInput {
+  adapterType: string;
+  isGenericTransientRetry: boolean;
+  errorFamily: string | null | undefined;
+}
+
+export function shouldApplyCodexTransientFallbackMode(input: CodexTransientFallbackInput): boolean {
+  return (
+    input.adapterType === "codex_local" &&
+    input.isGenericTransientRetry &&
+    input.errorFamily === "transient_upstream"
+  );
+}
+
 /** Deterministic classes: retrying the identical run cannot succeed. */
 const DETERMINISTIC_CLASSES: ReadonlySet<FailureErrorClass> = new Set([
   "config",
