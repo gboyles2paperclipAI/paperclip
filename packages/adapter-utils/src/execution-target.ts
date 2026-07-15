@@ -1341,6 +1341,10 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
   if (startResult.timedOut || (startResult.exitCode ?? 1) !== 0) {
     throw new Error(`Failed to start sandbox ACP process session bridge: ${startResult.stderr || startResult.stdout}`);
   }
+  const remoteSessionPid = Number(startResult.stdout.trim().split(/\s+/).at(-1));
+  if (!Number.isSafeInteger(remoteSessionPid) || remoteSessionPid <= 0) {
+    throw new Error("Sandbox ACP process session bridge did not report a valid remote pid.");
+  }
 
   let socket: net.Socket | null = null;
   let stopping = false;
@@ -1494,8 +1498,29 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
       await new Promise<void>((resolve) => server.close(() => resolve())).catch(() => undefined);
       await client.writeTextFile(
         path.posix.join(stdinDir, `${String(stdinSeq + 1).padStart(12, "0")}.json`),
-        jsonLine({ type: "stdinEnd" }),
+        jsonLine({ type: "terminate" }),
       ).catch(() => undefined);
+      const stopResult = await runner.execute({
+        command: shellCommand,
+        args: shellCommandArgs(
+          [
+            `pid=${remoteSessionPid}`,
+            "attempt=0",
+            "while kill -0 \"$pid\" 2>/dev/null && [ \"$attempt\" -lt 20 ]; do attempt=$((attempt + 1)); sleep 0.1; done",
+            "if kill -0 \"$pid\" 2>/dev/null; then kill -TERM \"$pid\" 2>/dev/null || true; fi",
+            "attempt=0",
+            "while kill -0 \"$pid\" 2>/dev/null && [ \"$attempt\" -lt 20 ]; do attempt=$((attempt + 1)); sleep 0.1; done",
+            "if kill -0 \"$pid\" 2>/dev/null; then kill -KILL \"$pid\" 2>/dev/null || true; fi",
+            "if kill -0 \"$pid\" 2>/dev/null; then exit 1; fi",
+          ].join("\n"),
+        ),
+        cwd: target.remoteCwd,
+        env: { PAPERCLIP_SANDBOX_EXEC_CHANNEL: "bridge" },
+        timeoutMs,
+      });
+      if (stopResult.timedOut || (stopResult.exitCode ?? 1) !== 0) {
+        throw new Error("Failed to stop sandbox ACP process session bridge cleanly.");
+      }
       await client.remove(sessionDir).catch(() => undefined);
       await fs.rm(proxyDir, { recursive: true, force: true }).catch(() => undefined);
     },
@@ -1562,6 +1587,7 @@ const stdinDir = path.posix.join(sessionDir, "stdin");
 const eventsDir = path.posix.join(sessionDir, "events");
 let seq = 0;
 let stdinClosed = false;
+let forceKillTimer;
 
 const config = JSON.parse(Buffer.from(commandPayload, "base64").toString("utf8"));
 await fs.mkdir(stdinDir, { recursive: true });
@@ -1591,7 +1617,24 @@ child.stderr.on("data", (chunk) => void writeEvent({ type: "data", stream: "stde
 child.on("error", (error) => void writeEvent({ type: "error", message: error.message }));
 // "close" (not "exit") so stdout/stderr fully drain before the exit event;
 // the write chain then guarantees the exit file lands after every data file.
-child.on("close", (code, signal) => void writeEvent({ type: "exit", code, signal }));
+child.on("close", (code, signal) => {
+  stdinClosed = true;
+  if (forceKillTimer) clearTimeout(forceKillTimer);
+  void writeEvent({ type: "exit", code, signal });
+});
+
+function terminateChild() {
+  stdinClosed = true;
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGTERM");
+  forceKillTimer = setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }, 1000);
+  forceKillTimer.unref?.();
+}
+
+process.once("SIGINT", terminateChild);
+process.once("SIGTERM", terminateChild);
 
 async function pollStdin() {
   while (!stdinClosed) {
@@ -1607,6 +1650,9 @@ async function pollStdin() {
       } else if (message.type === "stdinEnd") {
         stdinClosed = true;
         child.stdin.end();
+        break;
+      } else if (message.type === "terminate") {
+        terminateChild();
         break;
       }
     }

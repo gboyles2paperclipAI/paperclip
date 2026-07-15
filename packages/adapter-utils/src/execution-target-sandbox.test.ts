@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import net from "node:net";
 import { execFile, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -285,6 +286,70 @@ describe("sandbox adapter execution targets", () => {
       expect(result.stderr).toBe("early-err\n");
     } finally {
       await bridge?.stop();
+    }
+  });
+
+  it("stops a sandbox process session and its child when no proxy connects", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-stop-"));
+    cleanupDirs.push(rootDir);
+    const pidPath = path.join(rootDir, "child.pid");
+    const childPath = path.join(rootDir, "long-running-acp-child.mjs");
+    await writeFile(
+      childPath,
+      [
+        "import { writeFileSync } from 'node:fs';",
+        `writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));`,
+        "setInterval(() => {}, 1000);",
+      ].join("\n"),
+      "utf8",
+    );
+    const target: AdapterSandboxExecutionTarget = {
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "local-test",
+      remoteCwd: rootDir,
+      timeoutMs: 30_000,
+      runner: createLocalSandboxRunner(),
+    };
+    const bridge = await startAdapterExecutionTargetProcessSessionBridge({
+      runId: "run-process-session-stop",
+      target,
+      runtimeRootDir: path.posix.join(rootDir, ".paperclip-runtime", "acpx"),
+      adapterKey: "acpx",
+      command: process.execPath,
+      args: [childPath],
+      cwd: rootDir,
+      env: {},
+      timeoutSec: 5,
+      onLog: async () => {},
+    });
+    expect(bridge).not.toBeNull();
+
+    let childPid: number | null = null;
+    try {
+      await waitForCondition(() => {
+        try {
+          childPid = Number(readFileSync(pidPath, "utf8"));
+          return Number.isSafeInteger(childPid) && childPid! > 0;
+        } catch {
+          return false;
+        }
+      }, "sandbox process session child did not start", 5000);
+      await bridge!.stop();
+      await waitForCondition(() => {
+        try {
+          process.kill(childPid!, 0);
+          return false;
+        } catch {
+          return true;
+        }
+      }, "sandbox process session child remained alive after bridge stop", 5000);
+    } finally {
+      if (childPid) {
+        try {
+          process.kill(childPid, "SIGKILL");
+        } catch {}
+      }
     }
   });
 
