@@ -122,6 +122,7 @@ async function createApp(actor: Record<string, unknown>) {
     next();
   });
   app.use("/api", issueRoutes({
+    ...mockDb,
     transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn({}),
   } as any, {} as any));
   app.use(errorHandler);
