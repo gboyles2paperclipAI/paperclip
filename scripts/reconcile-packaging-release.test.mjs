@@ -145,6 +145,9 @@ test("Help2day source evidence is isolated from publication and runtime activati
   const workflow = readText(".github/workflows/help2day-source-release-evidence.yml");
   assert.match(workflow, /environment: source-release/);
   assert.match(workflow, /build-help2day-release-evidence\.sh/);
+  assert.match(workflow, /Fetch immutable reconciliation lineage/);
+  assert.match(workflow, /refs\/pull\/86\/head/);
+  assert.match(workflow, /include-hidden-files: true/);
   assert.doesNotMatch(workflow, /environment: production-runtime/);
   assert.doesNotMatch(workflow, /npm[_ -]stable|paperclip\.service|db:migrate/);
 
@@ -161,6 +164,8 @@ test("Help2day source evidence is isolated from publication and runtime activati
   assert.match(evidence, /package-gitleaks/);
   assert.match(evidence, /prove-isolated-release-runtime\.sh/);
   assert.match(evidence, /--runtime-proof-mode/);
+  assert.match(evidence, /squash-tree-equivalent/);
+  assert.match(evidence, /reviewed provenance tree does not match the reconciliation merge tree/);
   assert.match(evidence, /heartbeat-settlement-errors\.log/);
   assert.match(evidence, /assert_no_vitest_fixture_leaks/);
   assert.match(evidence, /PAPERCLIP_RELEASE_EVIDENCE_RUN_ID=/);

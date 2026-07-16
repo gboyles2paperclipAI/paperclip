@@ -6,6 +6,8 @@ VERSION=""
 OUTPUT=""
 UPSTREAM_BASE=""
 FORK_ANCHOR=""
+UPSTREAM_PROVENANCE_COMMIT=""
+RECONCILIATION_MERGE_COMMIT=""
 BUILD_TIMESTAMP=""
 BUILDER_ID=""
 RUNTIME_PROOF_MODE="isolated"
@@ -19,7 +21,9 @@ VITEST_EVIDENCE_TMP=""
 usage() {
   printf '%s\n' \
     "Usage: $0 --version YYYY.MDD.P-help2day.N --output DIR \\" \
-    "  --upstream-base SHA --fork-anchor SHA --build-timestamp ISO_UTC --builder-id ID" \
+    "  --upstream-base SHA --fork-anchor SHA \\" \
+    "  --upstream-provenance-commit SHA --reconciliation-merge-commit SHA \\" \
+    "  --build-timestamp ISO_UTC --builder-id ID" \
     "  [--runtime-proof-mode isolated|host] [--runtime-port PORT] [--live-prefix DIR]" \
     "" \
     "Builds and retains source-release evidence only. It has no registry, GitHub, or runtime write path."
@@ -32,13 +36,15 @@ fail() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --version|--output|--upstream-base|--fork-anchor|--build-timestamp|--builder-id|--runtime-proof-mode|--runtime-port|--live-prefix)
+    --version|--output|--upstream-base|--fork-anchor|--upstream-provenance-commit|--reconciliation-merge-commit|--build-timestamp|--builder-id|--runtime-proof-mode|--runtime-port|--live-prefix)
       [[ $# -ge 2 ]] || fail "$1 requires a value"
       case "$1" in
         --version) VERSION="$2" ;;
         --output) OUTPUT="$2" ;;
         --upstream-base) UPSTREAM_BASE="$2" ;;
         --fork-anchor) FORK_ANCHOR="$2" ;;
+        --upstream-provenance-commit) UPSTREAM_PROVENANCE_COMMIT="$2" ;;
+        --reconciliation-merge-commit) RECONCILIATION_MERGE_COMMIT="$2" ;;
         --build-timestamp) BUILD_TIMESTAMP="$2" ;;
         --builder-id) BUILDER_ID="$2" ;;
         --runtime-proof-mode) RUNTIME_PROOF_MODE="$2" ;;
@@ -61,7 +67,8 @@ if [[ "$RUNTIME_PROOF_MODE" == "host" && -z "$LIVE_PREFIX" ]]; then
   fail "host runtime proof requires --live-prefix"
 fi
 
-for value in VERSION OUTPUT UPSTREAM_BASE FORK_ANCHOR BUILD_TIMESTAMP BUILDER_ID; do
+for value in VERSION OUTPUT UPSTREAM_BASE FORK_ANCHOR UPSTREAM_PROVENANCE_COMMIT \
+  RECONCILIATION_MERGE_COMMIT BUILD_TIMESTAMP BUILDER_ID; do
   [[ -n "${!value}" ]] || fail "missing required ${value,,}"
 done
 
@@ -74,24 +81,41 @@ done
 
 SOURCE_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 cd "$REPO_ROOT"
-node --input-type=module - "$VERSION" "$SOURCE_COMMIT" "$UPSTREAM_BASE" "$FORK_ANCHOR" "$BUILD_TIMESTAMP" <<'NODE'
+node --input-type=module - "$VERSION" "$SOURCE_COMMIT" "$UPSTREAM_BASE" "$FORK_ANCHOR" \
+  "$UPSTREAM_PROVENANCE_COMMIT" "$RECONCILIATION_MERGE_COMMIT" "$BUILD_TIMESTAMP" <<'NODE'
 import {
   validateBuildTimestamp,
   validateFullCommit,
   validateHelp2dayVersion,
 } from "./scripts/release-provenance.mjs";
-const [version, source, upstream, fork, timestamp] = process.argv.slice(2);
+const [version, source, upstream, fork, provenance, reconciliation, timestamp] = process.argv.slice(2);
 validateHelp2dayVersion(version);
 validateFullCommit(source, "source commit");
 validateFullCommit(upstream, "upstream base");
 validateFullCommit(fork, "fork anchor");
+validateFullCommit(provenance, "upstream provenance commit");
+validateFullCommit(reconciliation, "reconciliation merge commit");
 validateBuildTimestamp(timestamp);
 NODE
 
-git -C "$REPO_ROOT" merge-base --is-ancestor "$UPSTREAM_BASE" "$SOURCE_COMMIT" \
-  || fail "upstream base is not an ancestor of source commit"
 git -C "$REPO_ROOT" merge-base --is-ancestor "$FORK_ANCHOR" "$SOURCE_COMMIT" \
   || fail "fork anchor is not an ancestor of source commit"
+git -C "$REPO_ROOT" merge-base --is-ancestor "$UPSTREAM_BASE" "$UPSTREAM_PROVENANCE_COMMIT" \
+  || fail "upstream base is not an ancestor of the provenance commit"
+git -C "$REPO_ROOT" merge-base --is-ancestor "$FORK_ANCHOR" "$UPSTREAM_PROVENANCE_COMMIT" \
+  || fail "fork anchor is not an ancestor of the provenance commit"
+git -C "$REPO_ROOT" merge-base --is-ancestor "$RECONCILIATION_MERGE_COMMIT" "$SOURCE_COMMIT" \
+  || fail "reconciliation merge is not an ancestor of source commit"
+
+PROVENANCE_TREE="$(git -C "$REPO_ROOT" rev-parse "$UPSTREAM_PROVENANCE_COMMIT^{tree}")"
+RECONCILIATION_TREE="$(git -C "$REPO_ROOT" rev-parse "$RECONCILIATION_MERGE_COMMIT^{tree}")"
+[[ "$PROVENANCE_TREE" == "$RECONCILIATION_TREE" ]] \
+  || fail "reviewed provenance tree does not match the reconciliation merge tree"
+if git -C "$REPO_ROOT" merge-base --is-ancestor "$UPSTREAM_BASE" "$SOURCE_COMMIT"; then
+  LINEAGE_MODE="direct"
+else
+  LINEAGE_MODE="squash-tree-equivalent"
+fi
 
 OUTPUT="$(realpath -m "$OUTPUT")"
 case "$OUTPUT/" in
@@ -365,6 +389,10 @@ node scripts/release-provenance.mjs \
   --source-commit "$SOURCE_COMMIT" \
   --upstream-base "$UPSTREAM_BASE" \
   --fork-anchor "$FORK_ANCHOR" \
+  --lineage-mode "$LINEAGE_MODE" \
+  --upstream-provenance-commit "$UPSTREAM_PROVENANCE_COMMIT" \
+  --reconciliation-merge-commit "$RECONCILIATION_MERGE_COMMIT" \
+  --reconciled-tree "$RECONCILIATION_TREE" \
   --build-timestamp "$BUILD_TIMESTAMP" \
   --builder-id "$BUILDER_ID" \
   --lockfile "$OUTPUT/package-inventory/package-lock.json" \
@@ -405,6 +433,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const [root, source, version, count, security, sourceScan, packageScan] = process.argv.slice(2);
 const scanner = JSON.parse(readFileSync(join(root, "security-results/summary.json"), "utf8"));
+const manifest = JSON.parse(readFileSync(join(root, "release-manifest.json"), "utf8"));
 const status = security === "0" && sourceScan === "0" && packageScan === "0" ? "PASS" : "BLOCKED";
 const runtime = JSON.parse(readFileSync(join(root, "runtime-proof/result.json"), "utf8"));
 writeFileSync(join(root, "release-report.md"), [
@@ -412,6 +441,7 @@ writeFileSync(join(root, "release-report.md"), [
   "",
   `- Status: ${status}`,
   `- Source commit: \`${source}\``,
+  `- Source lineage: ${manifest.lineage.mode} via \`${manifest.lineage.upstreamProvenanceCommit}\` -> \`${manifest.lineage.reconciliationMergeCommit}\``,
   `- Governed version: \`${version}\``,
   `- Immutable packages: ${count}`,
   `- Dependency security: ${scanner.status}`,

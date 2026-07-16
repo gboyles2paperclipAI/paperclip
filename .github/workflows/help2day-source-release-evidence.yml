@@ -19,6 +19,14 @@ on:
         description: Full company-fork anchor commit SHA.
         required: true
         type: string
+      upstream_provenance_commit:
+        description: Exact reviewed reconciliation PR head whose tree was merged.
+        required: true
+        type: string
+      reconciliation_merge_commit:
+        description: Exact squash merge commit with a tree equal to the reviewed PR head.
+        required: true
+        type: string
 
 concurrency:
   group: help2day-source-release-${{ inputs.source_ref }}
@@ -49,6 +57,23 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ inputs.source_ref }}
+
+      - name: Fetch immutable reconciliation lineage
+        env:
+          UPSTREAM_BASE: ${{ inputs.upstream_base }}
+          UPSTREAM_PROVENANCE_COMMIT: ${{ inputs.upstream_provenance_commit }}
+          RECONCILIATION_MERGE_COMMIT: ${{ inputs.reconciliation_merge_commit }}
+        run: |
+          for commit in "$UPSTREAM_BASE" "$UPSTREAM_PROVENANCE_COMMIT" "$RECONCILIATION_MERGE_COMMIT"; do
+            [[ "$commit" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]] || exit 1
+          done
+          git fetch --no-tags origin refs/pull/86/head
+          test "$(git rev-parse FETCH_HEAD)" = "$UPSTREAM_PROVENANCE_COMMIT"
+          git update-ref refs/release-evidence/upstream-provenance "$UPSTREAM_PROVENANCE_COMMIT"
+          git fetch --no-tags https://github.com/paperclipai/paperclip.git "$UPSTREAM_BASE"
+          test "$(git rev-parse FETCH_HEAD)" = "$UPSTREAM_BASE"
+          git update-ref refs/release-evidence/upstream-base "$UPSTREAM_BASE"
+          git cat-file -e "$RECONCILIATION_MERGE_COMMIT^{commit}"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -112,6 +137,8 @@ jobs:
           VERSION: ${{ inputs.version }}
           UPSTREAM_BASE: ${{ inputs.upstream_base }}
           FORK_ANCHOR: ${{ inputs.fork_anchor }}
+          UPSTREAM_PROVENANCE_COMMIT: ${{ inputs.upstream_provenance_commit }}
+          RECONCILIATION_MERGE_COMMIT: ${{ inputs.reconciliation_merge_commit }}
           BUILDER_ID: github:${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
         run: |
           ./scripts/build-help2day-release-evidence.sh \
@@ -119,6 +146,8 @@ jobs:
             --output "$EVIDENCE_ROOT" \
             --upstream-base "$UPSTREAM_BASE" \
             --fork-anchor "$FORK_ANCHOR" \
+            --upstream-provenance-commit "$UPSTREAM_PROVENANCE_COMMIT" \
+            --reconciliation-merge-commit "$RECONCILIATION_MERGE_COMMIT" \
             --build-timestamp "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
             --builder-id "$BUILDER_ID"
 

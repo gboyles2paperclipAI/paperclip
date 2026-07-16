@@ -50,6 +50,7 @@ export function buildReleaseManifest({
   sourceCommit,
   upstreamBase,
   forkAnchor,
+  lineage,
   buildTimestamp,
   builderId,
   lockfile,
@@ -66,6 +67,9 @@ export function buildReleaseManifest({
   }
   if (!Array.isArray(artifacts) || artifacts.length === 0) {
     throw new Error("release manifest requires at least one artifact");
+  }
+  if (!lineage || !["direct", "squash-tree-equivalent"].includes(lineage.mode)) {
+    throw new Error("release manifest requires a valid lineage mode");
   }
 
   const normalizedArtifacts = artifacts
@@ -87,13 +91,25 @@ export function buildReleaseManifest({
     .sort((left, right) => left.filename.localeCompare(right.filename));
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     product: "paperclip",
     distribution: "help2day",
     version: normalizedVersion,
     sourceCommit: validateFullCommit(sourceCommit, "source commit"),
     upstreamBase: validateFullCommit(upstreamBase, "upstream base"),
     forkAnchor: validateFullCommit(forkAnchor, "fork anchor"),
+    lineage: {
+      mode: lineage.mode,
+      upstreamProvenanceCommit: validateFullCommit(
+        lineage.upstreamProvenanceCommit,
+        "upstream provenance commit",
+      ),
+      reconciliationMergeCommit: validateFullCommit(
+        lineage.reconciliationMergeCommit,
+        "reconciliation merge commit",
+      ),
+      reconciledTree: validateFullCommit(lineage.reconciledTree, "reconciled tree"),
+    },
     build: {
       timestamp: validateBuildTimestamp(buildTimestamp),
       builderId: normalizedBuilder,
@@ -154,6 +170,10 @@ function parseArgs(argv) {
     "--source-commit",
     "--upstream-base",
     "--fork-anchor",
+    "--lineage-mode",
+    "--upstream-provenance-commit",
+    "--reconciliation-merge-commit",
+    "--reconciled-tree",
     "--build-timestamp",
     "--builder-id",
     "--lockfile",
@@ -187,6 +207,12 @@ function main() {
       sourceCommit,
       upstreamBase: args.get("--upstream-base"),
       forkAnchor: args.get("--fork-anchor"),
+      lineage: {
+        mode: args.get("--lineage-mode"),
+        upstreamProvenanceCommit: args.get("--upstream-provenance-commit"),
+        reconciliationMergeCommit: args.get("--reconciliation-merge-commit"),
+        reconciledTree: args.get("--reconciled-tree"),
+      },
       buildTimestamp: args.get("--build-timestamp"),
       builderId: args.get("--builder-id"),
       lockfile: { filename: basename(lockfilePath), sha256: sha256File(lockfilePath) },
