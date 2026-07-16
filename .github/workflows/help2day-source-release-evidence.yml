@@ -129,6 +129,7 @@ jobs:
           name: help2day-source-release-${{ inputs.source_ref }}
           path: ${{ runner.temp }}/help2day-source-release-evidence/
           if-no-files-found: error
+          include-hidden-files: true
           retention-days: 30
 
       - name: Enforce evidence result
