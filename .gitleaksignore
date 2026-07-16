@@ -53,4 +53,5 @@ ce5f52059cec9759041ee15dae55ea54cbae84c9:server/src/services/plugin-host-service
 38b855e4955c3fa7deb2c7e59631528c1aa4cd23:server/src/routes/access.ts:generic-api-key:36
 
 # Google Sheets MCP source — regex literal that redacts private-key blocks from tool output
-7b35de65aaabbd53c2393cdf10c2223e36af1c23:packages/google-sheets-mcp-server/src/tools.ts:private-key:97
+# PR #86 was squash-merged byte-identically, so the narrow introduction commit changed.
+b4ec00b498f48e2e7f62d698b20fa2e8a3572a57:packages/google-sheets-mcp-server/src/tools.ts:private-key:97
