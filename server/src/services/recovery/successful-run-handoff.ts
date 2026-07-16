@@ -55,6 +55,7 @@ type IssueRow = Pick<
   | "identifier"
   | "title"
   | "status"
+  | "workMode"
   | "assigneeAgentId"
   | "assigneeUserId"
   | "executionPolicy"
@@ -367,6 +368,7 @@ export function decideSuccessfulRunHandoff(input: {
   hasActiveExecutionPath: boolean;
   hasQueuedWake: boolean;
   hasPendingInteractionOrApproval: boolean;
+  hasPersistedMonitor: boolean;
   hasExplicitBlockerPath: boolean;
   hasOpenRecoveryIssue: boolean;
   hasPauseHold: boolean;
@@ -393,6 +395,7 @@ export function decideSuccessfulRunHandoff(input: {
   }
   if (issue.assigneeUserId) return { kind: "skip", reason: "issue is human-owned" };
   if (issue.status !== "in_progress") return { kind: "skip", reason: `issue status ${issue.status} is a valid disposition` };
+  if (issue.workMode === "planning") return { kind: "skip", reason: "planning issue continuation is owned by plan approval or decomposition" };
   if (isPermanentWatcherIssue(issue)) return { kind: "skip", reason: "permanent watcher owns its own lifecycle" };
   if (issue.executionState) return { kind: "skip", reason: "issue has execution policy state" };
   if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") {
@@ -409,6 +412,7 @@ export function decideSuccessfulRunHandoff(input: {
   if (input.hasPendingInteractionOrApproval) {
     return { kind: "skip", reason: "pending interaction or approval owns the next action" };
   }
+  if (input.hasPersistedMonitor) return { kind: "skip", reason: "persisted issue monitor owns the next action" };
   if (input.hasExplicitBlockerPath) return { kind: "skip", reason: "explicit blocker path owns the next action" };
   if (input.hasOpenRecoveryIssue) return { kind: "skip", reason: "open recovery issue owns the ambiguity" };
   if (input.hasPauseHold) return { kind: "skip", reason: "issue is under an active pause hold" };

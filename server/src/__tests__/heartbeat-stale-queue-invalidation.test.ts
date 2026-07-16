@@ -191,6 +191,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       id: companyId,
       name: "Paperclip",
       issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      defaultResponsibleUserId: "responsible-user",
       requireBoardApprovalForNewAgents: false,
     });
     await db.insert(agents).values({
@@ -429,7 +430,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(countExecuteCallsForRun(run!.id)).toBe(1);
   });
 
-  it("runs generic timer wakes by default for proactive agents without assigned issue work", async () => {
+  it("allows legacy generic timer wakes by default when no skip policy is set", async () => {
     const { agentId } = await seedCompanyAndAgent({
       heartbeatConfig: {
         enabled: true,
@@ -443,7 +444,24 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
 
     expect(run).not.toBeNull();
     await waitForCondition(async () => countExecuteCallsForRun(run!.id) > 0);
+    expect(countExecuteCallsForRun(run!.id)).toBe(1);
+  });
 
+  it("allows explicit proactive generic timer wakes without assigned issue work", async () => {
+    const { agentId } = await seedCompanyAndAgent({
+      heartbeatConfig: {
+        enabled: true,
+        skipTimerWhenNoActionableWork: false,
+      },
+    });
+
+    const run = await heartbeat.wakeup(agentId, {
+      source: "timer",
+      triggerDetail: "schedule",
+    });
+
+    expect(run).not.toBeNull();
+    await waitForCondition(async () => countExecuteCallsForRun(run!.id) > 0);
     expect(countExecuteCallsForRun(run!.id)).toBe(1);
   });
 
@@ -1142,6 +1160,46 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(run?.status).toBe("cancelled");
     expect(run?.errorCode).toBe("issue_terminal_status");
     expect(wakeup?.status).toBe("skipped");
+    expect(countExecuteCallsForRun(runId)).toBe(0);
+  });
+
+  it("cancels an automatic continuation while the issue remains blocked", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Blocked task with a stale continuation",
+      status: "blocked",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+
+    const { runId } = await seedQueuedRun({
+      companyId,
+      agentId,
+      issueId,
+      wakeReason: "issue_continuation_needed",
+      invocationSource: "automation",
+      contextExtras: {
+        retryReason: "issue_continuation_needed",
+        source: "issue.continuation_recovery",
+      },
+    });
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForCondition(async () => db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0]?.status === "cancelled"));
+
+    const run = await db
+      .select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(run).toMatchObject({ status: "cancelled", errorCode: "issue_blocked_status" });
     expect(countExecuteCallsForRun(runId)).toBe(0);
   });
 

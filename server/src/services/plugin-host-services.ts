@@ -866,7 +866,7 @@ export function buildHostServices(
   };
 
   const INVITE_TOKEN_PREFIX = "pcp_invite_";
-  const INVITE_TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const INVITE_SUFFIX_CHARACTERS = "abcdefghijklmnopqrstuvwxyz0123456789";
   const INVITE_TOKEN_SUFFIX_LENGTH = 8;
   const INVITE_TOKEN_MAX_RETRIES = 5;
   const COMPANY_INVITE_TTL_MS = 72 * 60 * 60 * 1000;
@@ -877,7 +877,7 @@ export function buildHostServices(
     const bytes = randomBytes(INVITE_TOKEN_SUFFIX_LENGTH);
     let suffix = "";
     for (let idx = 0; idx < INVITE_TOKEN_SUFFIX_LENGTH; idx += 1) {
-      suffix += INVITE_TOKEN_ALPHABET[bytes[idx]! % INVITE_TOKEN_ALPHABET.length];
+      suffix += INVITE_SUFFIX_CHARACTERS[bytes[idx]! % INVITE_SUFFIX_CHARACTERS.length];
     }
     return `${INVITE_TOKEN_PREFIX}${suffix}`;
   };
@@ -1063,8 +1063,10 @@ export function buildHostServices(
 
   return {
     config: {
-      async get() {
-        const configRow = await registry.getConfig(pluginId);
+      async get(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const configRow = await registry.getConfig(pluginId, companyId);
         return configRow?.configJson ?? {};
       },
     },
@@ -1240,7 +1242,9 @@ export function buildHostServices(
 
     secrets: {
       async resolve(params) {
-        return secretsHandler.resolve(params);
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return secretsHandler.resolve({ ...params, companyId });
       },
     },
 
@@ -1558,6 +1562,8 @@ export function buildHostServices(
           originRunId: params.originRunId ?? actorRunId ?? null,
           createdByAgentId: actorAgentId ?? null,
           createdByUserId: actorUserId ?? null,
+          actorResponsibleUserId: actorUserId ?? null,
+          trustExplicitResponsibleUserId: true,
         })) as Issue;
         await logPluginActivity({
           companyId,
@@ -2643,7 +2649,7 @@ export function buildHostServices(
         // Track the subscription so it can be cleaned up on dispose() if the run
         // never reaches a terminal status (hang, crash, network partition).
         if (notifyWorker) {
-          const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+          const TERMINAL_STATUSES = new Set(["succeeded", "interrupted", "failed", "cancelled", "timed_out"]);
 
           const cleanup = () => {
             unsubscribe();

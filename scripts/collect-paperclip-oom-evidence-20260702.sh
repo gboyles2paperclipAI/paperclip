@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-OUT_DIR="${1:-/home/paperclipadmin/paperclip-src/final/oom-evidence}"
+OUT_DIR="${1:-${PWD}/final/oom-evidence}"
 STAMP="$(date -u +"%Y%m%dT%H%M%SZ")"
 OUT_FILE="$OUT_DIR/paperclip-oom-evidence-$STAMP.txt"
 REPORT_DIR="/var/lib/paperclip-node-diagnostics"

@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import {
   agents,
   companies,
+  companyMemberships,
   createDb,
   environmentLeases,
   heartbeatRuns,
@@ -58,7 +59,10 @@ vi.mock("../adapters/index.ts", async () => {
   };
 });
 
-import { heartbeatService } from "../services/heartbeat.ts";
+import {
+  heartbeatService,
+  waitForAllHeartbeatRunExecutionsDrain,
+} from "../services/heartbeat.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -120,7 +124,10 @@ async function waitForHeartbeatIdle(
       .select({ total: sql<number>`count(*)::integer` })
       .from(environmentLeases)
       .where(eq(environmentLeases.status, "active"));
-    if (Number(activeRunRow?.total ?? 0) === 0 && Number(activeLeaseRow?.total ?? 0) === 0) return;
+    if (Number(activeRunRow?.total ?? 0) === 0 && Number(activeLeaseRow?.total ?? 0) === 0) {
+      await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs });
+      return;
+    }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }
@@ -178,8 +185,10 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
       provider: "test",
       model: "test-model",
     });
-    // executeRun starts follow-up work asynchronously; wait for it to leave the
-    // run/lease tables idle before taking AccessExclusive locks for cleanup.
+    // A terminal row and released lease can precede the last activity/event
+    // writes. Use the service's explicit finalization boundary before cleanup.
+    const runIds = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns);
+    await Promise.all(runIds.map(({ id }) => heartbeat.waitForRunExecutionDrain(id)));
     await waitForHeartbeatIdle(db);
     await truncateCompaniesWithDeadlockRetry(db);
   });
@@ -196,6 +205,7 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
     issueId: string;
   }> {
     const companyId = randomUUID();
+    const ownerUserId = `owner-${randomUUID()}`;
     const agentId = randomUUID();
     const issueId = randomUUID();
     const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
@@ -204,7 +214,16 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
       id: companyId,
       name: "Paperclip",
       issuePrefix,
+      defaultResponsibleUserId: ownerUserId,
       requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: ownerUserId,
+      membershipRole: "owner",
+      status: "active",
     });
 
     await db.insert(agents).values({
@@ -326,11 +345,17 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
     expect(adapterExecute).toHaveBeenCalledTimes(1);
 
     const issue = await db
-      .select({ status: issues.status })
+      .select({
+        status: issues.status,
+        executionRunId: issues.executionRunId,
+        checkoutRunId: issues.checkoutRunId,
+      })
       .from(issues)
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0] ?? null);
     expect(issue?.status).toBe("blocked");
+    expect(issue?.executionRunId).toBeNull();
+    expect(issue?.checkoutRunId).toBeNull();
 
     const retries = await scheduledRetryRunsForAgent(agentId);
     expect(retries).toHaveLength(0);
@@ -338,12 +363,15 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
 
   it("defers (schedules a bounded retry) on a quota failure and does NOT block the issue", async () => {
     const { agentId, issueId } = await seedRunnableIssue();
+    const retryNotBefore = new Date(Date.now() + 60_000).toISOString();
     adapterExecute.mockResolvedValue({
       exitCode: 1,
       signal: null,
       timedOut: false,
       errorCode: "adapter_failed",
-      errorMessage: "insufficient quota for billing window",
+      errorMessage: "429 insufficient quota for billing window",
+      errorFamily: "transient_upstream",
+      retryNotBefore,
       provider: "test",
       model: "test-model",
     });
@@ -359,8 +387,15 @@ describeEmbeddedPostgres("heartbeat preflight + retry-policy wiring (FUL-6386)",
     expect(issue?.status).not.toBe("blocked");
 
     const retries = await scheduledRetryRunsForAgent(agentId);
-    expect(retries.length).toBeGreaterThanOrEqual(1);
+    expect(retries).toHaveLength(1);
     expect(retries[0]?.scheduledRetryReason ?? "").toContain("retry_deferred_quota");
+    expect(retries[0]?.contextSnapshot).toMatchObject({
+      wakeReason: "failure_retry_deferred",
+      retryReason: expect.stringContaining("retry_deferred_quota"),
+      errorFamily: "transient_upstream",
+      transientRetryNotBefore: retryNotBefore,
+    });
+    expect(retries[0]?.contextSnapshot).not.toHaveProperty("codexTransientFallbackMode");
   });
 
   it("preserves existing behavior on a transient failure (no deterministic block, no defer)", async () => {

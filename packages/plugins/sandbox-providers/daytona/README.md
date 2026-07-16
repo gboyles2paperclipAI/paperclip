@@ -12,7 +12,7 @@ From a Paperclip instance, install:
 @paperclipai/plugin-daytona
 ```
 
-The host plugin installer runs `npm install` into the managed plugin directory, so transitive dependencies such as `@daytonaio/sdk` are pulled in during installation.
+The host plugin installer runs `npm install` into the managed plugin directory, so transitive dependencies such as `@daytona/sdk` are pulled in during installation.
 
 ## Configuration
 
@@ -25,7 +25,7 @@ Configure Daytona from `Instance Settings -> Environments`, not from the plugin'
 
 Notes:
 
-- The current published Daytona SDK package is `@daytonaio/sdk`.
+- The current published Daytona SDK package is `@daytona/sdk`.
 - The driver supports both `snapshot`-based and `image`-based sandbox creation. If both are set, validation rejects the config as ambiguous.
 - Reusable leases map to Daytona stop/start semantics. Non-reusable leases are deleted on release.
 

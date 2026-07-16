@@ -5,6 +5,17 @@ summary: CLI installation and setup
 
 The Paperclip CLI handles instance setup, diagnostics, and control-plane operations.
 
+## Version and release identity
+
+Run `paperclipai --version` to read the installed CLI package version. All
+packages in one governed release use the same version. Help2day candidates use
+`YYYY.MDD.P-help2day.N`; a version is never reused for different artifact bytes
+or a different source commit.
+
+The CLI version alone is not complete provenance. Compare it with
+`GET /api/health` and the release manifest's `sourceCommit`, `artifacts`, and
+SBOM hash before approving an installation or runtime change.
+
 ## Usage
 
 ```sh

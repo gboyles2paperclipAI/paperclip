@@ -5,10 +5,10 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 import { buildReleasePackagePlan } from "./release-package-map.mjs";
-import { releaseTarballSha256 } from "./npm-release-tarball.mjs";
 import {
   cleanupReleaseStageRoot,
   createReleaseStageRoot,
+  resolveConfiguredForbiddenTokens,
   stageReleasePackages,
 } from "./stage-release-packages.mjs";
 
@@ -26,8 +26,8 @@ function usage() {
       "  node scripts/bootstrap-npm-package.mjs <package-name-or-dir> [--publish --otp <code>] [--skip-build]",
       "",
       "Examples:",
-      "  node scripts/bootstrap-npm-package.mjs @paperclipai/adapter-acpx-local",
-      "  node scripts/bootstrap-npm-package.mjs packages/adapters/acpx-local --publish --otp 123456",
+      "  node scripts/bootstrap-npm-package.mjs @paperclipai/plugin-workspace-diff",
+      "  node scripts/bootstrap-npm-package.mjs packages/plugins/plugin-workspace-diff --publish",
       "",
     ].join("\n"),
   );
@@ -49,22 +49,13 @@ function parseArgs(argv) {
       continue;
     }
 
-    if (arg === "--otp") {
-      const value = argv[index + 1];
+    if (arg === "--otp" || arg.startsWith("--otp=")) {
+      const value = arg === "--otp" ? argv[index + 1] : arg.slice("--otp=".length);
       if (!value || value.startsWith("--")) {
         throw new Error("expected a one-time password after --otp");
       }
       otp = value;
-      index += 1;
-      continue;
-    }
-
-    if (arg.startsWith("--otp=")) {
-      const value = arg.slice("--otp=".length);
-      if (!value) {
-        throw new Error("expected a one-time password after --otp");
-      }
-      otp = value;
+      if (arg === "--otp") index += 1;
       continue;
     }
 
@@ -198,10 +189,18 @@ function printNextSteps(pkg) {
   );
 }
 
-function buildPublishArgs(tarballPath, { dryRun = false, otp = null } = {}) {
+function resolveTarballPath(stagedPackage) {
+  if (typeof stagedPackage === "string") return stagedPackage;
+  if (typeof stagedPackage?.tarballPath === "string" && stagedPackage.tarballPath) {
+    return stagedPackage.tarballPath;
+  }
+  throw new Error("missing staged release tarball");
+}
+
+function buildPublishArgs(stagedPackage, { dryRun = false, otp = null } = {}) {
   const args = [
     "publish",
-    tarballPath,
+    resolveTarballPath(stagedPackage),
     "--ignore-scripts",
     "--no-git-checks",
     "--access",
@@ -219,35 +218,19 @@ function buildPublishArgs(tarballPath, { dryRun = false, otp = null } = {}) {
   return args;
 }
 
-function verifyStagedTarball(staged) {
-  let actual;
-  try {
-    actual = releaseTarballSha256(staged.tarballPath);
-  } catch {
-    throw new Error("staged bootstrap tarball could not be re-read safely");
-  }
-  if (actual !== staged.sha256) {
-    throw new Error("staged bootstrap tarball changed after scanning");
-  }
-}
-
-function publishPackage(staged, otp, commandRunner = runCommand) {
-  verifyStagedTarball(staged);
-  const publishArgs = buildPublishArgs(staged.tarballPath, { otp });
-
+function publishPackage(stagedPackage, otp, commandRunner = runCommand) {
+  const publishArgs = buildPublishArgs(stagedPackage, { otp });
   let result;
   try {
     result = commandRunner("pnpm", publishArgs);
   } catch {
-    throw new Error(
-      "npm package publication failed before completion. Command details were withheld because they may contain authentication material.",
-    );
+    throw new Error("package publish command failed before completion");
   }
-  if (!result || result.error) {
-    throw new Error(
-      "npm package publication failed before completion. Command details were withheld because they may contain authentication material.",
-    );
+
+  if (result?.error || result?.signal) {
+    throw new Error("package publish command failed before completion");
   }
+
   const stdout = result.stdout ?? "";
   const stderr = result.stderr ?? "";
   const output = `${stdout}\n${stderr}`.trim();
@@ -259,15 +242,13 @@ function publishPackage(staged, otp, commandRunner = runCommand) {
   if (/\bEOTP\b|one-time password/i.test(output)) {
     throw new Error(
       [
-        "npm package publication reached the publish-time 2FA check.",
-        "Complete npm authentication separately and rerun with a fresh `--otp <code>` if your account uses authenticator-app codes.",
+        "The registry publish step reached the publish-time 2FA check.",
+        "Complete the browser auth URL printed by npm and rerun the helper, or rerun with `--otp <code>` if your npm account uses authenticator-app codes.",
       ].join(" "),
     );
   }
 
-  throw new Error(
-    "npm package publication failed. Command output was withheld because it may contain authentication material.",
-  );
+  throw new Error(`package registry publish failed with status ${result.status ?? "unknown"}`);
 }
 
 function main(argv) {
@@ -309,13 +290,16 @@ function main(argv) {
 
   let stageRoot;
   try {
-    process.stdout.write(`Staging and scanning publish payload for ${pkg.name}...\n`);
     stageRoot = createReleaseStageRoot();
-    const [staged] = stageReleasePackages({ stageRoot, packages: [pkg] });
+    process.stdout.write(`Staging scanned release tarball for ${pkg.name}...\n`);
+    const [stagedPackage] = stageReleasePackages({
+      stageRoot,
+      packages: [pkg],
+      tokens: resolveConfiguredForbiddenTokens(),
+    });
 
-    process.stdout.write(`Previewing immutable publish payload for ${pkg.name}...\n`);
-    verifyStagedTarball(staged);
-    runChecked("pnpm", buildPublishArgs(staged.tarballPath, { dryRun: true }));
+    process.stdout.write(`Previewing publish payload for ${pkg.name}...\n`);
+    runChecked("pnpm", buildPublishArgs(stagedPackage, { dryRun: true }));
 
     if (!publish) {
       process.stdout.write(
@@ -330,10 +314,10 @@ function main(argv) {
     }
 
     process.stdout.write(`Publishing ${pkg.name}...\n`);
-    publishPackage(staged, otp);
+    publishPackage(stagedPackage, otp);
     printNextSteps(pkg);
   } finally {
-    if (stageRoot) cleanupReleaseStageRoot(stageRoot);
+    cleanupReleaseStageRoot(stageRoot);
   }
 }
 
@@ -355,5 +339,4 @@ export {
   parseArgs,
   publishPackage,
   resolveTargetPackage,
-  verifyStagedTarball,
 };

@@ -182,6 +182,7 @@ vi.mock("../services/index.js", () => ({
   agentInstructionsService: () => mockAgentInstructionsService,
   accessService: () => mockAccessService,
   approvalService: () => mockApprovalService,
+  builtInAgentService: () => ({ ensureCompanyDefaultAgentGrants: vi.fn() }),
   companySkillService: () => mockCompanySkillService,
   budgetService: () => mockBudgetService,
   heartbeatService: () => mockHeartbeatService,
@@ -393,7 +394,7 @@ describe.sequential("agent cross-tenant route authorization", () => {
     expect(res.body.error).toContain("Key not found");
     expect(mockAgentService.getKeyById).toHaveBeenCalledWith(keyId);
     expect(mockAgentService.revokeKey).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it("returns only safe key inventory metadata", async () => {
     const creation = {

@@ -51,6 +51,9 @@ function registerModuleMocks() {
       hasPermission: vi.fn(),
     }),
     agentService: () => mockAgentService,
+    companySkillService: () => ({
+      completeTestRunForIssue: vi.fn(async () => null),
+    }),
     documentAnnotationService: () => ({ remapOpenThreadsForDocument: async () => [] }),
     documentService: () => ({}),
     executionWorkspaceService: () => ({}),
@@ -119,6 +122,7 @@ async function createApp(actor: Record<string, unknown>) {
     next();
   });
   app.use("/api", issueRoutes({
+    ...mockDb,
     transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn({}),
   } as any, {} as any));
   app.use(errorHandler);

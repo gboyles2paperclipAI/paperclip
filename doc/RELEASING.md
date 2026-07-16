@@ -15,12 +15,14 @@ Paperclip uses calendar versions that still fit semver syntax:
 
 - stable: `YYYY.MDD.P`
 - canary: `YYYY.MDD.P-canary.N`
+- governed Help2day source candidate: `YYYY.MDD.P-help2day.N`
 
 Examples:
 
 - first stable on March 18, 2026: `2026.318.0`
 - second stable on March 18, 2026: `2026.318.1`
 - fourth canary for the `2026.318.1` line: `2026.318.1-canary.3`
+- first Help2day candidate for July 15, 2026: `2026.715.0-help2day.1`
 
 Important constraints:
 
@@ -29,6 +31,31 @@ Important constraints:
 - do not use leading zeroes such as `2026.0318.0`
 - do not use four numeric segments such as `2026.3.18.1`
 - the semver-safe canary form is `2026.318.0-canary.1`
+- the Help2day suffix identifies company-governed bytes and is never reused for a different source commit
+
+`0.3.1-help2day.1` is not used. Semver orders it before `0.3.1`, and current
+advisory ranges cannot distinguish it from historical vulnerable releases. The
+Help2day format stays on the repository's calendar-version line while adding a
+distribution-specific revision.
+
+## Help2day source and runtime gates
+
+The Help2day fork adds two approval boundaries. They are deliberately separate:
+
+1. `source-release` may validate an exact commit, retain an immutable evidence
+   artifact, and authorize a later company-fork source change.
+2. `production-runtime` may install already approved artifact hashes, run an
+   approved migration, and restart the service in a governed change window.
+
+The first boundary never receives production secrets and never installs or
+activates Paperclip on a live host. A passing source bundle does not authorize
+the second boundary.
+
+Run the manual `Help2day Source Release Evidence` workflow with a full commit
+SHA, governed version, frozen upstream base, and company-fork anchor. The
+candidate remains unreleased until that workflow passes, its evidence receives
+the required independent review, and the separate source RED decision is
+recorded.
 
 ## Release Surfaces
 

@@ -90,7 +90,7 @@ function hashToken(token: string) {
 }
 
 const INVITE_TOKEN_PREFIX = "pcp_invite_";
-const INVITE_TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+const INVITE_SUFFIX_CHARACTERS = "abcdefghijklmnopqrstuvwxyz0123456789";
 const INVITE_TOKEN_SUFFIX_LENGTH = 8;
 const INVITE_TOKEN_MAX_RETRIES = 5;
 const COMPANY_INVITE_TTL_MS = 72 * 60 * 60 * 1000;
@@ -105,7 +105,7 @@ function createInviteToken() {
   const bytes = randomBytes(INVITE_TOKEN_SUFFIX_LENGTH);
   let suffix = "";
   for (let idx = 0; idx < INVITE_TOKEN_SUFFIX_LENGTH; idx += 1) {
-    suffix += INVITE_TOKEN_ALPHABET[bytes[idx]! % INVITE_TOKEN_ALPHABET.length];
+    suffix += INVITE_SUFFIX_CHARACTERS[bytes[idx]! % INVITE_SUFFIX_CHARACTERS.length];
   }
   return `${INVITE_TOKEN_PREFIX}${suffix}`;
 }
@@ -4393,7 +4393,7 @@ export function accessRoutes(
           keyId: created.id,
           responsibleUserId,
           creation: created.creation,
-        }
+        },
       });
 
       res.status(201).json({

@@ -91,7 +91,7 @@ describe("forbidden token check", () => {
       "git",
       [
         "grep",
-        "-in",
+        "-Fin",
         "--no-color",
         "--",
         "account_fixture_6394",

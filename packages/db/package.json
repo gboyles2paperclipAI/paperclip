@@ -13,18 +13,8 @@
   },
   "type": "module",
   "exports": {
-    ".": {
-      "production": "./dist/index.js",
-      "types": "./src/index.ts",
-      "import": "./src/index.ts",
-      "default": "./src/index.ts"
-    },
-    "./*": {
-      "production": "./dist/*.js",
-      "types": "./src/*.ts",
-      "import": "./src/*.ts",
-      "default": "./src/*.ts"
-    }
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
   },
   "publishConfig": {
     "access": "public",
@@ -45,8 +35,8 @@
     "dist"
   ],
   "scripts": {
-    "check:migrations": "tsx src/check-migration-numbering.ts",
-    "build": "pnpm run check:migrations && tsc && rm -rf dist/migrations && cp -r src/migrations dist/migrations",
+    "check:migrations": "tsx src/check-migration-numbering.ts && tsx src/check-migration-safety.ts",
+    "build": "pnpm run check:migrations && tsc && cp -r src/migrations dist/migrations",
     "clean": "rm -rf dist",
     "typecheck": "pnpm run check:migrations && tsc --noEmit",
     "generate": "pnpm run check:migrations && tsc -p tsconfig.json && drizzle-kit generate",

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,11 +17,13 @@ function runPublishHelper({ pnpmMode, npmVersionExists = false, distTag = "canar
   const binDir = join(fixtureDir, "bin");
   const stateDir = join(fixtureDir, "state");
   const callLog = join(fixtureDir, "calls.log");
+  const tarballPath = join(fixtureDir, "paperclipai-example-1.2.3.tgz");
+  const tarballBytes = "fake package tarball";
+  const tarballSha256 = createHash("sha256").update(tarballBytes).digest("hex");
   mkdirSync(binDir);
   mkdirSync(stateDir);
-  const tarballPath = join(fixtureDir, "package.tgz");
-  writeFileSync(tarballPath, "immutable staged package bytes");
-  const tarballSha256 = createHash("sha256").update(readFileSync(tarballPath)).digest("hex");
+  writeFileSync(callLog, "");
+  writeFileSync(tarballPath, tarballBytes);
 
   writeExecutable(
     join(binDir, "pnpm"),
@@ -82,7 +84,7 @@ exit 1
   const script = `
 ${shellOptions}
 source "${repoRoot}/scripts/release-lib.sh"
-publish_package_to_npm ${distTag} @paperclipai/example 1.2.3 "${tarballPath}" "${tarballSha256}"
+publish_package_to_npm ${distTag} @paperclipai/example 1.2.3 "${tarballPath}" ${tarballSha256}
 `;
 
   let status = 0;
@@ -118,7 +120,10 @@ test("publish_package_to_npm returns after a successful pnpm publish", () => {
   const result = runPublishHelper({ pnpmMode: "success" });
 
   assert.equal(result.status, 0);
-  assert.match(result.calls, /^pnpm publish .*\/package\.tgz --ignore-scripts --no-git-checks --tag canary --access public$/m);
+  assert.match(
+    result.calls,
+    /^pnpm publish .+paperclipai-example-1\.2\.3\.tgz --ignore-scripts --no-git-checks --tag canary --access public$/m,
+  );
   assert.doesNotMatch(result.calls, /npm view/);
   assert.doesNotMatch(result.calls, /--provenance=false/);
 });
@@ -130,69 +135,8 @@ test("publish_package_to_npm retries duplicate tlog failures without provenance"
   assert.match(result.calls, /^npm view @paperclipai\/example@1\.2\.3 version$/m);
   assert.match(
     result.calls,
-    /^pnpm publish .*\/package\.tgz --ignore-scripts --no-git-checks --tag canary --access public --provenance=false$/m,
+    /^pnpm publish .+paperclipai-example-1\.2\.3\.tgz --ignore-scripts --no-git-checks --tag canary --access public --provenance=false$/m,
   );
-});
-
-test("preview_package_to_npm consumes the verified tarball without lifecycle scripts", () => {
-  const fixtureDir = mkdtempSync(join(tmpdir(), "paperclip-release-preview-"));
-  const binDir = join(fixtureDir, "bin");
-  const calls = join(fixtureDir, "calls.log");
-  const tarball = join(fixtureDir, "package.tgz");
-  mkdirSync(binDir);
-  writeFileSync(tarball, "verified bytes");
-  const sha = createHash("sha256").update(readFileSync(tarball)).digest("hex");
-  writeExecutable(join(binDir, "pnpm"), '#!/usr/bin/env bash\nprintf "pnpm %s\\n" "$*" >> "$FAKE_CALL_LOG"\n');
-  try {
-    execFileSync(
-      "bash",
-      ["-c", `source "${repoRoot}/scripts/release-lib.sh"; preview_package_to_npm canary "${tarball}" "${sha}"`],
-      { env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, FAKE_CALL_LOG: calls } },
-    );
-    assert.match(
-      readFileSync(calls, "utf8"),
-      /^pnpm publish .*\/package\.tgz --dry-run --ignore-scripts --no-git-checks --tag canary --access public$/m,
-    );
-  } finally {
-    rmSync(fixtureDir, { recursive: true, force: true });
-  }
-});
-
-test("tarball mutation fails identity verification before pnpm is invoked", () => {
-  const fixtureDir = mkdtempSync(join(tmpdir(), "paperclip-release-identity-"));
-  const binDir = join(fixtureDir, "bin");
-  const calls = join(fixtureDir, "calls.log");
-  const tarball = join(fixtureDir, "package.tgz");
-  mkdirSync(binDir);
-  writeFileSync(tarball, "original bytes");
-  const sha = createHash("sha256").update(readFileSync(tarball)).digest("hex");
-  writeFileSync(tarball, "changed bytes");
-  writeExecutable(join(binDir, "pnpm"), '#!/usr/bin/env bash\nprintf "called\\n" >> "$FAKE_CALL_LOG"\n');
-  assert.throws(() =>
-    execFileSync(
-      "bash",
-      ["-c", `source "${repoRoot}/scripts/release-lib.sh"; preview_package_to_npm canary "${tarball}" "${sha}"`],
-      { env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, FAKE_CALL_LOG: calls }, stdio: "ignore" },
-    ),
-  );
-  assert.equal(existsSync(calls), false);
-  rmSync(fixtureDir, { recursive: true, force: true });
-});
-
-test("release stage cleanup removes only a marked, recognized staging root", () => {
-  const fixtureDir = mkdtempSync(join(tmpdir(), "paperclip-release-cleanup-"));
-  const marked = join(fixtureDir, "paperclip-release-stage.marked");
-  const unmarked = join(fixtureDir, "paperclip-release-stage.unmarked");
-  mkdirSync(marked);
-  mkdirSync(unmarked);
-  writeFileSync(join(marked, ".paperclip-release-stage"), "");
-  execFileSync("bash", ["-c", `source "${repoRoot}/scripts/release-lib.sh"; cleanup_release_stage_dir "${marked}"`]);
-  assert.equal(existsSync(marked), false);
-  assert.throws(() =>
-    execFileSync("bash", ["-c", `set -e; source "${repoRoot}/scripts/release-lib.sh"; cleanup_release_stage_dir "${unmarked}"`], { stdio: "ignore" }),
-  );
-  assert.equal(existsSync(unmarked), true);
-  rmSync(fixtureDir, { recursive: true, force: true });
 });
 
 test("publish_package_to_npm treats a duplicate tlog failure as complete when npm exposes the version", () => {

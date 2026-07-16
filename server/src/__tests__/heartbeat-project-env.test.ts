@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildSkillMentionHref } from "@paperclipai/shared";
 import {
   LOW_TRUST_REVIEW_PRESET,
@@ -92,6 +95,7 @@ describe("resolveExecutionRunAdapterConfig", () => {
       executionRunConfig: { env: { SHARED_KEY: "agent" } },
       environmentId: "environment-1",
       environmentEnv: { SHARED_KEY: "environment" },
+      projectId: "project-1",
       projectEnv: { SHARED_KEY: "project" },
       routineEnv: { SHARED_KEY: "routine" },
       routineId: "routine-1",
@@ -125,10 +129,17 @@ describe("resolveExecutionRunAdapterConfig", () => {
     expect(resolveEnvBindings.mock.calls[0]?.[2]).toMatchObject({
       consumerType: "environment",
       consumerId: "environment-1",
+      configPathPrefix: "env",
+    });
+    expect(resolveEnvBindings.mock.calls[1]?.[2]).toMatchObject({
+      consumerType: "project",
+      consumerId: "project-1",
+      configPathPrefix: "env",
     });
     expect(resolveEnvBindings.mock.calls[2]?.[2]).toMatchObject({
       consumerType: "routine",
       consumerId: "routine-1",
+      configPathPrefix: "env",
     });
   });
 
@@ -154,6 +165,7 @@ describe("resolveExecutionRunAdapterConfig", () => {
       ],
     });
     const resolveEnvBindings = vi.fn();
+    const collectMissingRuntimeBindings = vi.fn().mockResolvedValue([]);
 
     const result = await resolveExecutionRunAdapterConfig({
       companyId: "company-1",
@@ -175,9 +187,15 @@ describe("resolveExecutionRunAdapterConfig", () => {
       secretsSvc: {
         resolveAdapterConfigForRuntime,
         resolveEnvBindings,
+        collectMissingRuntimeBindings,
       } as any,
     });
 
+    expect(collectMissingRuntimeBindings.mock.calls[0]?.[2]).toMatchObject({
+      consumerType: "agent",
+      consumerId: "agent-1",
+      configPathPrefix: "runtimeConfig.modelProfiles.cheap.adapterConfig.env",
+    });
     expect(resolveAdapterConfigForRuntime.mock.calls[0]?.[2]).toMatchObject({
       consumerType: "agent",
       consumerId: "agent-1",
@@ -345,6 +363,73 @@ describe("resolveExecutionRunAdapterConfig", () => {
     });
   });
 
+  it("blocks required missing user secrets before runtime env resolution", async () => {
+    const resolveAdapterConfigForRuntime = vi.fn();
+    const resolveEnvBindings = vi.fn();
+    const collectMissingRuntimeBindings = vi.fn(async (_companyId, _env, context) =>
+      context.consumerType === "agent"
+        ? [
+            {
+              consumerType: "agent",
+              consumerId: "agent-1",
+              configPath: "env.GITHUB_TOKEN",
+              envKey: "GITHUB_TOKEN",
+              bindingType: "user_secret_ref",
+              secretId: null,
+              secretName: null,
+              userSecretDefinitionId: "definition-1",
+              userSecretDefinitionKey: "github_token",
+              userSecretDefinitionName: "GitHub token",
+              responsibleUserId: context.responsibleUserId,
+              errorCode: "user_secret_missing",
+            },
+          ]
+        : [],
+    );
+
+    await expect(resolveExecutionRunAdapterConfig({
+      companyId: "company-1",
+      agentId: "agent-1",
+      issueId: "issue-1",
+      heartbeatRunId: "run-1",
+      responsibleUserId: "user-1",
+      executionRunConfig: {
+        env: {
+          GITHUB_TOKEN: { type: "user_secret_ref", key: "github_token", required: true },
+        },
+      },
+      projectEnv: null,
+      secretsSvc: {
+        resolveAdapterConfigForRuntime,
+        resolveEnvBindings,
+        collectMissingRuntimeBindings,
+      } as any,
+    })).rejects.toMatchObject({
+      code: "configuration_incomplete",
+      resultJson: {
+        configurationIncomplete: {
+          reason: "secret_binding_missing",
+          companyId: "company-1",
+          agentId: "agent-1",
+          issueId: "issue-1",
+          missingBindings: [
+            expect.objectContaining({
+              bindingType: "user_secret_ref",
+              userSecretDefinitionKey: "github_token",
+              responsibleUserId: "user-1",
+            }),
+          ],
+        },
+      },
+    });
+    expect(collectMissingRuntimeBindings.mock.calls[0]?.[2]).toMatchObject({
+      responsibleUserId: "user-1",
+      configPathPrefix: "env",
+    });
+    expect(resolveAdapterConfigForRuntime).not.toHaveBeenCalled();
+    expect(resolveEnvBindings).not.toHaveBeenCalled();
+  });
+
   it("rejects inline sensitive env values for low-trust runs", async () => {
     await expect(resolveExecutionRunAdapterConfig({
       companyId: "company-1",
@@ -446,10 +531,182 @@ describe("resolveExecutionRunAdapterConfig", () => {
     });
     expect(resolveEnvBindings).toHaveBeenCalledOnce();
     expect(collectMissingRuntimeBindings).toHaveBeenCalledTimes(2);
+    expect(collectMissingRuntimeBindings.mock.calls[0]?.[2]).toMatchObject({
+      consumerType: "agent",
+      consumerId: "agent-1",
+      configPathPrefix: "env",
+    });
     expect(collectMissingRuntimeBindings.mock.calls[1]?.[2]).toMatchObject({
       consumerType: "project",
       consumerId: "project-1",
+      configPathPrefix: "env",
     });
+  });
+});
+
+describe("resolveExecutionRunAdapterConfig codex_local credential pre-dispatch gate", () => {
+  const cleanupDirs: string[] = [];
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  async function stubManagedCodexEnv(options: { seedSharedAuth: boolean }) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-gate-"));
+    cleanupDirs.push(root);
+    const paperclipHome = path.join(root, "paperclip-home");
+    const sharedCodexHome = path.join(root, "shared-codex-home");
+    await fs.mkdir(sharedCodexHome, { recursive: true });
+    if (options.seedSharedAuth) {
+      await fs.writeFile(
+        path.join(sharedCodexHome, "auth.json"),
+        '{"OPENAI_API_KEY":"sk-shared"}\n',
+        "utf8",
+      );
+    }
+    vi.stubEnv("PAPERCLIP_HOME", paperclipHome);
+    vi.stubEnv("PAPERCLIP_INSTANCE_ID", "default");
+    vi.stubEnv("CODEX_HOME", sharedCodexHome);
+    const managedAgentHome = path.join(
+      paperclipHome,
+      "instances",
+      "default",
+      "companies",
+      "company-1",
+      "agents",
+      "agent-1",
+      "codex-home",
+    );
+    return { root, managedAgentHome };
+  }
+
+  it("surfaces a configuration-incomplete blocker when a managed home has no auth and OPENAI_API_KEY is empty", async () => {
+    const { managedAgentHome } = await stubManagedCodexEnv({ seedSharedAuth: false });
+    const resolveAdapterConfigForRuntime = vi.fn().mockResolvedValue({
+      config: { command: "codex", env: { CODEX_HOME: managedAgentHome, OPENAI_API_KEY: "" } },
+      secretKeys: new Set<string>(),
+      manifest: [],
+    });
+
+    await expect(
+      resolveExecutionRunAdapterConfig({
+        companyId: "company-1",
+        agentId: "agent-1",
+        adapterType: "codex_local",
+        issueId: "issue-1",
+        responsibleUserId: "user-1",
+        executionRunConfig: { command: "codex", env: { CODEX_HOME: managedAgentHome, OPENAI_API_KEY: "" } },
+        projectEnv: null,
+        secretsSvc: {
+          resolveAdapterConfigForRuntime,
+          resolveEnvBindings: vi.fn(),
+          collectMissingRuntimeBindings: vi.fn().mockResolvedValue([]),
+        } as any,
+      }),
+    ).rejects.toMatchObject({
+      code: "configuration_incomplete",
+      message: expect.stringContaining("no Codex credentials available"),
+      resultJson: {
+        configurationIncomplete: {
+          reason: "codex_credentials_missing",
+          adapterType: "codex_local",
+          companyId: "company-1",
+          agentId: "agent-1",
+          issueId: "issue-1",
+          responsibleUserId: "user-1",
+          requiredEnvKeys: ["OPENAI_API_KEY"],
+        },
+      },
+    });
+    // The blocker message must not leak any secret value.
+    await expect(
+      resolveExecutionRunAdapterConfig({
+        companyId: "company-1",
+        agentId: "agent-1",
+        adapterType: "codex_local",
+        executionRunConfig: { command: "codex", env: { CODEX_HOME: managedAgentHome, OPENAI_API_KEY: "" } },
+        projectEnv: null,
+        secretsSvc: {
+          resolveAdapterConfigForRuntime,
+          resolveEnvBindings: vi.fn(),
+          collectMissingRuntimeBindings: vi.fn().mockResolvedValue([]),
+        } as any,
+      }).catch((err) => err.message),
+    ).resolves.not.toContain("sk-");
+  });
+
+  it("dispatches normally when a per-agent OPENAI_API_KEY is resolved", async () => {
+    const { managedAgentHome } = await stubManagedCodexEnv({ seedSharedAuth: false });
+    const resolveAdapterConfigForRuntime = vi.fn().mockResolvedValue({
+      config: { command: "codex", env: { CODEX_HOME: managedAgentHome, OPENAI_API_KEY: "sk-agent-resolved" } },
+      secretKeys: new Set(["OPENAI_API_KEY"]),
+      manifest: [],
+    });
+
+    const result = await resolveExecutionRunAdapterConfig({
+      companyId: "company-1",
+      agentId: "agent-1",
+      adapterType: "codex_local",
+      executionRunConfig: { command: "codex", env: { CODEX_HOME: managedAgentHome, OPENAI_API_KEY: { type: "secret_ref" } } },
+      projectEnv: null,
+      secretsSvc: {
+        resolveAdapterConfigForRuntime,
+        resolveEnvBindings: vi.fn(),
+        collectMissingRuntimeBindings: vi.fn().mockResolvedValue([]),
+      } as any,
+    });
+    expect(result.resolvedConfig.env).toMatchObject({ OPENAI_API_KEY: "sk-agent-resolved" });
+  });
+
+  it("dispatches normally when the shared host home carries subscription auth", async () => {
+    const { managedAgentHome } = await stubManagedCodexEnv({ seedSharedAuth: true });
+    const resolveAdapterConfigForRuntime = vi.fn().mockResolvedValue({
+      config: { command: "codex", env: { CODEX_HOME: managedAgentHome, OPENAI_API_KEY: "" } },
+      secretKeys: new Set<string>(),
+      manifest: [],
+    });
+
+    const result = await resolveExecutionRunAdapterConfig({
+      companyId: "company-1",
+      agentId: "agent-1",
+      adapterType: "codex_local",
+      executionRunConfig: { command: "codex", env: { CODEX_HOME: managedAgentHome, OPENAI_API_KEY: "" } },
+      projectEnv: null,
+      secretsSvc: {
+        resolveAdapterConfigForRuntime,
+        resolveEnvBindings: vi.fn(),
+        collectMissingRuntimeBindings: vi.fn().mockResolvedValue([]),
+      } as any,
+    });
+    expect(result.resolvedConfig.command).toBe("codex");
+  });
+
+  it("does not gate non-codex adapters", async () => {
+    await stubManagedCodexEnv({ seedSharedAuth: false });
+    const resolveAdapterConfigForRuntime = vi.fn().mockResolvedValue({
+      config: { command: "claude", env: { OPENAI_API_KEY: "" } },
+      secretKeys: new Set<string>(),
+      manifest: [],
+    });
+
+    const result = await resolveExecutionRunAdapterConfig({
+      companyId: "company-1",
+      agentId: "agent-1",
+      adapterType: "claude_local",
+      executionRunConfig: { command: "claude", env: { OPENAI_API_KEY: "" } },
+      projectEnv: null,
+      secretsSvc: {
+        resolveAdapterConfigForRuntime,
+        resolveEnvBindings: vi.fn(),
+        collectMissingRuntimeBindings: vi.fn().mockResolvedValue([]),
+      } as any,
+    });
+    expect(result.resolvedConfig.command).toBe("claude");
   });
 });
 

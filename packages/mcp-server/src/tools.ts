@@ -25,11 +25,15 @@ export interface ToolDefinition {
   }>;
 }
 
-function makeTool<TSchema extends z.ZodRawShape>(
+function makeTool<
+  TSchema extends z.ZodRawShape,
+  TParser extends z.ZodTypeAny = z.ZodObject<TSchema>,
+>(
   name: string,
   description: string,
   schema: z.ZodObject<TSchema>,
-  execute: (input: z.infer<typeof schema>) => Promise<unknown>,
+  execute: (input: z.infer<TParser>) => Promise<unknown>,
+  parser?: TParser,
 ): ToolDefinition {
   return {
     name,
@@ -37,7 +41,7 @@ function makeTool<TSchema extends z.ZodRawShape>(
     schema,
     execute: async (input) => {
       try {
-        const parsed = schema.parse(input);
+        const parsed = (parser ?? schema).parse(input) as z.infer<TParser>;
         return formatTextResponse(await execute(parsed));
       } catch (error) {
         return formatErrorResponse(error);
@@ -74,6 +78,7 @@ const listIssuesSchema = z.object({
   originKind: z.string().optional(),
   originId: z.string().optional(),
   includeRoutineExecutions: z.boolean().optional(),
+  includeLiveDescendantSummary: z.boolean().optional(),
   q: z.string().optional(),
 });
 
@@ -109,10 +114,13 @@ const checkoutIssueToolSchema = z.object({
 });
 
 const addIssueCommentToolFieldsSchema = addIssueCommentSchema.innerType();
-
-const addCommentToolSchema = z.object({
+const addCommentToolInputSchema = z.object({
   issueId: issueIdSchema,
 }).merge(addIssueCommentToolFieldsSchema);
+const addCommentToolParser = z.intersection(
+  z.object({ issueId: issueIdSchema }),
+  addIssueCommentSchema,
+);
 
 const createSuggestTasksToolSchema = z.object({
   issueId: issueIdSchema,
@@ -490,9 +498,10 @@ export function createToolDefinitions(client: PaperclipApiClient): ToolDefinitio
     makeTool(
       "paperclipAddComment",
       "Add a comment to an issue; include resume=true when intentionally requesting follow-up on resumable closed work",
-      addCommentToolSchema,
+      addCommentToolInputSchema,
       async ({ issueId, ...body }) =>
         client.requestJson("POST", `/issues/${encodeURIComponent(issueId)}/comments`, { body }),
+      addCommentToolParser,
     ),
     makeTool(
       "paperclipSuggestTasks",

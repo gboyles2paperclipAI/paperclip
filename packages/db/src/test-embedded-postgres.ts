@@ -18,6 +18,7 @@ type EmbeddedPostgresCtor = new (opts: {
   port: number;
   persistent: boolean;
   initdbFlags?: string[];
+  postgresFlags?: string[];
   onLog?: (message: unknown) => void;
   onError?: (message: unknown) => void;
 }) => EmbeddedPostgresInstance;
@@ -95,6 +96,7 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
     port,
     persistent: true,
     initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
+    postgresFlags: ["-c", "unix_socket_directories="],
     onLog: () => {},
     onError: () => {},
   });
@@ -146,6 +148,19 @@ export async function getEmbeddedPostgresTestSupport(): Promise<EmbeddedPostgres
 export async function startEmbeddedPostgresTestDatabase(
   tempDirPrefix: string,
 ): Promise<EmbeddedPostgresTestDatabase> {
+  const db = await startEmbeddedPostgresEmptyTestDatabase(tempDirPrefix);
+  try {
+    await applyPendingMigrations(db.connectionString);
+    return db;
+  } catch (error) {
+    await db.cleanup();
+    throw error;
+  }
+}
+
+export async function startEmbeddedPostgresEmptyTestDatabase(
+  tempDirPrefix: string,
+): Promise<EmbeddedPostgresTestDatabase> {
   let dataDir: string | null = null;
   let instance: EmbeddedPostgresInstance | null = null;
 
@@ -160,7 +175,6 @@ export async function startEmbeddedPostgresTestDatabase(
     const adminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`;
     await ensurePostgresDatabase(adminConnectionString, "paperclip");
     const connectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/paperclip`;
-    await applyPendingMigrations(connectionString);
 
     return {
       connectionString,

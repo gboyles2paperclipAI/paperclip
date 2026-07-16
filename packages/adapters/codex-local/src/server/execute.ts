@@ -39,13 +39,21 @@ import {
   joinPromptSections,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
+  parseLocalProcessFilesystemScope,
+  parseLocalProcessSandboxExtraPaths,
+  parseLocalProcessNetworkAllowlist,
+  parseLocalProcessNetworkScope,
+  type LocalProcessSandboxOptions,
+} from "@paperclipai/adapter-utils/local-process-sandbox";
+import {
   parseCodexJsonl,
   extractCodexRetryNotBefore,
+  isCodexProviderQuotaError,
   isCodexTransientUpstreamError,
   isCodexUnknownSessionError,
 } from "./parse.js";
 import {
-  codexHomeHasUsableAuth,
+  evaluateCodexCredentialReadiness,
   isManagedCodexHomePath,
   pathExists,
   prepareManagedCodexHome,
@@ -63,58 +71,16 @@ import {
   formatOutputInactivityMonitorErrorMessage,
   resolveCodexInactivityTimeout,
 } from "./output-inactivity-monitor.js";
+import {
+  createCodexAcpExecutor,
+  formatCodexAcpFallbackMessage,
+  resolveCodexExecutionEngineForRun,
+} from "./acp.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const executeCodexAcp = createCodexAcpExecutor();
 const CODEX_ROLLOUT_NOISE_RE =
   /^\d{4}-\d{2}-\d{2}T[^\s]+\s+ERROR\s+codex_core::rollout::list:\s+state db missing rollout path for thread\s+[a-z0-9-]+$/i;
-const DEFAULT_MAX_CONTEXT_TOKENS = 200_000;
-const TOKENS_PER_MILLION = 1_000_000;
-
-type CodexModelPricing = {
-  inputUsdPerMillion: number;
-  cachedInputUsdPerMillion: number;
-  outputUsdPerMillion: number;
-};
-
-function signalCodexChild(
-  target: { pid: number | null; processGroupId: number | null },
-  signal: NodeJS.Signals,
-): boolean {
-  if (target.processGroupId && target.processGroupId > 0) {
-    try {
-      process.kill(-target.processGroupId, signal);
-      return true;
-    } catch {
-      // The child can exit between monitor fire and signal delivery.
-    }
-  }
-
-  if (target.pid && target.pid > 0) {
-    try {
-      process.kill(target.pid, signal);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  return false;
-}
-
-const CODEX_MODEL_PRICING: Record<string, CodexModelPricing> = {
-  "gpt-5.5": { inputUsdPerMillion: 5, cachedInputUsdPerMillion: 0.5, outputUsdPerMillion: 30 },
-  "gpt-5.4": { inputUsdPerMillion: 2.5, cachedInputUsdPerMillion: 0.25, outputUsdPerMillion: 15 },
-  "gpt-5.4-mini": { inputUsdPerMillion: 0.75, cachedInputUsdPerMillion: 0.075, outputUsdPerMillion: 4.5 },
-  "gpt-5.4-nano": { inputUsdPerMillion: 0.2, cachedInputUsdPerMillion: 0.02, outputUsdPerMillion: 1.25 },
-  "gpt-5.3-codex": { inputUsdPerMillion: 1.75, cachedInputUsdPerMillion: 0.175, outputUsdPerMillion: 14 },
-  "gpt-5.3-codex-spark": { inputUsdPerMillion: 1.75, cachedInputUsdPerMillion: 0.175, outputUsdPerMillion: 14 },
-  "gpt-5": { inputUsdPerMillion: 1.25, cachedInputUsdPerMillion: 0.125, outputUsdPerMillion: 10 },
-  "gpt-5-mini": { inputUsdPerMillion: 0.25, cachedInputUsdPerMillion: 0.025, outputUsdPerMillion: 2 },
-  "gpt-5-nano": { inputUsdPerMillion: 0.05, cachedInputUsdPerMillion: 0.005, outputUsdPerMillion: 0.4 },
-  o3: { inputUsdPerMillion: 2, cachedInputUsdPerMillion: 0.5, outputUsdPerMillion: 8 },
-  "o4-mini": { inputUsdPerMillion: 1.1, cachedInputUsdPerMillion: 0.275, outputUsdPerMillion: 4.4 },
-  "codex-mini-latest": { inputUsdPerMillion: 1.5, cachedInputUsdPerMillion: 0.375, outputUsdPerMillion: 6 },
-};
 
 function stripCodexRolloutNoise(text: string): string {
   const parts = text.split(/\r?\n/);
@@ -140,9 +106,27 @@ function firstNonEmptyLine(text: string): string {
   );
 }
 
-function formatCount(value: number | null | undefined): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "0";
-  return value.toLocaleString("en-US");
+function signalCodexChild(
+  target: { pid: number | null; processGroupId: number | null },
+  signal: NodeJS.Signals,
+): boolean {
+  if (process.platform !== "win32" && target.processGroupId && target.processGroupId > 0) {
+    try {
+      process.kill(-target.processGroupId, signal);
+      return true;
+    } catch {
+      // Fall back to direct child signal if group signaling fails (e.g. group already gone).
+    }
+  }
+  if (target.pid && target.pid > 0) {
+    try {
+      process.kill(target.pid, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean {
@@ -159,55 +143,6 @@ function resolveCodexBiller(env: Record<string, string>, billingType: "api" | "s
   const openAiCompatibleBiller = inferOpenAiCompatibleBiller(env, "openai");
   if (openAiCompatibleBiller === "openrouter") return "openrouter";
   return billingType === "subscription" ? "chatgpt" : openAiCompatibleBiller ?? "openai";
-}
-
-function normalizeCodexModelForPricing(model: string | null | undefined): string {
-  const normalized = typeof model === "string" ? model.trim().toLowerCase() : "";
-  return normalized || "gpt-5.5";
-}
-
-export function estimateCodexCostUsd(input: {
-  model: string | null | undefined;
-  inputTokens: number;
-  cachedInputTokens?: number;
-  outputTokens: number;
-}): number | null {
-  const pricing = CODEX_MODEL_PRICING[normalizeCodexModelForPricing(input.model)];
-  if (!pricing) return null;
-
-  const inputTokens = Math.max(0, Math.floor(input.inputTokens));
-  const cachedInputTokens = Math.max(0, Math.floor(input.cachedInputTokens ?? 0));
-  const outputTokens = Math.max(0, Math.floor(input.outputTokens));
-  const total =
-    (inputTokens * pricing.inputUsdPerMillion +
-      cachedInputTokens * pricing.cachedInputUsdPerMillion +
-      outputTokens * pricing.outputUsdPerMillion) /
-    TOKENS_PER_MILLION;
-
-  return Number(total.toFixed(8));
-}
-
-function resolveMaxContextTokens(config: Record<string, unknown>): number {
-  const configured = Math.floor(asNumber(config.maxContextTokens, DEFAULT_MAX_CONTEXT_TOKENS));
-  return configured > 0 ? configured : 0;
-}
-
-function buildContextTokenWarning(input: {
-  usage: { inputTokens: number; cachedInputTokens: number; outputTokens: number };
-  maxContextTokens: number;
-}) {
-  if (input.maxContextTokens <= 0) return null;
-  const inputContextTokens = Math.max(0, input.usage.inputTokens + input.usage.cachedInputTokens);
-  const totalTokens = inputContextTokens + Math.max(0, input.usage.outputTokens);
-  if (inputContextTokens < input.maxContextTokens && totalTokens < input.maxContextTokens) return null;
-
-  return {
-    type: "codex_context_tokens_exceeded",
-    maxContextTokens: input.maxContextTokens,
-    inputContextTokens,
-    totalTokens,
-    message: `Codex context usage reached ${formatCount(inputContextTokens)} input/context tokens (${formatCount(totalTokens)} total), meeting or exceeding the configured ${formatCount(input.maxContextTokens)} token warning threshold.`,
-  };
 }
 
 async function isLikelyPaperclipRepoRoot(candidate: string): Promise<boolean> {
@@ -400,6 +335,23 @@ export async function ensureCodexSkillsInjected(
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const engineSelection = await resolveCodexExecutionEngineForRun(ctx);
+  if (engineSelection.engine === "acp") {
+    try {
+      return await executeCodexAcp(ctx);
+    } catch (err) {
+      if (engineSelection.explicit) throw err;
+      const reason = err instanceof Error ? err.message : String(err);
+      await ctx.onLog(
+        "stderr",
+        formatCodexAcpFallbackMessage(`Codex ACP startup failed: ${reason}`),
+      );
+    }
+  }
+  if (!engineSelection.explicit && engineSelection.fallbackReason) {
+    await ctx.onLog("stderr", formatCodexAcpFallbackMessage(engineSelection.fallbackReason));
+  }
+
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
 
   const promptTemplate = asString(
@@ -408,7 +360,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   const command = asString(config.command, "codex");
   const model = asString(config.model, "");
-  const maxContextTokens = resolveMaxContextTokens(config);
 
   const workspaceContext = parseObject(context.paperclipWorkspace);
   const workspaceCwd = asString(workspaceContext.cwd, "");
@@ -482,12 +433,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // with OPENAI_API_KEY="" the provider rejects every request with
   // "401 Missing bearer"; fail fast with a clear adapter error instead of
   // emitting unauthenticated calls. External overrides manage their own auth.
-  const effectiveHomeIsManaged = configuredCodexHome == null || configuredHomeIsManaged;
-  if (
-    effectiveHomeIsManaged &&
-    !configuredOpenAiApiKey &&
-    !(await codexHomeHasUsableAuth(effectiveCodexHome))
-  ) {
+  // This is the execute-time backstop for the control plane's pre-dispatch
+  // configuration-incomplete gate (see server heartbeat) — both decide
+  // readiness through the same `evaluateCodexCredentialReadiness` predicate, so
+  // they cannot drift.
+  const credentialReadiness = await evaluateCodexCredentialReadiness({
+    env: process.env,
+    companyId: agent.companyId,
+    configuredCodexHome,
+    configuredApiKey: configuredOpenAiApiKey,
+  });
+  if (credentialReadiness.managed && !credentialReadiness.ready) {
     throw new Error(
       `no Codex credentials provisioned for managed home "${effectiveCodexHome}" ` +
         `(no usable auth.json and OPENAI_API_KEY is empty). ` +
@@ -683,6 +639,30 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ),
     );
     const billingType = resolveCodexBillingType(effectiveEnv);
+    const networkScope = parseLocalProcessNetworkScope(config.networkScope);
+    const filesystemScope = parseLocalProcessFilesystemScope(config.filesystemScope);
+    const localProcessSandbox: LocalProcessSandboxOptions | null =
+      (filesystemScope || networkScope) && !executionTargetIsRemote
+        ? {
+            workspaceDir: effectiveExecutionCwd,
+            filesystemScope,
+            managedPaths: [{ path: effectiveCodexHome, access: "rw" }],
+            extraPaths: parseLocalProcessSandboxExtraPaths(config.filesystemExtraPaths),
+            homeDir: filesystemScope ? effectiveCodexHome : null,
+            networkScope,
+            networkAllowlist: parseLocalProcessNetworkAllowlist(config.networkAllowlist),
+            command: asString(config.filesystemSandboxCommand, "bwrap"),
+          }
+        : null;
+    if (localProcessSandbox) {
+      const scopes = [filesystemScope ? "workspace filesystem" : null, networkScope ? `${networkScope} network` : null]
+        .filter(Boolean)
+        .join(" and ");
+      await onLog(
+        "stdout",
+        `[paperclip] Confining Codex with ${scopes} scope.\n`,
+      );
+    }
     const runtimeEnv = Object.fromEntries(
       Object.entries(ensurePathInEnv(effectiveEnv)).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
@@ -974,6 +954,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             if (!cleaned.trim()) return;
             await onLog(stream, cleaned);
           },
+          runLogTail: paperclipBridge?.runLogTail,
+          localProcessSandbox,
         });
         const cleanedStderr = stripCodexRolloutNoise(proc.stderr);
         return {
@@ -1005,11 +987,51 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     };
 
-    const toResult = async (
-      attempt: { proc: { exitCode: number | null; signal: string | null; timedOut: boolean; stdout: string; stderr: string }; rawStderr: string; parsed: ReturnType<typeof parseCodexJsonl> },
+    const toResult = (
+      attempt: {
+        proc: { exitCode: number | null; signal: string | null; timedOut: boolean; stdout: string; stderr: string };
+        rawStderr: string;
+        parsed: ReturnType<typeof parseCodexJsonl>;
+        monitor?:
+          | { fired: false }
+          | { fired: true; terminationSignal: NodeJS.Signals | null; elapsedMsSinceLastEvent: number; timeoutMs: number };
+      },
       clearSessionOnMissingSession = false,
       isRetry = false,
-    ): Promise<AdapterExecutionResult> => {
+    ): AdapterExecutionResult => {
+      if (attempt.monitor?.fired) {
+        const errorMessage = formatOutputInactivityMonitorErrorMessage(attempt.monitor.elapsedMsSinceLastEvent);
+        return {
+          exitCode: null,
+          signal: attempt.monitor.terminationSignal ?? attempt.proc.signal,
+          timedOut: false,
+          errorMessage,
+          errorCode: "codex_output_inactivity_monitor",
+          errorFamily: null,
+          usage: attempt.parsed.usage,
+          usageBasis: attempt.parsed.usageBasis,
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          provider: "openai",
+          biller: resolveCodexBiller(effectiveEnv, billingType),
+          model,
+          billingType,
+          costUsd: null,
+          resultJson: {
+            stdout: attempt.proc.stdout,
+            stderr: attempt.proc.stderr,
+            outputInactivityMonitor: {
+              kind: "output_inactivity",
+              timeoutMs: attempt.monitor.timeoutMs,
+              elapsedMsSinceLastEvent: attempt.monitor.elapsedMsSinceLastEvent,
+              terminationSignal: attempt.monitor.terminationSignal,
+            },
+          },
+          summary: attempt.parsed.summary,
+          clearSession: clearSessionOnMissingSession,
+        };
+      }
       if (attempt.proc.timedOut) {
         return {
           exitCode: attempt.proc.exitCode,
@@ -1052,40 +1074,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               errorMessage: fallbackErrorMessage,
             })
           : null;
+      const providerQuota =
+        (attempt.proc.exitCode ?? 0) !== 0 &&
+        isCodexProviderQuotaError({
+          stdout: attempt.proc.stdout,
+          stderr: attempt.proc.stderr,
+          errorMessage: fallbackErrorMessage,
+        });
       const transientUpstream =
         (attempt.proc.exitCode ?? 0) !== 0 &&
+        !providerQuota &&
         isCodexTransientUpstreamError({
           stdout: attempt.proc.stdout,
           stderr: attempt.proc.stderr,
           errorMessage: fallbackErrorMessage,
         });
-      const fallbackLabel = model || "codex_local";
-      const fallbackFrom =
-        forceFreshSession
-          ? `${fallbackLabel}:resume_session`
-          : isRetry
-            ? `${fallbackLabel}:unavailable_session`
-            : null;
-      const fallbackTo =
-        forceFreshSession
-          ? `${fallbackLabel}:fresh_session`
-          : isRetry
-            ? `${fallbackLabel}:fresh_session`
-            : null;
-      const contextTokenWarning = buildContextTokenWarning({
-        usage: attempt.parsed.usage,
-        maxContextTokens,
-      });
-      if (contextTokenWarning) {
-        await onLog("stdout", `[paperclip] Warning: ${contextTokenWarning.message}\n`);
-      }
-      const effectiveModel = normalizeCodexModelForPricing(model);
-      const costUsd = estimateCodexCostUsd({
-        model: effectiveModel,
-        inputTokens: attempt.parsed.usage.inputTokens,
-        cachedInputTokens: attempt.parsed.usage.cachedInputTokens,
-        outputTokens: attempt.parsed.usage.outputTokens,
-      });
+      const errorFamily = providerQuota ? "provider_quota" : transientUpstream ? "transient_upstream" : null;
 
       return {
         exitCode: attempt.proc.exitCode,
@@ -1096,32 +1100,30 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             ? null
             : fallbackErrorMessage,
         errorCode:
-          transientUpstream
+          providerQuota
+            ? "provider_quota"
+            : transientUpstream
             ? "codex_transient_upstream"
             : null,
-        errorFamily: transientUpstream ? "transient_upstream" : null,
+        errorFamily,
         retryNotBefore: transientRetryNotBefore ? transientRetryNotBefore.toISOString() : null,
-        retryCount: isRetry || forceFreshSession || forceSaferInvocation ? 1 : 0,
-        fallbackFrom,
-        fallbackTo,
-        fallbackSuccess: fallbackFrom && fallbackTo ? (attempt.proc.exitCode ?? 0) === 0 : null,
         usage: attempt.parsed.usage,
+        usageBasis: attempt.parsed.usageBasis,
         sessionId: resolvedSessionId,
         sessionParams: resolvedSessionParams,
         sessionDisplayId: resolvedSessionId,
         provider: "openai",
         biller: resolveCodexBiller(effectiveEnv, billingType),
-        model: effectiveModel,
+        model,
         billingType,
-        costUsd,
+        costUsd: null,
         resultJson: {
           stdout: attempt.proc.stdout,
           stderr: attempt.proc.stderr,
-          ...(costUsd !== null ? { total_cost_usd: costUsd, cost_usd: costUsd } : {}),
-          ...(contextTokenWarning ? { contextTokenWarning } : {}),
-          ...(transientUpstream ? { errorFamily: "transient_upstream" } : {}),
+          ...(errorFamily ? { errorFamily } : {}),
           ...(transientRetryNotBefore ? { retryNotBefore: transientRetryNotBefore.toISOString() } : {}),
           ...(transientRetryNotBefore ? { transientRetryNotBefore: transientRetryNotBefore.toISOString() } : {}),
+          ...(providerQuota && transientRetryNotBefore ? { providerQuotaRetryNotBefore: transientRetryNotBefore.toISOString() } : {}),
         },
         summary: attempt.parsed.summary,
         clearSession: Boolean((clearSessionOnMissingSession || forceFreshSession) && !resolvedSessionId),
@@ -1141,10 +1143,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           `[paperclip] Codex resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
         );
         const retry = await runAttempt(null);
-        return await toResult(retry, true, true);
+        return toResult(retry, true, true);
       }
 
-      return await toResult(initial, false, false);
+      return toResult(initial, false, false);
     } finally {
       if (paperclipBridge) {
         await paperclipBridge.stop();

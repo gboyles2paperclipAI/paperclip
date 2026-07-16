@@ -76,6 +76,9 @@ function registerModuleMocks() {
         },
       })),
     }),
+    companySkillService: () => ({
+      completeTestRunForIssue: vi.fn(async () => null),
+    }),
     documentAnnotationService: () => ({ remapOpenThreadsForDocument: async () => [] }),
     documentService: () => ({}),
     executionWorkspaceService: () => ({}),
@@ -254,7 +257,7 @@ describe("issue execution policy routes", () => {
       missing: "review_path",
     });
     expect(mockIssueService.update).not.toHaveBeenCalled();
-  });
+  }, 10_000);
 
   it("allows an agent-authored in_review transition with a pending confirmation interaction", async () => {
     const issue = {

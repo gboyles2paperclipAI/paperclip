@@ -65,7 +65,7 @@ export interface AdapterRuntimeServiceReport {
   healthStatus?: "unknown" | "healthy" | "unhealthy";
 }
 
-export type AdapterExecutionErrorFamily = "transient_upstream" | "model_refusal";
+export type AdapterExecutionErrorFamily = "transient_upstream" | "provider_quota" | "model_refusal";
 
 export interface AdapterExecutionResult {
   exitCode: number | null;
@@ -82,6 +82,13 @@ export interface AdapterExecutionResult {
   durationMs?: number | null;
   errorMeta?: Record<string, unknown>;
   usage?: UsageSummary;
+  /**
+   * How `usage` totals are scoped. "per_run" means the tokens cover only this
+   * execution; "session_cumulative" means they are running totals for the
+   * persisted session, and the server must delta consecutive runs. Absent
+   * means unknown — the server applies its legacy session-delta heuristic.
+   */
+  usageBasis?: "per_run" | "session_cumulative" | null;
   /**
    * Legacy single session id output. Prefer `sessionParams` + `sessionDisplayId`.
    */
@@ -353,10 +360,20 @@ export interface AdapterRuntimeCommandSpec {
   installCommand?: string | null;
 }
 
+export interface AcpTargetDescriptor {
+  agentId: "claude" | "codex" | "gemini" | "custom" | (string & {});
+  skillsMode: "ephemeral" | "unsupported";
+  prerequisites: {
+    nodeRange?: string;
+    packages?: string[];
+  };
+}
+
 export interface ServerAdapterModule {
   type: string;
   execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult>;
   testEnvironment(ctx: AdapterEnvironmentTestContext): Promise<AdapterEnvironmentTestResult>;
+  acp?: AcpTargetDescriptor;
   listSkills?: (ctx: AdapterSkillContext) => Promise<AdapterSkillSnapshot>;
   syncSkills?: (ctx: AdapterSkillContext, desiredSkills: string[]) => Promise<AdapterSkillSnapshot>;
   sessionCodec?: AdapterSessionCodec;
@@ -487,6 +504,24 @@ export interface CreateConfigValues {
   cheapModelEnabled?: boolean;
   chrome: boolean;
   dangerouslySkipPermissions: boolean;
+  claudeEngine?: "auto" | "cli" | "acp";
+  claudeAcpAgentCommand?: string;
+  claudeAcpMode?: "persistent" | "oneshot";
+  claudeAcpNonInteractivePermissions?: "deny" | "fail";
+  claudeAcpStateDir?: string;
+  claudeAcpWarmHandleIdleMs?: number;
+  codexEngine?: "auto" | "cli" | "acp";
+  codexAcpAgentCommand?: string;
+  codexAcpMode?: "persistent" | "oneshot";
+  codexAcpNonInteractivePermissions?: "deny" | "fail";
+  codexAcpStateDir?: string;
+  codexAcpWarmHandleIdleMs?: number;
+  geminiEngine?: "auto" | "cli" | "acp";
+  geminiAcpAgentCommand?: string;
+  geminiAcpMode?: "persistent" | "oneshot";
+  geminiAcpNonInteractivePermissions?: "deny" | "fail";
+  geminiAcpStateDir?: string;
+  geminiAcpWarmHandleIdleMs?: number;
   search: boolean;
   fastMode: boolean;
   maxContextTokens?: number;

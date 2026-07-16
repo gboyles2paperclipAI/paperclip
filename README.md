@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="#quickstart"><strong>Quickstart</strong></a> &middot;
-  <a href="https://paperclip.ing/docs"><strong>Docs</strong></a> &middot;
+  <a href="https://docs.paperclip.ing"><strong>Docs</strong></a> &middot;
   <a href="https://github.com/paperclipai/paperclip"><strong>GitHub</strong></a> &middot;
   <a href="https://github.com/paperclipai/paperclip/discussions"><strong>Discussions</strong></a> &middot;
   <a href="https://x.com/papercliping"><strong>Twitter</strong></a> &middot;
@@ -323,6 +323,25 @@ This starts the API server at `http://localhost:3100`. An embedded PostgreSQL da
 
 > **Requirements:** Node.js 20+, pnpm 9.15+
 
+### Verify the build you are running
+
+The CLI reports its package version:
+
+```bash
+paperclipai --version
+```
+
+`GET /api/health` reports the server package version and, for clean governed
+builds, the full source commit as `buildCommit`. Treat the version and commit as
+a pair when comparing an installed runtime with release evidence. A missing
+`buildCommit` means the build did not claim reproducible source provenance; it
+must not be inferred from the version alone.
+
+Help2day distribution candidates use `YYYY.MDD.P-help2day.N`. They remain
+unreleased until the exact immutable package set and its evidence bundle pass
+the separate source-release approval. Source approval does not authorize a live
+runtime change.
+
 <br/>
 
 ## FAQ
@@ -408,6 +427,9 @@ Paperclip ships with opt-in OpenTelemetry auto-instrumentation for the server (t
 ## Telemetry
 
 Paperclip collects anonymous usage telemetry to help us understand how the product is used and improve it. No personal information, issue content, prompts, file paths, or secrets are ever collected. Private repository references are hashed with a per-install salt before being sent.
+
+Contributors changing emitted telemetry events should follow the [Telemetry Data Contract](packages/shared/src/telemetry/README.md).
+For proposed first-party events that are not in the generated contract yet, follow [Telemetry Workflow](doc/TELEMETRY_WORKFLOW.md).
 
 Telemetry is **enabled by default** and can be disabled with any of the following:
 

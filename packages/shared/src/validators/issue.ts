@@ -12,6 +12,7 @@ import {
   ISSUE_COMMENT_METADATA_ROW_TYPES,
   ISSUE_COMMENT_PRESENTATION_KINDS,
   ISSUE_COMMENT_PRESENTATION_TONES,
+  ISSUE_HARNESS_KINDS,
   ISSUE_MONITOR_SCHEDULED_BY,
   ISSUE_PRIORITIES,
   ISSUE_RECOVERY_ACTION_KINDS,
@@ -27,6 +28,7 @@ import {
   ISSUE_WATCHDOG_DISCOVERY_KINDS,
   MODEL_PROFILE_KEYS,
   REQUEST_CHECKBOX_CONFIRMATION_OPTION_LIMIT,
+  REQUEST_ITEM_VERDICTS_ITEM_LIMIT,
 } from "../constants.js";
 import { multilineTextSchema } from "./text.js";
 import { lowTrustReviewPresetPolicySchema, trustAuthorizationPolicySchema } from "./trust-policy.js";
@@ -390,10 +392,13 @@ const createIssueBaseSchema = z.object({
   description: multilineTextSchema.optional().nullable(),
   status: z.enum(ISSUE_STATUSES),
   workMode: z.enum(ISSUE_WORK_MODES).optional().default("standard"),
+  harnessKind: z.enum(ISSUE_HARNESS_KINDS).optional().nullable(),
   priority: z.enum(ISSUE_PRIORITIES).optional().default("medium"),
   assigneeAgentId: z.string().uuid().optional().nullable(),
   assigneeUserId: z.string().optional().nullable(),
   requestDepth: issueRequestDepthInputSchema.optional().default(0),
+  createdByUserId: z.string().optional().nullable(),
+  responsibleUserId: z.string().optional().nullable(),
   billingCode: z.string().optional().nullable(),
   assigneeAdapterOverrides: issueAssigneeAdapterOverridesSchema.optional().nullable(),
   executionPolicy: issueExecutionPolicySchema.optional().nullable(),
@@ -453,22 +458,30 @@ export const createIssueLabelSchema = z.object({
 
 export type CreateIssueLabel = z.infer<typeof createIssueLabelSchema>;
 
-const issueUpdateCommentSchema = z.preprocess((value) => {
-  if (
-    value &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    typeof (value as { body?: unknown }).body === "string"
-  ) {
-    return (value as { body: string }).body;
-  }
-  return value;
+function normalizeIssueCommentBodyInput(input: unknown) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const raw = input as Record<string, unknown>;
+  if (raw.body !== undefined || typeof raw.comment !== "string") return input;
+  return {
+    ...raw,
+    body: raw.comment,
+  };
+}
+
+const issueCommentTextInputSchema = z.preprocess((input) => {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const raw = input as Record<string, unknown>;
+  return typeof raw.body === "string" ? raw.body : input;
 }, multilineTextSchema.pipe(z.string().min(1)));
 
-export const updateIssueSchema = createIssueBaseSchema.omit({ watchdog: true }).partial().extend({
+export const updateIssueSchema = createIssueBaseSchema.omit({
+  createdByUserId: true,
+  responsibleUserId: true,
+  watchdog: true,
+}).partial().extend({
   requestDepth: issueRequestDepthInputSchema.optional(),
   assigneeAgentId: z.string().trim().min(1).optional().nullable(),
-  comment: issueUpdateCommentSchema.optional(),
+  comment: issueCommentTextInputSchema.optional(),
   reviewRequest: issueReviewRequestSchema.optional().nullable(),
   reopen: z.boolean().optional(),
   resume: z.boolean().optional(),
@@ -571,19 +584,7 @@ export const issueCommentMetadataSchema = z.object({
 
 export type IssueCommentMetadata = z.infer<typeof issueCommentMetadataSchema>;
 
-export const addIssueCommentSchema = z.preprocess((value) => {
-  if (
-    value &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    !("body" in value) &&
-    typeof (value as { comment?: unknown }).comment === "string"
-  ) {
-    const { comment, ...rest } = value as Record<string, unknown>;
-    return { ...rest, body: comment };
-  }
-  return value;
-}, z.object({
+export const addIssueCommentSchema = z.preprocess(normalizeIssueCommentBodyInput, z.object({
   body: multilineTextSchema.pipe(z.string().min(1)),
   authorType: issueCommentAuthorTypeSchema.optional(),
   presentation: issueCommentPresentationSchema.nullable().optional(),
@@ -602,7 +603,6 @@ export const addIssueMarkerSchema = z.object({
   kind: z.enum(ISSUE_MARKER_KINDS),
   body: z.string().trim().min(1).max(500),
 });
-
 export type AddIssueMarker = z.infer<typeof addIssueMarkerSchema>;
 
 export const issueThreadInteractionStatusSchema = z.enum(ISSUE_THREAD_INTERACTION_STATUSES);
@@ -725,66 +725,6 @@ export const askUserQuestionsPayloadSchema = z.object({
   }
 });
 
-function normalizeLegacyAskUserQuestionsInput(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  const input = value as Record<string, unknown>;
-  if (input.kind !== "ask_user_questions") return value;
-  const payload =
-    input.payload && typeof input.payload === "object" && !Array.isArray(input.payload)
-      ? input.payload as Record<string, unknown>
-      : {};
-  const questions = Array.isArray(payload.questions)
-    ? payload.questions.map((question, questionIndex) => {
-      if (!question || typeof question !== "object" || Array.isArray(question)) return question;
-      const legacyQuestion = question as Record<string, unknown>;
-      const questionId = typeof legacyQuestion.id === "string" && legacyQuestion.id.trim()
-        ? legacyQuestion.id.trim()
-        : `question_${questionIndex + 1}`;
-      const questionPrompt = typeof legacyQuestion.prompt === "string" && legacyQuestion.prompt.trim()
-        ? legacyQuestion.prompt
-        : typeof legacyQuestion.label === "string" && legacyQuestion.label.trim()
-          ? legacyQuestion.label
-          : questionId;
-      const rawOptions = Array.isArray(legacyQuestion.options) && legacyQuestion.options.length > 0
-        ? legacyQuestion.options
-        : [{ id: "response", label: "Provide response" }];
-      return {
-        ...legacyQuestion,
-        id: questionId,
-        prompt: questionPrompt,
-        selectionMode: legacyQuestion.selectionMode ?? (legacyQuestion.type === "multi" ? "multi" : "single"),
-        options: rawOptions.map((option, optionIndex) => {
-          if (!option || typeof option !== "object" || Array.isArray(option)) {
-            return { id: `option_${optionIndex + 1}`, label: String(option ?? `Option ${optionIndex + 1}`) };
-          }
-          const legacyOption = option as Record<string, unknown>;
-          const optionId = typeof legacyOption.id === "string" && legacyOption.id.trim()
-            ? legacyOption.id.trim()
-            : typeof legacyOption.value === "string" && legacyOption.value.trim()
-              ? legacyOption.value.trim()
-              : `option_${optionIndex + 1}`;
-          return {
-            ...legacyOption,
-            id: optionId,
-            label: typeof legacyOption.label === "string" && legacyOption.label.trim()
-              ? legacyOption.label
-              : optionId,
-          };
-        }),
-      };
-    })
-    : payload.questions;
-
-  return {
-    ...input,
-    payload: {
-      ...payload,
-      version: payload.version ?? 1,
-      ...(questions ? { questions } : {}),
-    },
-  };
-}
-
 export const askUserQuestionsAnswerSchema = z.object({
   questionId: z.string().trim().min(1).max(120),
   optionIds: z.array(z.string().trim().min(1).max(120)).max(20),
@@ -833,6 +773,22 @@ export const requestConfirmationTargetSchema = z.discriminatedUnion("type", [
   requestConfirmationCustomTargetSchema,
 ]);
 
+export const requestConfirmationToolActionPayloadSchema = z.object({
+  version: z.literal(1),
+  actionRequestId: z.string().uuid(),
+  invocationId: z.string().uuid(),
+  toolName: z.string().trim().min(1).max(500),
+  toolDisplayName: z.string().trim().min(1).max(500),
+  connectionId: z.string().uuid().nullable(),
+  applicationId: z.string().uuid().nullable(),
+  appDisplayName: z.string().trim().min(1).max(500).nullable(),
+  risk: z.enum(["write", "destructive"]),
+  previewMarkdown: z.string().trim().min(1).max(20000),
+  argumentsSummaryJson: z.string().max(20000),
+  argumentsHash: z.string().trim().min(1).max(255),
+  expiresAt: z.string().datetime({ offset: true }),
+});
+
 export const requestConfirmationPayloadSchema = z.object({
   version: z.literal(1),
   prompt: z.string().trim().min(1).max(1000),
@@ -845,34 +801,8 @@ export const requestConfirmationPayloadSchema = z.object({
   detailsMarkdown: z.string().max(20000).nullable().optional(),
   supersedeOnUserComment: z.boolean().optional(),
   target: requestConfirmationTargetSchema.nullable().optional(),
+  toolAction: requestConfirmationToolActionPayloadSchema.optional(),
 });
-
-function normalizeLegacyRequestConfirmationInput(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  const input = value as Record<string, unknown>;
-  if (input.kind !== "request_confirmation") return value;
-  const payload =
-    input.payload && typeof input.payload === "object" && !Array.isArray(input.payload)
-      ? input.payload as Record<string, unknown>
-      : {};
-  const prompt =
-    typeof payload.prompt === "string" && payload.prompt.trim()
-      ? payload.prompt
-      : typeof input.title === "string" && input.title.trim()
-        ? input.title
-        : typeof input.summary === "string" && input.summary.trim()
-          ? input.summary
-          : null;
-
-  return {
-    ...input,
-    payload: {
-      ...payload,
-      version: payload.version ?? 1,
-      ...(prompt && typeof payload.prompt !== "string" ? { prompt } : {}),
-    },
-  };
-}
 
 export const requestCheckboxConfirmationOptionSchema = z.object({
   id: z.string().trim().min(1).max(120),
@@ -974,12 +904,38 @@ export const requestCheckboxConfirmationPayloadSchema = z.object({
   }
 });
 
+export const requestConfirmationResumeFailureSchema = z.object({
+  status: z.enum(["retrying", "needs_attention"]),
+  errorCode: z.string().trim().min(1).max(120).nullable(),
+  attempt: z.number().int().min(0).max(100),
+  maxAttempts: z.number().int().min(0).max(100),
+  runId: z.string().uuid().nullable().optional(),
+  retryRunId: z.string().uuid().nullable().optional(),
+  recoveryActionId: z.string().uuid().nullable().optional(),
+  updatedAt: z.string().trim().min(1).nullable().optional(),
+});
+
+export const requestConfirmationToolActionResultSchema = z.object({
+  version: z.literal(1),
+  status: z.enum(["approved", "executing", "executed", "failed", "expired"]),
+  errorCode: z.string().trim().min(1).max(120).nullable().optional(),
+  errorMessage: z.string().trim().min(1).max(4000).nullable().optional(),
+  // Populated on `executed` so the card can report the outcome (e.g. "Row 42
+  // added") instead of a bare checkmark, with an optional deep-link when the
+  // connector returns a URL (PAP-13745 §5 Executed / Peak-End).
+  resultSummary: z.string().trim().min(1).max(4000).nullable().optional(),
+  resultHref: z.string().trim().url().max(2000).nullable().optional(),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+
 export const requestConfirmationResultSchema = z.object({
   version: z.literal(1),
   outcome: z.enum(["accepted", "rejected", "superseded_by_comment", "stale_target"]),
   reason: z.string().trim().max(4000).nullable().optional(),
   commentId: z.string().uuid().nullable().optional(),
   staleTarget: requestConfirmationTargetSchema.nullable().optional(),
+  resumeFailure: requestConfirmationResumeFailureSchema.nullable().optional(),
+  toolAction: requestConfirmationToolActionResultSchema.optional(),
 });
 
 export const requestCheckboxConfirmationResultSchema = requestConfirmationResultSchema.extend({
@@ -1001,9 +957,122 @@ export const requestCheckboxConfirmationResultSchema = requestConfirmationResult
   }
 });
 
-export const createIssueThreadInteractionSchema = z.preprocess(
-  (value) => normalizeLegacyRequestConfirmationInput(normalizeLegacyAskUserQuestionsInput(value)),
-  z.discriminatedUnion("kind", [
+export const requestItemVerdictValueSchema = z.enum(["approve", "reject", "defer"]);
+
+export const requestItemVerdictsItemSchema = z.object({
+  id: z.string().trim().min(1).max(120),
+  label: z.string().trim().min(1).max(120),
+  description: z.string().trim().max(500).nullable().optional(),
+  previewMarkdown: z.string().max(20000).nullable().optional(),
+  href: requestConfirmationHrefSchema.nullable().optional(),
+  attachmentId: z.string().uuid().nullable().optional(),
+});
+
+export const requestItemVerdictsPayloadSchema = z.object({
+  version: z.literal(1),
+  prompt: z.string().trim().min(1).max(1000),
+  detailsMarkdown: z.string().max(20000).nullable().optional(),
+  items: z.array(requestItemVerdictsItemSchema)
+    .min(1)
+    .max(REQUEST_ITEM_VERDICTS_ITEM_LIMIT),
+  verdicts: z.array(requestItemVerdictValueSchema)
+    .min(2)
+    .max(3)
+    .optional()
+    .default(["approve", "reject"]),
+  requireReasonOn: z.array(requestItemVerdictValueSchema)
+    .max(3)
+    .optional()
+    .default(["reject"]),
+  reasonLabel: z.string().trim().min(1).max(160).nullable().optional(),
+  allowBulkApprove: z.boolean().optional().default(true),
+  supersedeOnUserComment: z.boolean().optional(),
+  target: requestConfirmationTargetSchema.nullable().optional(),
+}).superRefine((value, ctx) => {
+  const itemIds = new Set<string>();
+  for (const [index, item] of value.items.entries()) {
+    if (itemIds.has(item.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Item ids must be unique within one item verdict request",
+        path: ["items", index, "id"],
+      });
+    }
+    itemIds.add(item.id);
+  }
+
+  const verdicts = new Set<string>();
+  for (const [index, verdict] of value.verdicts.entries()) {
+    if (verdicts.has(verdict)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "verdicts must be unique",
+        path: ["verdicts", index],
+      });
+    }
+    verdicts.add(verdict);
+  }
+  if (!verdicts.has("approve") || !verdicts.has("reject")) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "verdicts must include approve and reject; defer is optional",
+      path: ["verdicts"],
+    });
+  }
+
+  const reasonVerdicts = new Set<string>();
+  for (const [index, verdict] of value.requireReasonOn.entries()) {
+    if (reasonVerdicts.has(verdict)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "requireReasonOn must be unique",
+        path: ["requireReasonOn", index],
+      });
+      continue;
+    }
+    reasonVerdicts.add(verdict);
+    if (!verdicts.has(verdict)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "requireReasonOn must reference enabled verdicts",
+        path: ["requireReasonOn", index],
+      });
+    }
+  }
+});
+
+export const requestItemVerdictsResultItemSchema = z.object({
+  id: z.string().trim().min(1).max(120),
+  verdict: requestItemVerdictValueSchema,
+  reason: z.string().trim().max(4000).nullable().optional(),
+  resolvedByUserId: z.string().trim().min(1).max(255),
+  resolvedAt: z.union([z.string().datetime(), z.date()]),
+  commentId: z.string().uuid().nullable().optional(),
+});
+
+export const requestItemVerdictsResultSchema = z.object({
+  version: z.literal(1),
+  outcome: z.enum(["resolved", "superseded_by_comment", "stale_target", "cancelled"]),
+  complete: z.boolean(),
+  items: z.array(requestItemVerdictsResultItemSchema)
+    .max(REQUEST_ITEM_VERDICTS_ITEM_LIMIT),
+  commentId: z.string().uuid().nullable().optional(),
+  staleTarget: requestConfirmationTargetSchema.nullable().optional(),
+}).superRefine((value, ctx) => {
+  const itemIds = new Set<string>();
+  for (const [index, item] of value.items.entries()) {
+    if (itemIds.has(item.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "result item ids must be unique",
+        path: ["items", index, "id"],
+      });
+    }
+    itemIds.add(item.id);
+  }
+});
+
+export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("suggest_tasks"),
     idempotencyKey: z.string().trim().max(255).nullable().optional(),
@@ -1044,7 +1113,17 @@ export const createIssueThreadInteractionSchema = z.preprocess(
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
     payload: requestCheckboxConfirmationPayloadSchema,
   }),
-]));
+  z.object({
+    kind: z.literal("request_item_verdicts"),
+    idempotencyKey: z.string().trim().max(255).nullable().optional(),
+    sourceCommentId: z.string().uuid().nullable().optional(),
+    sourceRunId: z.string().uuid().nullable().optional(),
+    title: z.string().trim().max(240).nullable().optional(),
+    summary: z.string().trim().max(1000).nullable().optional(),
+    continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+    payload: requestItemVerdictsPayloadSchema,
+  }),
+]);
 
 export type CreateIssueThreadInteraction = z.infer<typeof createIssueThreadInteractionSchema>;
 
@@ -1102,6 +1181,29 @@ export const respondIssueThreadInteractionSchema = z.object({
   summaryMarkdown: multilineTextSchema.pipe(z.string().max(20000)).nullable().optional(),
 });
 export type RespondIssueThreadInteraction = z.infer<typeof respondIssueThreadInteractionSchema>;
+
+export const submitIssueThreadInteractionVerdictsSchema = z.object({
+  verdicts: z.array(z.object({
+    id: z.string().trim().min(1).max(120),
+    verdict: requestItemVerdictValueSchema,
+    reason: z.string().trim().max(4000).nullable().optional(),
+  }))
+    .min(1)
+    .max(REQUEST_ITEM_VERDICTS_ITEM_LIMIT),
+}).superRefine((value, ctx) => {
+  const itemIds = new Set<string>();
+  for (const [index, verdict] of value.verdicts.entries()) {
+    if (itemIds.has(verdict.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "verdict item ids must be unique",
+        path: ["verdicts", index, "id"],
+      });
+    }
+    itemIds.add(verdict.id);
+  }
+});
+export type SubmitIssueThreadInteractionVerdicts = z.infer<typeof submitIssueThreadInteractionVerdictsSchema>;
 
 export const linkIssueApprovalSchema = z.object({
   approvalId: z.string().uuid(),

@@ -41,20 +41,15 @@ export type ResolveIssueRecoveryActionInput = {
   companyId: string;
   sourceIssueId: string;
   actionId?: string | null;
+  kind?: IssueRecoveryActionKind | null;
+  cause?: string | null;
+  fingerprint?: string | null;
   status: Extract<IssueRecoveryActionStatus, "resolved" | "cancelled">;
   outcome: IssueRecoveryActionOutcome;
   resolutionNote?: string | null;
-  /**
-   * When set, the active-action update is conditional on this exact owner agent.
-   * Used to close the recovery-owner check/use race: ownership transfer between
-   * precheck and resolve must fail without mutating the source issue.
-   */
-  expectedOwnerAgentId?: string | null;
-  /**
-   * When set with expectedOwnerAgentId, also require this exact owner type.
-   * Recovery-owner exceptions only bind agent-owned actions.
-   */
   expectedOwnerType?: IssueRecoveryActionOwnerType | null;
+  expectedOwnerAgentId?: string | null;
+  expectedOwnerUserId?: string | null;
 };
 
 function toReadModel(row: IssueRecoveryActionRow): IssueRecoveryAction {
@@ -281,15 +276,31 @@ export function issueRecoveryActionService(db: Db) {
     if (input.actionId) {
       predicates.push(eq(issueRecoveryActions.id, input.actionId));
     }
-    if (input.expectedOwnerAgentId !== undefined) {
-      if (input.expectedOwnerAgentId === null) {
-        predicates.push(isNull(issueRecoveryActions.ownerAgentId));
-      } else {
-        predicates.push(eq(issueRecoveryActions.ownerAgentId, input.expectedOwnerAgentId));
-      }
+    if (input.kind) {
+      predicates.push(eq(issueRecoveryActions.kind, input.kind));
     }
-    if (input.expectedOwnerType != null) {
+    if (input.cause) {
+      predicates.push(eq(issueRecoveryActions.cause, input.cause));
+    }
+    if (input.fingerprint) {
+      predicates.push(eq(issueRecoveryActions.fingerprint, input.fingerprint));
+    }
+    if (input.expectedOwnerType) {
       predicates.push(eq(issueRecoveryActions.ownerType, input.expectedOwnerType));
+    }
+    if (input.expectedOwnerAgentId !== undefined) {
+      predicates.push(
+        input.expectedOwnerAgentId === null
+          ? isNull(issueRecoveryActions.ownerAgentId)
+          : eq(issueRecoveryActions.ownerAgentId, input.expectedOwnerAgentId),
+      );
+    }
+    if (input.expectedOwnerUserId !== undefined) {
+      predicates.push(
+        input.expectedOwnerUserId === null
+          ? isNull(issueRecoveryActions.ownerUserId)
+          : eq(issueRecoveryActions.ownerUserId, input.expectedOwnerUserId),
+      );
     }
 
     const [updated] = await dbOrTx

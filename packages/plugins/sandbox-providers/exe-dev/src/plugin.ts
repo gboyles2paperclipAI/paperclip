@@ -167,12 +167,12 @@ export function validateSshPrivateKey(rawKey: string): string | null {
 
   const headerMatch = trimmed.match(/^-----BEGIN ([A-Z0-9 ]*)PRIVATE KEY-----/m);
   if (!headerMatch) {
-    return "sshPrivateKey must be a PEM-encoded private key starting with a line like '-----BEGIN OPENSSH PRIVATE KEY-----'.";
+    return "sshPrivateKey must be a PEM-encoded private key with a recognized BEGIN header, such as an OpenSSH private key header.";
   }
 
   const footerMatch = trimmed.match(/^-----END ([A-Z0-9 ]*)PRIVATE KEY-----\s*$/m);
   if (!footerMatch) {
-    return "sshPrivateKey is missing its '-----END … PRIVATE KEY-----' footer. Make sure you copied the whole file, including the final line.";
+    return "sshPrivateKey is missing its matching private-key footer. Make sure you copied the whole file, including the final line.";
   }
 
   const headerLabel = headerMatch[1].trim();
@@ -571,7 +571,7 @@ function formatSshFailure(
   if (EXE_DEV_SSH_INVALID_KEY_FORMAT.test(combinedOutput)) {
     return [
       `Failed to ${action} exe.dev VM ${vmName}: the configured SSH private key isn't an OpenSSH-format private key.`,
-      "Confirm the secret starts with `-----BEGIN … PRIVATE KEY-----` and isn't the `.pub` file or a PuTTY `.ppk` export.",
+      "Confirm the secret has matching OpenSSH private-key header and footer lines and isn't the `.pub` file or a PuTTY `.ppk` export.",
     ].join(" ");
   }
 

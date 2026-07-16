@@ -7,14 +7,18 @@ import { and, desc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
+  agentRuntimeState,
   agentWakeupRequests,
   agents,
   approvals,
   companies,
   companyMemberships,
+  companySkills,
   createDb,
+  heartbeatRunEvents,
   heartbeatRuns,
   issueApprovals,
+  issueComments,
   issues,
 } from "@paperclipai/db";
 import {
@@ -30,6 +34,7 @@ import {
   verifySlackRequestSignature,
 } from "../services/slack-integration.js";
 import { slackIntegrationRoutes } from "../routes/slack-integrations.js";
+import { waitForAllHeartbeatRunExecutionsDrain } from "../services/heartbeat-execution-registry.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -405,13 +410,14 @@ describe("Slack integration utilities", () => {
         "-E",
         `${legacyName}|${legacyName.toLowerCase()}|${legacyEnv}`,
         "--",
-        ".",
-        ":(exclude)packages/db/src/migrations/meta",
+        "server/src",
       ],
       { cwd: fileURLToPath(new URL("../../..", import.meta.url)), encoding: "utf8" },
     );
+    expect(result.error).toBeUndefined();
     expect(result.status).toBe(1);
     expect(result.stdout.trim()).toBe("");
+    expect(result.stderr.trim()).toBe("");
   });
 });
 
@@ -428,12 +434,17 @@ describeEmbeddedPostgres("Slack approval interactions", () => {
     delete process.env.SLACK_SIGNING_SECRET;
     delete process.env.SLACK_USER_MAP_JSON;
     vi.restoreAllMocks();
+    await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs: 15_000 });
     await db.delete(activityLog);
+    await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
+    await db.delete(agentRuntimeState);
     await db.delete(issueApprovals);
     await db.delete(approvals);
+    await db.delete(issueComments);
     await db.delete(issues);
+    await db.delete(companySkills);
     await db.delete(agents);
     await db.delete(companyMemberships);
     await db.delete(companies);

@@ -195,7 +195,7 @@ test("tracked-tree scanner treats only status 1 as no-match and fails closed gen
   assert.deepEqual(calls[0], {
     file: "git",
     args: [
-      "grep", "-in", "--no-color", "--", forbidden, "--",
+      "grep", "-Fin", "--no-color", "--", forbidden, "--",
       ":!pnpm-lock.yaml", ":!.git", ":!docs/operator's guide.md",
     ],
   });

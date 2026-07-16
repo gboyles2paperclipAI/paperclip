@@ -11,6 +11,25 @@ Default: `http://localhost:3100/api`
 
 All endpoints are prefixed with `/api`.
 
+## Health and provenance
+
+`GET /api/health` returns the running server version. A clean governed package
+build also returns `buildCommit`, containing the full source commit embedded in
+`@paperclipai/server`:
+
+```json
+{
+  "status": "ok",
+  "version": "2026.715.0-help2day.1",
+  "buildCommit": "<full-source-commit>"
+}
+```
+
+`buildCommit` is optional because dirty or non-governed developer builds omit
+it rather than claim source provenance they cannot prove. Release verification
+must match both fields to the approved release manifest; do not derive a commit
+from the version string.
+
 ## Authentication
 
 All requests require an `Authorization` header:

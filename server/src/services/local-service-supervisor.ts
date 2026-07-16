@@ -207,6 +207,10 @@ export async function findLocalServiceRegistryRecordByRuntimeServiceId(input: {
     await removeLocalServiceRegistryRecord(record.serviceKey);
     return null;
   }
+  if (!(await doesLocalServiceRecordMatchCwd(candidate))) {
+    await removeLocalServiceRegistryRecord(record.serviceKey);
+    return null;
+  }
 
   return candidate;
 }
@@ -229,6 +233,68 @@ export function isProcessGroupAlive(processGroupId: number | null | undefined) {
     return true;
   } catch {
     return false;
+  }
+}
+
+type LinuxProcessIdentity = {
+  pid: number;
+  parentPid: number;
+  processGroupId: number;
+  state: string;
+  startTimeTicks: string;
+};
+
+async function readLinuxProcessIdentity(pid: number): Promise<LinuxProcessIdentity | null> {
+  if (process.platform !== "linux" || !Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const stat = await fs.readFile(`/proc/${pid}/stat`, "utf8");
+    const commandEnd = stat.lastIndexOf(")");
+    if (commandEnd < 0) return null;
+    const fields = stat.slice(commandEnd + 2).trim().split(/\s+/);
+    const parentPid = Number.parseInt(fields[1] ?? "", 10);
+    const processGroupId = Number.parseInt(fields[2] ?? "", 10);
+    const state = fields[0] ?? "";
+    const startTimeTicks = fields[19] ?? "";
+    if (!Number.isInteger(parentPid) || !Number.isInteger(processGroupId) || !state || !startTimeTicks) {
+      return null;
+    }
+    return { pid, parentPid, processGroupId, state, startTimeTicks };
+  } catch {
+    return null;
+  }
+}
+
+async function readLinuxProcessTable() {
+  if (process.platform !== "linux") return [];
+  let entries: string[];
+  try {
+    entries = await fs.readdir("/proc");
+  } catch {
+    return [];
+  }
+  const identities = await Promise.all(
+    entries
+      .filter((entry) => /^\d+$/.test(entry))
+      .map((entry) => readLinuxProcessIdentity(Number.parseInt(entry, 10))),
+  );
+  return identities.filter((identity): identity is LinuxProcessIdentity => identity !== null);
+}
+
+function isLiveLinuxProcess(identity: LinuxProcessIdentity | null) {
+  return identity !== null && identity.state !== "Z" && identity.state !== "X";
+}
+
+async function signalLinuxProcessIfIdentityMatches(
+  pid: number,
+  startTimeTicks: string,
+  signal: NodeJS.Signals,
+) {
+  const current = await readLinuxProcessIdentity(pid);
+  if (!current || current.startTimeTicks !== startTimeTicks || !isLiveLinuxProcess(current)) return;
+  try {
+    process.kill(pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | undefined)?.code !== "ESRCH") throw error;
   }
 }
 
@@ -270,6 +336,10 @@ export async function findAdoptableLocalService(input: {
     await removeLocalServiceRegistryRecord(input.serviceKey);
     return null;
   }
+  if (!(await doesLocalServiceRecordMatchCwd(record))) {
+    await removeLocalServiceRegistryRecord(input.serviceKey);
+    return null;
+  }
   if (input.command && record.command !== input.command) return null;
   if (input.cwd && path.resolve(record.cwd) !== path.resolve(input.cwd)) return null;
   if (input.envFingerprint && record.envFingerprint !== input.envFingerprint) return null;
@@ -301,6 +371,13 @@ async function adoptLocalServiceFromPortOwner(input: {
   if (!input.port) return null;
   const ownerPid = await readLocalServicePortOwner(input.port);
   if (!ownerPid) return null;
+
+  if (input.cwd) {
+    const ownerCwd = await readLocalServiceProcessCwd(ownerPid);
+    if (!ownerCwd || !(await isLocalServiceProcessInWorkspace(ownerCwd, input.cwd))) {
+      return null;
+    }
+  }
 
   const processGroupId = await readProcessGroupId(ownerPid);
   const pid = processGroupId && isPidAlive(processGroupId) ? processGroupId : ownerPid;
@@ -353,40 +430,93 @@ export async function terminateLocalService(
 ) {
   const signal = opts?.signal ?? "SIGTERM";
   const targetProcessGroup = process.platform !== "win32" && record.processGroupId && record.processGroupId > 0;
-  try {
-    if (targetProcessGroup) {
-      process.kill(-record.processGroupId!, signal);
-    } else {
-      process.kill(record.pid, signal);
-    }
-  } catch {
-    return;
-  }
+  const trackedLinuxProcesses = new Map<number, string>();
 
-  const deadline = Date.now() + (opts?.forceAfterMs ?? 2_000);
-  while (Date.now() < deadline) {
-    const targetAlive = targetProcessGroup
-      ? isProcessGroupAlive(record.processGroupId)
-      : isPidAlive(record.pid);
-    if (!targetAlive) {
-      return;
+  const refreshTrackedLinuxProcesses = async () => {
+    if (process.platform !== "linux") return;
+    const processTable = await readLinuxProcessTable();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const identity of processTable) {
+        const belongsToTargetGroup = targetProcessGroup && identity.processGroupId === record.processGroupId;
+        const isRoot = identity.pid === record.pid;
+        const isDescendant = trackedLinuxProcesses.has(identity.parentPid);
+        if (!isRoot && !belongsToTargetGroup && !isDescendant) continue;
+        if (trackedLinuxProcesses.has(identity.pid)) continue;
+        trackedLinuxProcesses.set(identity.pid, identity.startTimeTicks);
+        changed = true;
+      }
     }
+  };
+
+  const signalTarget = async (nextSignal: NodeJS.Signals) => {
+    if (targetProcessGroup) {
+      try {
+        process.kill(-record.processGroupId!, nextSignal);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException | undefined)?.code !== "ESRCH") throw error;
+      }
+    } else if (process.platform !== "linux") {
+      try {
+        process.kill(record.pid, nextSignal);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException | undefined)?.code !== "ESRCH") throw error;
+      }
+    }
+    if (process.platform === "linux") {
+      await Promise.all(
+        [...trackedLinuxProcesses].map(([pid, startTimeTicks]) =>
+          signalLinuxProcessIfIdentityMatches(pid, startTimeTicks, nextSignal)),
+      );
+    }
+  };
+
+  const targetStillAlive = async () => {
+    if (process.platform !== "linux") {
+      return targetProcessGroup ? isProcessGroupAlive(record.processGroupId) : isPidAlive(record.pid);
+    }
+    await refreshTrackedLinuxProcesses();
+    const identities = await Promise.all(
+      [...trackedLinuxProcesses].map(async ([pid, startTimeTicks]) => {
+        const current = await readLinuxProcessIdentity(pid);
+        return current?.startTimeTicks === startTimeTicks && isLiveLinuxProcess(current) ? current : null;
+      }),
+    );
+    return identities.some((identity) => identity !== null);
+  };
+
+  await refreshTrackedLinuxProcesses();
+  if (!(await targetStillAlive())) return;
+  await signalTarget(signal);
+
+  const forceAfterMs = opts?.forceAfterMs ?? 2_000;
+  const deadline = Date.now() + forceAfterMs;
+  while (Date.now() < deadline) {
+    if (!(await targetStillAlive())) return;
     await delay(100);
   }
 
-  const stillAlive = targetProcessGroup
-    ? isProcessGroupAlive(record.processGroupId)
-    : isPidAlive(record.pid);
-  if (!stillAlive) return;
-  try {
-    if (targetProcessGroup) {
-      process.kill(-record.processGroupId!, "SIGKILL");
-    } else {
-      process.kill(record.pid, "SIGKILL");
-    }
-  } catch {
-    // Ignore cleanup races.
+  if (!(await targetStillAlive())) return;
+  await signalTarget("SIGKILL");
+
+  const killDeadline = Date.now() + Math.max(500, Math.min(forceAfterMs, 2_000));
+  while (Date.now() < killDeadline) {
+    if (!(await targetStillAlive())) return;
+    await delay(50);
   }
+
+  const survivors = process.platform === "linux"
+    ? (await Promise.all(
+      [...trackedLinuxProcesses].map(async ([pid, startTimeTicks]) => {
+        const current = await readLinuxProcessIdentity(pid);
+        return current?.startTimeTicks === startTimeTicks && isLiveLinuxProcess(current) ? pid : null;
+      }),
+    )).filter((pid): pid is number => pid !== null)
+    : [];
+  throw new Error(
+    `Failed to terminate local service process tree${survivors.length > 0 ? `; surviving pids: ${survivors.join(", ")}` : ""}`,
+  );
 }
 
 export async function readLocalServicePortOwner(port: number) {
@@ -401,4 +531,39 @@ export async function readLocalServicePortOwner(port: number) {
   } catch {
     return null;
   }
+}
+
+export async function readLocalServiceProcessCwd(pid: number) {
+  if (!Number.isInteger(pid) || pid <= 0 || process.platform !== "linux") return null;
+  try {
+    return await fs.readlink(`/proc/${pid}/cwd`);
+  } catch {
+    return null;
+  }
+}
+
+export async function isLocalServiceProcessInWorkspace(processCwd: string, workspaceCwd: string) {
+  try {
+    const [resolvedProcessCwd, resolvedWorkspaceCwd] = await Promise.all([
+      fs.realpath(processCwd),
+      fs.realpath(workspaceCwd),
+    ]);
+    const relativePath = path.relative(resolvedWorkspaceCwd, resolvedProcessCwd);
+    return relativePath === "" || (!relativePath.startsWith(`..${path.sep}`) && relativePath !== "..");
+  } catch {
+    return false;
+  }
+}
+
+export async function isLocalServiceRegistryCwdCompatible(processCwd: string | null, workspaceCwd: string) {
+  if (!processCwd) return process.platform !== "linux";
+  return isLocalServiceProcessInWorkspace(processCwd, workspaceCwd);
+}
+
+async function doesLocalServiceRecordMatchCwd(record: LocalServiceRegistryRecord) {
+  if (!record.port) return true;
+  const ownerPid = await readLocalServicePortOwner(record.port);
+  if (!ownerPid) return false;
+  const ownerCwd = await readLocalServiceProcessCwd(ownerPid);
+  return isLocalServiceRegistryCwdCompatible(ownerCwd, record.cwd);
 }

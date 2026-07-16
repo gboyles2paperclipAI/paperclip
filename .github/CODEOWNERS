@@ -16,3 +16,12 @@ package.json @cryppadotta @devinfoley @nickyleach
 pnpm-lock.yaml @cryppadotta @devinfoley @nickyleach
 pnpm-workspace.yaml @cryppadotta @devinfoley @nickyleach
 .npmrc @cryppadotta @devinfoley @nickyleach
+
+# Help2day security and runtime boundaries require an independent sensitive-path review.
+packages/db/src/migrations/** @cryppadotta @devinfoley @nickyleach
+packages/**/auth/** @cryppadotta @devinfoley @nickyleach
+packages/**/secrets/** @cryppadotta @devinfoley @nickyleach
+packages/**/runtime/** @cryppadotta @devinfoley @nickyleach
+server/src/auth/** @cryppadotta @devinfoley @nickyleach
+server/src/secrets/** @cryppadotta @devinfoley @nickyleach
+server/src/services/*runtime* @cryppadotta @devinfoley @nickyleach

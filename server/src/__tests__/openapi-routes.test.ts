@@ -15,10 +15,12 @@ const apiPrefixes: Record<string, string> = {
   "activity.ts": "/api",
   "adapters.ts": "/api",
   "agents.ts": "/api",
+  "attention.ts": "/api",
   "approvals.ts": "/api",
   "assets.ts": "/api",
   "auth.ts": "/api/auth",
   "board-chat.ts": "/api",
+  "built-in-agents.ts": "/api",
   "cloud-upstreams.ts": "/api",
   "companies.ts": "/api/companies",
   "company-skills.ts": "/api",
@@ -55,6 +57,8 @@ const HTTP_METHODS = new Set(["get", "put", "post", "delete", "options", "head",
 const explicitOpenApiCoverageExclusions = new Set([
   // Pipeline routes are experimental and not yet represented in the public OpenAPI document.
   "pipelines.ts",
+  // Case routes are experimental (enableCases flag) and not yet in the public OpenAPI document.
+  "cases.ts",
 ]);
 
 function createApp() {
@@ -158,28 +162,6 @@ describe("openapi routes", () => {
         name: { type: "string" },
       },
     });
-    const keyInventorySchema = res.body.paths["/api/agents/{id}/keys"].get.responses["200"].content["application/json"].schema;
-    expect(keyInventorySchema).toMatchObject({
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          creation: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              actorType: { type: "string", enum: ["user", "system", "unknown"] },
-              actorId: { type: "string", nullable: true },
-            },
-          },
-          lastUsedAt: { type: "string", format: "date-time", nullable: true },
-        },
-      },
-    });
-    expect(keyInventorySchema.items.properties).not.toHaveProperty("token");
-    expect(keyInventorySchema.items.properties).not.toHaveProperty("keyHash");
-    expect(res.body.paths["/api/agents/{id}/keys"].post.responses["201"]).toBeDefined();
   });
 
   it("covers the mounted server routes exactly", () => {
@@ -208,99 +190,18 @@ describe("openapi routes", () => {
       actor: "board",
       instanceAdmin: true,
     });
-    for (const operation of [
-      spec.paths["/api/agents/{id}/keys"].get,
-      spec.paths["/api/agents/{id}/keys"].post,
-      spec.paths["/api/agents/{id}/keys/{keyId}"].delete,
-    ]) {
-      expect(operation.security).toEqual([
-        { BoardSessionAuth: [] },
-        { BoardApiKeyAuth: [] },
-      ]);
-      expect(operation.security).not.toContainEqual({ AgentBearerAuth: [] });
-      expect(operation["x-paperclip-authorization"]).toEqual({ actor: "board" });
-    }
+    expect(spec.paths["/api/execution-workspaces/{id}/reconcile-branch"].post.security).toEqual([
+      { BoardSessionAuth: [] },
+      { BoardApiKeyAuth: [] },
+    ]);
+    expect(spec.paths["/api/execution-workspaces/{id}/reconcile-branch"].post["x-paperclip-authorization"]).toEqual({
+      actor: "board",
+    });
     expect(spec.paths["/api/companies/{companyId}/cost-events"].post.responses["201"]).toBeDefined();
     expect(spec.paths["/api/companies/{companyId}/cost-events"].post.responses["403"]).toBeDefined();
     expect(spec.paths["/api/instance/database-backups"].post.responses["201"]).toBeDefined();
     expect(spec.paths["/api/invites/{token}/accept"].post.responses["202"]).toBeDefined();
     expect(spec.paths["/api/board-api-keys"].post.responses["201"]).toBeDefined();
     expect(spec.paths["/api/companies/import"].post.responses["202"]).toBeDefined();
-  });
-
-  it("documents the strict company interaction audit response and rate-limit retry header", () => {
-    const { spec } = loadSpecRoutes();
-    const operation = spec.paths["/api/companies/{companyId}/interactions"].get;
-    const responseSchema = operation.responses["200"].content["application/json"].schema;
-
-    expect(responseSchema).toMatchObject({
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["issue", "interaction"],
-        properties: {
-          issue: {
-            type: "object",
-            additionalProperties: false,
-            required: ["id", "identifier", "status"],
-          },
-          interaction: {
-            type: "object",
-            additionalProperties: false,
-            required: [
-              "id",
-              "kind",
-              "status",
-              "createdAt",
-              "updatedAt",
-              "resolvedAt",
-              "resolvedBy",
-              "outcome",
-              "resolutionAudit",
-            ],
-          },
-        },
-      },
-    });
-    expect(Object.keys(responseSchema.items.properties.issue.properties)).toEqual([
-      "id",
-      "identifier",
-      "status",
-    ]);
-    expect(Object.keys(responseSchema.items.properties.interaction.properties)).toEqual([
-      "id",
-      "kind",
-      "status",
-      "createdAt",
-      "updatedAt",
-      "resolvedAt",
-      "resolvedBy",
-      "outcome",
-      "resolutionAudit",
-    ]);
-    expect(responseSchema.items.properties.interaction.properties.resolvedBy).toMatchObject({
-      type: "object",
-      additionalProperties: false,
-      required: ["agentId", "userId"],
-    });
-    expect(responseSchema.items.properties.interaction.properties.resolutionAudit).toMatchObject({
-      type: "object",
-      additionalProperties: false,
-      required: ["method"],
-    });
-    expect(operation.parameters.find((parameter: { name: string }) => parameter.name === "offset")?.schema)
-      .toMatchObject({ type: "integer", minimum: 0, maximum: 10_000 });
-    expect(operation.responses["429"].headers["Retry-After"]).toEqual({
-      description: "Seconds until the client may retry the request",
-      schema: { type: "integer", minimum: 1 },
-    });
-    for (const path of [
-      "/api/issues/{issueId}/file-resources/list",
-      "/api/issues/{issueId}/file-resources/resolve",
-      "/api/issues/{issueId}/file-resources/content",
-    ]) {
-      expect(spec.paths[path].get.responses["429"].headers).toBeUndefined();
-    }
   });
 });

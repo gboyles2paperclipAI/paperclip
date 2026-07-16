@@ -51,3 +51,6 @@ f25753053749d42fa808a9d92132467d2d75dcd0:server/src/routes/access.ts:generic-api
 # (path allowlists in .gitleaks.toml cover test/docs/data files; these two entries handle source files)
 ce5f52059cec9759041ee15dae55ea54cbae84c9:server/src/services/plugin-host-services.ts:generic-api-key:848
 38b855e4955c3fa7deb2c7e59631528c1aa4cd23:server/src/routes/access.ts:generic-api-key:36
+
+# Google Sheets MCP source — regex literal that redacts private-key blocks from tool output
+7b35de65aaabbd53c2393cdf10c2223e36af1c23:packages/google-sheets-mcp-server/src/tools.ts:private-key:97

@@ -312,6 +312,53 @@ describeEmbeddedPostgres("companySkillService runtime skill materialization", ()
     expect(skillRm).toHaveLength(0);
   });
 
+  it("repairs invalid captured SKILL.md snapshots and cleans dotfile residue", async () => {
+    const { companyId, key, markdown } = await insertSourceLessGithubSkill({
+      remoteFiles: { "references/guide.md": "# Guide v1\n" },
+    });
+
+    const first = filterOwnEntries(await svc.listRuntimeSkillEntries(companyId), new Set([key]));
+    expect(first).toHaveLength(1);
+    const skillPath = first[0]!.source;
+
+    await fs.writeFile(path.join(skillPath, "SKILL.md"), "# invalid captured snapshot\n", "utf8");
+    await fs.writeFile(path.join(skillPath, ".DS_Store"), "ephemeral", "utf8");
+    await fs.writeFile(path.join(skillPath, "references", ".publish-leftover"), "ephemeral", "utf8");
+
+    const repaired = filterOwnEntries(await svc.listRuntimeSkillEntries(companyId), new Set([key]));
+
+    expect(repaired).toHaveLength(1);
+    expect(repaired[0]!.sourceStatus).toBe("available");
+    await expect(fs.readFile(path.join(skillPath, "SKILL.md"), "utf8")).resolves.toBe(markdown);
+    await expect(fs.stat(path.join(skillPath, ".DS_Store"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.stat(path.join(skillPath, "references", ".publish-leftover"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("fails closed when desired SKILL.md frontmatter is invalid", async () => {
+    const { companyId, skillId, key, markdown } = await insertSourceLessGithubSkill({
+      markdown: skillMarkdown("Runtime Coach", "Stable body."),
+      remoteFiles: { "references/guide.md": "# Guide\n" },
+    });
+
+    const initial = filterOwnEntries(await svc.listRuntimeSkillEntries(companyId), new Set([key]));
+    expect(initial).toHaveLength(1);
+    const skillPath = initial[0]!.source;
+
+    const invalidMarkdown = "# Missing frontmatter\n";
+    remoteFiles.set("SKILL.md", invalidMarkdown);
+    await db.update(companySkills)
+      .set({ markdown: invalidMarkdown })
+      .where(eq(companySkills.id, skillId));
+
+    const listed = filterOwnEntries(await svc.listRuntimeSkillEntries(companyId), new Set([key]));
+
+    expect(listed).toHaveLength(1);
+    expect(listed[0]!.source).toBe(skillPath);
+    expect(listed[0]!.sourceStatus).toBe("missing");
+    expect(listed[0]!.missingDetail).toMatch(/valid frontmatter/i);
+    await expect(fs.readFile(path.join(skillPath, "SKILL.md"), "utf8")).resolves.toBe(markdown);
+  });
+
   it("publishes changed stored markdown and converges auxiliary file add/change/remove", async () => {
     const { companyId, skillId, key, markdown } = await insertSourceLessGithubSkill({
       markdown: skillMarkdown("Runtime Coach", "Original body."),

@@ -100,7 +100,7 @@ export function runForbiddenTokenCheck({
     try {
       result = exec(
         "git",
-        ["grep", "-in", "--no-color", "--", token, "--", ...gitGrepExcludes],
+        ["grep", "-Fin", "--no-color", "--", token, "--", ...gitGrepExcludes],
         { encoding: "utf8", cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] },
       );
     } catch {

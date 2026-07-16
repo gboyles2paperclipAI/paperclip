@@ -23,7 +23,10 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { heartbeatService } from "../services/heartbeat.ts";
+import {
+  heartbeatService,
+  waitForAllHeartbeatRunExecutionsDrain,
+} from "../services/heartbeat.ts";
 import { normalizeIssueExecutionPolicy, parseIssueExecutionState } from "../services/issue-execution-policy.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -52,7 +55,10 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
         .select({ id: heartbeatRuns.id })
         .from(heartbeatRuns)
         .where(sql`${heartbeatRuns.status} in ('queued', 'running', 'scheduled_retry')`);
-      if (active.length === 0) return;
+      if (active.length === 0) {
+        await waitForAllHeartbeatRunExecutionsDrain({ timeoutMs });
+        return;
+      }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     throw new Error("Timed out waiting for issue monitor heartbeat runs to settle");
@@ -160,6 +166,7 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
       name: "Paperclip",
       issuePrefix,
       requireBoardApprovalForNewAgents: false,
+      defaultResponsibleUserId: "responsible-user",
     });
 
     await db.insert(agents).values({

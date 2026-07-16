@@ -26,12 +26,33 @@ describe("plugin execution workspace bridge", () => {
     });
 
     await expect(
-      handlers["executionWorkspaces.get"]({ workspaceId: "workspace-1", companyId: "company-1" }),
+      handlers["executionWorkspaces.get"](
+        { workspaceId: "workspace-1", companyId: "company-1" },
+        { invocationScope: { companyId: "company-1" } },
+      ),
     ).resolves.toMatchObject({
       id: "workspace-1",
       cwd: "/tmp/workspace-1",
     });
     expect(get).toHaveBeenCalledWith({ workspaceId: "workspace-1", companyId: "company-1" });
+  });
+
+  it("rejects metadata reads when the invocation lacks company scope", async () => {
+    const get = vi.fn();
+    const handlers = createHostClientHandlers({
+      pluginId: "workspace-plugin",
+      capabilities: ["execution.workspaces.read"],
+      services: {
+        executionWorkspaces: { get },
+      } as any,
+    });
+
+    await expect(
+      handlers["executionWorkspaces.get"]({ workspaceId: "workspace-1", companyId: "company-1" }),
+    ).rejects.toMatchObject({
+      code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+    });
+    expect(get).not.toHaveBeenCalled();
   });
 
   it("rejects metadata reads when the plugin lacks execution.workspace read access", async () => {

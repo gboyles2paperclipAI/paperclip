@@ -3,6 +3,9 @@ import {
   acceptIssueThreadInteractionSchema,
   askUserQuestionsResultSchema,
   createIssueThreadInteractionSchema,
+  requestConfirmationPayloadSchema,
+  requestConfirmationResultSchema,
+  submitIssueThreadInteractionVerdictsSchema,
 } from "./validators/issue.js";
 
 describe("issue thread interaction schemas", () => {
@@ -38,47 +41,47 @@ describe("issue thread interaction schemas", () => {
     });
   });
 
-  it("normalizes legacy request_confirmation inputs from agent tools", () => {
-    const parsed = createIssueThreadInteractionSchema.parse({
-      kind: "request_confirmation",
-      idempotencyKey: "confirmation:stripe-preview-smoke-test:v1",
-      title: "Stripe preview smoke test",
-      summary: "Confirm checkout works in preview.",
-      continuationPolicy: "wake_assignee",
-      payload: {
-        detailsMarkdown: "Open the preview checkout page and confirm it loads.",
-        supersedeOnUserComment: true,
-      },
-    });
-
-    expect(parsed).toMatchObject({
-      kind: "request_confirmation",
-      continuationPolicy: "wake_assignee",
-      payload: {
+  it("round-trips versioned tool action payload and lifecycle metadata", () => {
+    const payload = requestConfirmationPayloadSchema.parse({
+      version: 1,
+      prompt: "Approve send_email?",
+      toolAction: {
         version: 1,
-        prompt: "Stripe preview smoke test",
-        detailsMarkdown: "Open the preview checkout page and confirm it loads.",
-        supersedeOnUserComment: true,
+        actionRequestId: "11111111-1111-4111-8111-111111111111",
+        invocationId: "22222222-2222-4222-8222-222222222222",
+        toolName: "send_email",
+        toolDisplayName: "Send email",
+        connectionId: "33333333-3333-4333-8333-333333333333",
+        applicationId: "44444444-4444-4444-8444-444444444444",
+        appDisplayName: "Gmail",
+        risk: "write",
+        previewMarkdown: "Send an email to the reviewed recipient.",
+        argumentsSummaryJson: '{"to":"recipient@example.com"}',
+        argumentsHash: "reviewed-arguments-hash",
+        expiresAt: "2026-07-12T16:00:00.000Z",
       },
     });
-  });
-
-  it("normalizes legacy request_confirmation inputs without a payload object", () => {
-    const parsed = createIssueThreadInteractionSchema.parse({
-      kind: "request_confirmation",
-      idempotencyKey: "confirmation:stripe-smoke-v1",
-      title: "Confirm Stripe preview smoke test",
-      summary: "Manual browser validation is required.",
-      continuationPolicy: "wake_assignee",
-    });
-
-    expect(parsed).toMatchObject({
-      kind: "request_confirmation",
-      payload: {
+    const result = requestConfirmationResultSchema.parse({
+      version: 1,
+      outcome: "accepted",
+      toolAction: {
         version: 1,
-        prompt: "Confirm Stripe preview smoke test",
+        status: "executed",
+        errorCode: null,
+        errorMessage: null,
+        updatedAt: "2026-07-12T15:05:00.000Z",
       },
     });
+
+    expect(payload.toolAction).toMatchObject({
+      version: 1,
+      toolDisplayName: "Send email",
+      risk: "write",
+      argumentsHash: "reviewed-arguments-hash",
+    });
+    expect(result.toolAction).toMatchObject({ version: 1, status: "executed" });
+    expect(requestConfirmationPayloadSchema.parse({ version: 1, prompt: "Legacy confirmation?" }).toolAction)
+      .toBeUndefined();
   });
 
   it("accepts issue document targets for request_confirmation interactions", () => {
@@ -182,62 +185,6 @@ describe("issue thread interaction schemas", () => {
     })).toMatchObject({
       expirationReason: "superseded_by_comment",
       commentId: "11111111-1111-4111-8111-111111111111",
-    });
-  });
-
-  it("normalizes legacy ask_user_questions inputs from agent tools", () => {
-    const parsed = createIssueThreadInteractionSchema.parse({
-      kind: "ask_user_questions",
-      idempotencyKey: "ask:FUL-14806:stripe-smoke-test:v1",
-      title: "Stripe Preview Smoke Test",
-      summary: "Manual confirmation needed.",
-      continuationPolicy: "wake_assignee",
-      payload: {
-        version: 1,
-        prompt: "Please test checkout.",
-        questions: [
-          {
-            id: "smoke_result",
-            label: "Smoke test result",
-            type: "select",
-            options: [
-              { value: "pass", label: "PASS - checkout worked" },
-              { value: "fail", label: "FAIL - error encountered" },
-            ],
-            required: true,
-          },
-          {
-            id: "error_details",
-            label: "Error details",
-            type: "text",
-            required: false,
-          },
-        ],
-      },
-    });
-
-    expect(parsed).toMatchObject({
-      kind: "ask_user_questions",
-      continuationPolicy: "wake_assignee",
-      payload: {
-        questions: [
-          {
-            id: "smoke_result",
-            prompt: "Smoke test result",
-            selectionMode: "single",
-            options: [
-              { id: "pass", label: "PASS - checkout worked" },
-              { id: "fail", label: "FAIL - error encountered" },
-            ],
-          },
-          {
-            id: "error_details",
-            prompt: "Error details",
-            selectionMode: "single",
-            options: [{ id: "response", label: "Provide response" }],
-          },
-        ],
-      },
     });
   });
 
@@ -404,5 +351,112 @@ describe("issue thread interaction schemas", () => {
     expect(() => acceptIssueThreadInteractionSchema.parse({
       selectedOptionIds: ["item-1", "item-1"],
     })).toThrow("selectedOptionIds must be unique");
+  });
+
+  it("parses request_item_verdicts payloads with defaults", () => {
+    const parsed = createIssueThreadInteractionSchema.parse({
+      kind: "request_item_verdicts",
+      payload: {
+        version: 1,
+        prompt: "Review these generated items.",
+        items: [
+          { id: "api", label: "API route", description: "Server submit endpoint" },
+          { id: "docs", label: "Docs", previewMarkdown: "Document the route." },
+        ],
+      },
+    });
+
+    expect(parsed).toMatchObject({
+      kind: "request_item_verdicts",
+      continuationPolicy: "wake_assignee",
+      payload: {
+        verdicts: ["approve", "reject"],
+        requireReasonOn: ["reject"],
+        allowBulkApprove: true,
+      },
+    });
+  });
+
+  it("accepts request_item_verdicts defer when enabled explicitly", () => {
+    const parsed = createIssueThreadInteractionSchema.parse({
+      kind: "request_item_verdicts",
+      payload: {
+        version: 1,
+        prompt: "Review these generated items.",
+        items: [{ id: "api", label: "API route" }],
+        verdicts: ["approve", "reject", "defer"],
+        requireReasonOn: ["reject", "defer"],
+      },
+    });
+
+    expect(parsed).toMatchObject({
+      kind: "request_item_verdicts",
+      payload: {
+        verdicts: ["approve", "reject", "defer"],
+        requireReasonOn: ["reject", "defer"],
+      },
+    });
+  });
+
+  it("rejects invalid request_item_verdicts item and reason references", () => {
+    const base = {
+      kind: "request_item_verdicts",
+      payload: {
+        version: 1,
+        prompt: "Review these generated items.",
+        items: [
+          { id: "api", label: "API route" },
+          { id: "docs", label: "Docs" },
+        ],
+      },
+    } as const;
+
+    expect(() => createIssueThreadInteractionSchema.parse({
+      ...base,
+      payload: {
+        ...base.payload,
+        items: [],
+      },
+    })).toThrow();
+
+    expect(() => createIssueThreadInteractionSchema.parse({
+      ...base,
+      payload: {
+        ...base.payload,
+        items: [
+          { id: "api", label: "API route" },
+          { id: "api", label: "Duplicate" },
+        ],
+      },
+    })).toThrow("Item ids must be unique within one item verdict request");
+
+    expect(() => createIssueThreadInteractionSchema.parse({
+      ...base,
+      payload: {
+        ...base.payload,
+        items: Array.from({ length: 201 }, (_value, index) => ({
+          id: `item-${index}`,
+          label: `Item ${index}`,
+        })),
+      },
+    })).toThrow();
+
+    expect(() => createIssueThreadInteractionSchema.parse({
+      ...base,
+      payload: {
+        ...base.payload,
+        verdicts: ["approve", "reject"],
+        requireReasonOn: ["defer"],
+      },
+    })).toThrow("requireReasonOn must reference enabled verdicts");
+  });
+
+  it("rejects duplicate request_item_verdicts submit ids", () => {
+    expect(() => submitIssueThreadInteractionVerdictsSchema.parse({
+      verdicts: [
+        { id: "api", verdict: "approve" },
+        { id: "api", verdict: "reject", reason: "Needs revision" },
+      ],
+    })).toThrow("verdict item ids must be unique");
   });
 });

@@ -15,6 +15,16 @@ Use these scripts:
 
 Paperclip no longer uses release branches or Changesets for publishing.
 
+The company-governed Help2day path has an additional evidence-only entry point:
+
+- [`scripts/build-help2day-release-evidence.sh`](../scripts/build-help2day-release-evidence.sh)
+  builds and retains exact source-release evidence but has no registry, GitHub,
+  install, migration, restart, or deployment write path
+
+Its corresponding manual workflow is
+[`help2day-source-release-evidence.yml`](../.github/workflows/help2day-source-release-evidence.yml).
+It is not a publication workflow.
+
 ## Why the CLI needs special packaging
 
 The CLI package, `paperclipai`, imports code from workspace packages such as:
@@ -82,6 +92,60 @@ canary provenance retry), so changed bytes fail closed. The exit trap removes
 only the marked staging root, on success or failure. The current manifest
 contains 30 release-enabled packages, including the CLI and 29 non-CLI
 packages; future enabled packages enter the same ordered boundary automatically.
+
+Release staging also verifies every concrete `main`, `module`, `types`, `bin`,
+and `exports` target inside each exact tarball. A missing standalone build or
+entrypoint therefore fails before a package can cross the immutable staging
+boundary.
+
+## Help2day evidence bundle
+
+The governed evidence command requires a clean exact source commit and emits:
+
+- `release-manifest.json` binding the distribution version, full source commit,
+  frozen upstream base, fork anchor, builder identity, UTC build timestamp,
+  production lock hash, complete source-lock inventory hash, release-map hash,
+  SBOM hash, installed-package proof hash, and every tarball hash
+- `checksums.sha256` over the retained evidence files
+- `sbom.cdx.json`, generated reproducibly from the lifecycle-disabled production
+  graph resolved from the exact staged tarballs
+- `security-results/` containing npm, OSV-Scanner, Grype, source-range gitleaks,
+  package-content gitleaks, and a normalized fail-closed result
+- `package-inventory/` containing all root and standalone lockfiles, their
+  checksums, exact artifacts, and verification of every installed manifest and
+  concrete entrypoint
+- `test-results/`, `runtime-proof/`, and `release-report.md`
+
+An unavailable or malformed scanner result is an error. npm and Grype must have
+no high or critical production findings, and OSV findings require explicit
+disposition before the evidence gate passes. Secret scanning uses the exact
+source range and exact extracted package contents. No broad suppression is part
+of this workflow.
+
+On the shared Help2day host, serialize the complete command through the host
+heavy-validation wrapper. For example:
+
+```bash
+/home/paperclipadmin/ai-collab/scripts/run-host-heavy-gate.sh \
+  ./scripts/build-help2day-release-evidence.sh \
+  --version 2026.715.0-help2day.1 \
+  --output /home/paperclipadmin/ai-collab/backups/paperclip-release-<UTC> \
+  --upstream-base <full-upstream-sha> \
+  --fork-anchor <full-fork-sha> \
+  --build-timestamp <canonical-utc-timestamp> \
+  --builder-id <reviewable-builder-identity> \
+  --runtime-proof-mode host \
+  --runtime-port <unused-port> \
+  --live-prefix <current-live-node-prefix>
+```
+
+The output directory must be outside the source worktree and must not already
+exist. The command restores temporary version rewrites and fails if the source
+tree is not clean afterward. CI uses the default `isolated` proof. The shared
+Help2day host uses `host` proof, which additionally hashes the complete live
+CLI and scoped package trees before and after, verifies systemd ownership and
+the single port 3100 listener, requires staging to remain inactive, and proves
+the disposable process group and listener terminate.
 
 Forbidden-token policy uses optional stable, explicit entries from the local
 Git common directory's `hooks/forbidden-tokens.txt` (one per line, `#` comments
@@ -225,14 +289,14 @@ PR CI now checks changed release-enabled package manifests against npm. That cat
 The first publish of a brand-new package still needs one human maintainer with npm write access.
 After that, trusted publishing can take over.
 
-Example for `@paperclipai/adapter-acpx-local` from the repo root:
+Example for a newly added public package from the repo root:
 
 ```bash
 # safe preview
-pnpm run release:bootstrap-package -- @paperclipai/adapter-acpx-local
+pnpm run release:bootstrap-package -- @paperclipai/new-package
 
 # one-time first publish from an authenticated maintainer machine
-pnpm run release:bootstrap-package -- @paperclipai/adapter-acpx-local --publish --otp 123456
+pnpm run release:bootstrap-package -- @paperclipai/new-package --publish --otp 123456
 ```
 
 The helper script:
@@ -252,7 +316,7 @@ The helper now requires `--otp <code>` up front for `--publish`, so it fails bef
 
 After that first publish succeeds:
 
-1. open `https://www.npmjs.com/package/@paperclipai/adapter-acpx-local`
+1. open `https://www.npmjs.com/package/@paperclipai/new-package`
 2. go to `Settings` → `Trusted publishing`
 3. add repository `paperclipai/paperclip`
 4. set workflow filename to `release.yml`

@@ -1,23 +1,23 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  statSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, statSync } from "node:fs";
 import {
   runFixtureCleanupRunnerSettlementTarget,
   runFixtureCleanupSelfTest,
   runFixtureCleanupSignalTarget,
 } from "./fixture-cleanup-self-test.mjs";
 import { createFixtureLifecycle, runTokenEnvName } from "./fixture-process-lifecycle.mjs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadShardDurations, selectGeneralServerShard } from "./general-server-shard.mjs";
+import { selectVitestTempRootParent } from "./vitest-stable-temp.mjs";
 
 const repoRoot = process.cwd();
 const scriptPath = fileURLToPath(import.meta.url);
+const scriptsDir = path.dirname(scriptPath);
+const generalServerShardDurations = loadShardDurations(
+  path.join(scriptsDir, "general-server-shard-durations.json"),
+);
 const serverRoot = path.join(repoRoot, "server");
 const serverSrcDir = path.join(repoRoot, "server", "src");
 const serverTestsDir = path.join(repoRoot, "server", "src", "__tests__");
@@ -26,7 +26,6 @@ const nonServerProjects = [
   "@paperclipai/skills-catalog",
   "@paperclipai/db",
   "@paperclipai/adapter-utils",
-  "@paperclipai/adapter-acpx-local",
   "@paperclipai/adapter-codex-local",
   "@paperclipai/adapter-opencode-local",
   "@paperclipai/plugin-sdk",
@@ -54,7 +53,6 @@ const additionalSerializedServerTests = new Set([
   "server/src/__tests__/invite-expiry.test.ts",
   "server/src/__tests__/invite-join-manager.test.ts",
   "server/src/__tests__/invite-onboarding-text.test.ts",
-  "server/src/__tests__/issue-recovery-actions.test.ts",
   "server/src/__tests__/issues-checkout-wakeup.test.ts",
   "server/src/__tests__/issues-service.test.ts",
   "server/src/__tests__/opencode-local-adapter-environment.test.ts",
@@ -93,14 +91,8 @@ const {
   cleanupRunState,
   createRunState,
   discoverOwnedProcessesToFixedPoint,
-  findRunTokenProcesses,
   generateRunToken,
-  identityKey,
-  isLiveProcess,
   requestOwnedRunShutdown,
-  resetSweepGuard,
-  signalOwnedIdentity,
-  sleep,
   sweepOrphanedPcvtTempDirs,
   writeOwnerManifest,
 } = lifecycle;
@@ -368,9 +360,9 @@ async function runOwnedCommand(command, args, options) {
 
   invocationIndex += 1;
   if (process.platform === "linux") {
-    assertLinuxProcReady();
+    assertLinuxProcReady(fail);
   }
-  const tempRootParent = process.env.TMPDIR || (process.platform === "win32" ? os.tmpdir() : "/tmp");
+  const tempRootParent = selectVitestTempRootParent();
   mkdirSync(tempRootParent, { recursive: true });
   await sweepOrphanedPcvtTempDirs(tempRootParent);
   const testRoot = mkdtempSync(path.join(tempRootParent, `pcvt-${process.pid}-${invocationIndex}-`));
@@ -396,26 +388,19 @@ async function runOwnedCommand(command, args, options) {
     await beforeStart({ env, runState, testRoot });
   }
 
-  const child = spawn(command, args, {
-    cwd,
-    env,
-    stdio,
-  });
-
+  const child = spawn(command, args, { cwd, env, stdio });
   runState.child = child;
   if (afterSpawnBeforeOwnership) {
     await afterSpawnBeforeOwnership({ env, runState, testRoot, child });
   }
+
   let timedOut = false;
   let timer = null;
   let poller = null;
   let pollerError = null;
-
   try {
     if (process.platform === "linux") {
-      if (!child.pid) {
-        throw new Error(`Failed to start ${label}: child pid unavailable`);
-      }
+      if (!child.pid) throw new Error(`Failed to start ${label}: child pid unavailable`);
       if (!captureChildIdentity(runState) && !runState.runnerIdentity) {
         throw new Error(`Failed to start ${label}: child /proc identity unavailable`);
       }
@@ -496,7 +481,6 @@ async function runVitest(args, label) {
 
 function exitWithFailureSummary() {
   if (failures.length === 0) return;
-
   console.error("\n[test:run] Failing suites:");
   for (const failure of failures) {
     console.error(`[test:run] - ${failure.label} (exit ${failure.status})`);
@@ -521,8 +505,11 @@ async function runProjectGroup(projects, groupName) {
 async function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = null) {
   if (groupName === generalServerGroupName) {
     if (shardCount !== null && shardCount > 1) {
-      const shardFiles = generalServerTestFiles.filter(
-        (_, index) => index % shardCount === shardIndex,
+      const shardFiles = selectGeneralServerShard(
+        generalServerTestFiles,
+        shardIndex,
+        shardCount,
+        generalServerShardDurations,
       );
       console.log(
         `\n[test:run] general-server shard ${shardIndex + 1}/${shardCount} running ${shardFiles.length} of ${generalServerTestFiles.length} suites`,
@@ -603,6 +590,8 @@ const routeTests = walk(serverTestsDir)
 // dedicated serialized shards. Sharding this list across runners is what keeps
 // the general-server lane from becoming the PR critical path: the server vitest
 // config pins maxWorkers to 1, so the only way to parallelize is across jobs.
+// Suites are partitioned by recorded duration (scripts/general-server-shard.mjs)
+// rather than round-robin, so one slow suite cluster can't stretch a single shard.
 const generalServerTestFiles = walk(serverSrcDir)
   .map((file) => toRepoPath(file))
   .filter((repoPath) => repoPath.endsWith(".test.ts"))
@@ -660,8 +649,11 @@ async function main() {
             options.mode === generalModeName &&
             options.group === generalServerGroupName &&
             options.shardCount !== null
-              ? generalServerTestFiles.filter(
-                  (_, index) => index % options.shardCount === options.shardIndex,
+              ? selectGeneralServerShard(
+                  generalServerTestFiles,
+                  options.shardIndex,
+                  options.shardCount,
+                  generalServerShardDurations,
                 )
               : null,
         },
