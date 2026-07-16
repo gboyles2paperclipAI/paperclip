@@ -113,11 +113,11 @@ restore_sources() {
       cp -p "$BACKUP_ROOT/$pkg_dir/package.json" "$REPO_ROOT/$pkg_dir/package.json"
     done < "$BACKUP_ROOT/release-packages.tsv"
     cp -p "$BACKUP_ROOT/cli-src-index.ts" "$REPO_ROOT/cli/src/index.ts"
-  fi
-  if [[ -f "$BACKUP_ROOT/cli-README.md" ]]; then
-    cp -p "$BACKUP_ROOT/cli-README.md" "$REPO_ROOT/cli/README.md"
-  else
-    rm -f "$REPO_ROOT/cli/README.md"
+    if [[ -f "$BACKUP_ROOT/cli-README.md" ]]; then
+      cp -p "$BACKUP_ROOT/cli-README.md" "$REPO_ROOT/cli/README.md"
+    else
+      rm -f "$REPO_ROOT/cli/README.md"
+    fi
   fi
   for pkg_dir in server packages/adapters/claude-local packages/adapters/codex-local; do
     rm -rf "$REPO_ROOT/$pkg_dir/skills"

@@ -184,7 +184,7 @@ test("Help2day source evidence is isolated from publication and runtime activati
   assert.match(evidence, /BACKUP_ROOT\/cli-README\.md/);
   assert.match(
     evidence,
-    /if \[\[ -f "\$BACKUP_ROOT\/cli-README\.md" \]\]; then[\s\S]*cp -p "\$BACKUP_ROOT\/cli-README\.md" "\$REPO_ROOT\/cli\/README\.md"[\s\S]*else[\s\S]*rm -f "\$REPO_ROOT\/cli\/README\.md"/,
+    /if \[\[ -n "\$BACKUP_ROOT" && -d "\$BACKUP_ROOT" \]\]; then[\s\S]*if \[\[ -f "\$BACKUP_ROOT\/cli-README\.md" \]\]; then[\s\S]*cp -p "\$BACKUP_ROOT\/cli-README\.md" "\$REPO_ROOT\/cli\/README\.md"[\s\S]*else[\s\S]*rm -f "\$REPO_ROOT\/cli\/README\.md"/,
   );
 
   const runtimeProof = readText("scripts/prove-isolated-release-runtime.sh");
