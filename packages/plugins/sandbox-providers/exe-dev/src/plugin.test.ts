@@ -238,7 +238,7 @@ describe("exe.dev sandbox provider plugin", () => {
 
     it("rejects a missing END marker (truncated paste)", () => {
       const truncated = VALID_OPENSSH.split("\n").slice(0, -1).join("\n");
-      expect(validateSshPrivateKey(truncated)).toMatch(/missing its '-----END/);
+      expect(validateSshPrivateKey(truncated)).toMatch(/matching private-key footer/);
     });
 
     it("rejects a body with non-base64 characters", () => {
