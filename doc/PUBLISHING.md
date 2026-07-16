@@ -106,6 +106,10 @@ The governed evidence command requires a clean exact source commit and emits:
   frozen upstream base, fork anchor, builder identity, UTC build timestamp,
   production lock hash, complete source-lock inventory hash, release-map hash,
   SBOM hash, installed-package proof hash, and every tarball hash
+- a machine-verifiable lineage proof binding the reviewed reconciliation head,
+  its tree-equivalent squash merge, and that merge's ancestry to the release
+  source (while separately proving the frozen upstream and fork anchors are
+  ancestors of the reviewed head)
 - `checksums.sha256` over the retained evidence files
 - `sbom.cdx.json`, generated reproducibly from the lifecycle-disabled production
   graph resolved from the exact staged tarballs
@@ -132,6 +136,8 @@ heavy-validation wrapper. For example:
   --output /home/paperclipadmin/ai-collab/backups/paperclip-release-<UTC> \
   --upstream-base <full-upstream-sha> \
   --fork-anchor <full-fork-sha> \
+  --upstream-provenance-commit <full-reviewed-pr-head-sha> \
+  --reconciliation-merge-commit <full-tree-equivalent-merge-sha> \
   --build-timestamp <canonical-utc-timestamp> \
   --builder-id <reviewable-builder-identity> \
   --runtime-proof-mode host \

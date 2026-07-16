@@ -30,6 +30,12 @@ test("builds a stable sorted manifest and rejects version drift", () => {
     sourceCommit: commit,
     upstreamBase: "1".repeat(40),
     forkAnchor: "2".repeat(40),
+    lineage: {
+      mode: "squash-tree-equivalent",
+      upstreamProvenanceCommit: "3".repeat(40),
+      reconciliationMergeCommit: "4".repeat(40),
+      reconciledTree: "5".repeat(40),
+    },
     buildTimestamp: "2026-07-15T13:15:00.000Z",
     builderId: "github:gboyles2paperclipAI/paperclip/actions/runs/123",
     lockfile: { filename: "package-lock.json", sha256: "a".repeat(64) },
@@ -44,6 +50,8 @@ test("builds a stable sorted manifest and rejects version drift", () => {
   const manifest = buildReleaseManifest(input);
   assert.deepEqual(manifest.artifacts.map((item) => item.package), ["@paperclipai/server", "paperclipai"]);
   assert.equal(manifest.distribution, "help2day");
+  assert.equal(manifest.schemaVersion, 2);
+  assert.deepEqual(manifest.lineage, input.lineage);
   assert.deepEqual(manifest.sourceLockfiles, input.sourceLockfiles);
 
   assert.throws(
@@ -52,5 +60,9 @@ test("builds a stable sorted manifest and rejects version drift", () => {
       artifacts: [{ ...input.artifacts[0], version: "2026.715.0-help2day.2" }],
     }),
     /does not use governed version/,
+  );
+  assert.throws(
+    () => buildReleaseManifest({ ...input, lineage: { ...input.lineage, mode: "assumed" } }),
+    /valid lineage mode/,
   );
 });
