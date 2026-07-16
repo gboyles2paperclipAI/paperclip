@@ -75,6 +75,8 @@ jobs:
           GOBIN: ${{ runner.temp }}/release-tools/bin
           GITLEAKS_VERSION: 8.30.1
           GITLEAKS_LINUX_X64_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          RIPGREP_VERSION: 15.1.0
+          RIPGREP_LINUX_X64_SHA256: 1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599
         run: |
           mkdir -p "$GOBIN"
           go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.3.8
@@ -85,6 +87,13 @@ jobs:
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           printf '%s  %s\n' "$GITLEAKS_LINUX_X64_SHA256" "$GITLEAKS_ARCHIVE" | sha256sum --check -
           tar -xzf "$GITLEAKS_ARCHIVE" -C "$GOBIN" gitleaks
+          RIPGREP_ROOT="ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl"
+          RIPGREP_ARCHIVE="${{ runner.temp }}/${RIPGREP_ROOT}.tar.gz"
+          curl --proto '=https' --tlsv1.2 --retry 3 --fail --location --silent --show-error \
+            --output "$RIPGREP_ARCHIVE" \
+            "https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/${RIPGREP_ROOT}.tar.gz"
+          printf '%s  %s\n' "$RIPGREP_LINUX_X64_SHA256" "$RIPGREP_ARCHIVE" | sha256sum --check -
+          tar -xzf "$RIPGREP_ARCHIVE" -C "$GOBIN" --strip-components=1 "$RIPGREP_ROOT/rg"
           echo "$GOBIN" >> "$GITHUB_PATH"
 
       - name: Record scanner versions
@@ -92,6 +101,7 @@ jobs:
           osv-scanner --version
           grype version
           gitleaks version
+          rg --version
           node_modules/.bin/cyclonedx-npm --version
 
       - name: Build exact evidence bundle
@@ -119,6 +129,7 @@ jobs:
           name: help2day-source-release-${{ inputs.source_ref }}
           path: ${{ runner.temp }}/help2day-source-release-evidence/
           if-no-files-found: error
+          include-hidden-files: true
           retention-days: 30
 
       - name: Enforce evidence result
