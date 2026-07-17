@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "exceptions": [
+    {
+      "id": "lexical-minified-selection-anchor-focus",
+      "reason": "Lexical's production selection validation assigns focus.key immediately after reading anchor.key. Gitleaks 8.30.1 classifies the minified assignment as a generic API key even though it is an in-memory document node key, not credential material.",
+      "ruleId": "generic-api-key",
+      "startLine": 140,
+      "endLine": 140,
+      "startColumn": 10699,
+      "endColumn": 10725,
+      "selectedTextDigest": "71723e5d2360083c2abb42f740b8661756160a848dfa564f7cee1af9d0da0237",
+      "matchedTextDigest": "99f9adebdb275562bdd1a5cdf8579d4a7cca22dacc434e7a7e4b3fd080b5b498",
+      "expectedPathPatterns": [
+        "/package/ui-dist/assets/index-[A-Za-z0-9_-]+\\.js$",
+        "/package/dist/assets/index-[A-Za-z0-9_-]+\\.js$"
+      ]
+    }
+  ]
+}

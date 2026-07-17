@@ -378,10 +378,32 @@ gitleaks detect --source "$REPO_ROOT" --log-opts="$FORK_ANCHOR..$SOURCE_COMMIT" 
   --report-path "$OUTPUT/security-results/source-range-gitleaks.json" \
   > "$OUTPUT/security-results/source-range-gitleaks.log" 2>&1
 printf '%s\n' "$?" > "$OUTPUT/security-results/source-range-gitleaks.exit"
-gitleaks detect --no-git --source "$EXTRACT_ROOT" --redact --no-banner \
-  --report-format json --report-path "$OUTPUT/security-results/package-gitleaks.json" \
+PACKAGE_GITLEAKS_RAW="$OUTPUT/work/package-gitleaks.raw.json"
+gitleaks detect --no-git --source "$EXTRACT_ROOT" --no-banner \
+  --report-format json --report-path "$PACKAGE_GITLEAKS_RAW" \
   > "$OUTPUT/security-results/package-gitleaks.log" 2>&1
-printf '%s\n' "$?" > "$OUTPUT/security-results/package-gitleaks.exit"
+package_gitleaks_scanner_status="$?"
+printf '%s\n' "$package_gitleaks_scanner_status" \
+  > "$OUTPUT/security-results/package-gitleaks-scanner.exit"
+if [[ "$package_gitleaks_scanner_status" -le 1 && -s "$PACKAGE_GITLEAKS_RAW" ]]; then
+  node scripts/filter-package-gitleaks.mjs \
+    --input "$PACKAGE_GITLEAKS_RAW" \
+    --policy scripts/security/package-gitleaks-exceptions.json \
+    --report "$OUTPUT/security-results/package-gitleaks.json" \
+    --exclusions "$OUTPUT/security-results/package-gitleaks-exclusions.json"
+  package_gitleaks_status="$?"
+else
+  if [[ "$package_gitleaks_scanner_status" -gt 1 ]]; then
+    package_gitleaks_status="$package_gitleaks_scanner_status"
+  else
+    package_gitleaks_status=2
+  fi
+  printf '[]\n' > "$OUTPUT/security-results/package-gitleaks.json"
+  printf '{"schemaVersion":1,"status":"blocked","policyErrors":["package Gitleaks scanner did not produce a filterable report"],"remainingFindingCount":null}\n' \
+    > "$OUTPUT/security-results/package-gitleaks-exclusions.json"
+fi
+rm -f "$PACKAGE_GITLEAKS_RAW"
+printf '%s\n' "$package_gitleaks_status" > "$OUTPUT/security-results/package-gitleaks.exit"
 set -e
 
 node scripts/release-provenance.mjs \

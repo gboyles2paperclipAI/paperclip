@@ -162,6 +162,10 @@ test("Help2day source evidence is isolated from publication and runtime activati
   assert.match(evidence, /grype/);
   assert.match(evidence, /source-range-gitleaks/);
   assert.match(evidence, /package-gitleaks/);
+  assert.match(evidence, /filter-package-gitleaks\.mjs/);
+  assert.match(evidence, /package-gitleaks-exclusions\.json/);
+  assert.match(evidence, /package-gitleaks-scanner\.exit/);
+  assert.match(evidence, /rm -f "\$PACKAGE_GITLEAKS_RAW"/);
   assert.match(evidence, /prove-isolated-release-runtime\.sh/);
   assert.match(evidence, /--runtime-proof-mode/);
   assert.match(evidence, /squash-tree-equivalent/);
