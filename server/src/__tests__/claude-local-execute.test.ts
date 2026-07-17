@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import {
   claudeCommandSupportsEffortFlag,
@@ -10,6 +11,8 @@ import {
   execute,
   resetClaudeCliCapabilitiesCacheForTests,
 } from "@paperclipai/adapter-claude-local/server";
+
+const execFileAsync = promisify(execFile);
 
 async function writeFailingClaudeCommand(
   commandPath: string,
@@ -178,12 +181,12 @@ afterEach(() => {
 });
 
 async function initializeGitWorkspace(workspace: string): Promise<void> {
-  await execFile("git", ["init"], { cwd: workspace });
-  await execFile("git", ["config", "user.email", "paperclip@example.com"], { cwd: workspace });
-  await execFile("git", ["config", "user.name", "Paperclip Test"], { cwd: workspace });
+  await execFileAsync("git", ["init"], { cwd: workspace });
+  await execFileAsync("git", ["config", "user.email", "paperclip@example.com"], { cwd: workspace });
+  await execFileAsync("git", ["config", "user.name", "Paperclip Test"], { cwd: workspace });
   await fs.writeFile(path.join(workspace, "README.md"), "sandbox workspace\n", "utf8");
-  await execFile("git", ["add", "README.md"], { cwd: workspace });
-  await execFile("git", ["commit", "-m", "Initial sandbox workspace"], { cwd: workspace });
+  await execFileAsync("git", ["add", "README.md"], { cwd: workspace });
+  await execFileAsync("git", ["commit", "-m", "Initial sandbox workspace"], { cwd: workspace });
 }
 
 async function writePoisonedMessageIdClaudeCommand(commandPath: string): Promise<void> {
