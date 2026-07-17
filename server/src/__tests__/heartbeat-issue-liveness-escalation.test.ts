@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -62,7 +62,10 @@ vi.mock("../adapters/index.ts", async () => {
   };
 });
 
-import { heartbeatService } from "../services/heartbeat.ts";
+import {
+  heartbeatService,
+  waitForAllHeartbeatRunExecutionsDrain,
+} from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import { issueService } from "../services/issues.ts";
 import { runningProcesses } from "../adapters/index.ts";
@@ -88,13 +91,45 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
   afterEach(async () => {
     vi.clearAllMocks();
     runningProcesses.clear();
+    const deadline = Date.now() + 5_000;
     let idlePolls = 0;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const runs = await db
-        .select({ status: heartbeatRuns.status })
-        .from(heartbeatRuns);
-      const hasActiveRun = runs.some((run) => run.status === "queued" || run.status === "running");
-      if (!hasActiveRun) {
+    while (Date.now() < deadline) {
+      const now = new Date();
+      await db
+        .update(agentWakeupRequests)
+        .set({
+          status: "cancelled",
+          finishedAt: now,
+          error: "Cancelled by heartbeat-issue-liveness test cleanup",
+        })
+        .where(inArray(agentWakeupRequests.status, ["queued", "claimed"]));
+      await db
+        .update(heartbeatRuns)
+        .set({
+          status: "cancelled",
+          finishedAt: now,
+          updatedAt: now,
+          errorCode: "test_cleanup",
+          error: "Cancelled by heartbeat-issue-liveness test cleanup",
+          processPid: null,
+          processGroupId: null,
+        })
+        .where(or(eq(heartbeatRuns.status, "queued"), eq(heartbeatRuns.status, "running")));
+      await waitForAllHeartbeatRunExecutionsDrain({
+        timeoutMs: Math.max(1, deadline - Date.now()),
+      });
+
+      const [activeRuns, pendingWakeups] = await Promise.all([
+        db
+          .select({ id: heartbeatRuns.id })
+          .from(heartbeatRuns)
+          .where(or(eq(heartbeatRuns.status, "queued"), eq(heartbeatRuns.status, "running"))),
+        db
+          .select({ id: agentWakeupRequests.id })
+          .from(agentWakeupRequests)
+          .where(inArray(agentWakeupRequests.status, ["queued", "claimed"])),
+      ]);
+      if (activeRuns.length === 0 && pendingWakeups.length === 0) {
         idlePolls += 1;
         if (idlePolls >= 3) break;
       } else {
@@ -102,7 +137,9 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    if (idlePolls < 3) {
+      throw new Error("Heartbeat liveness test cleanup did not reach durable idle state");
+    }
     await db.execute(sql.raw(`TRUNCATE TABLE "companies" CASCADE`));
     await instanceSettingsService(db).updateExperimental({
       enableIssueGraphLivenessAutoRecovery: false,

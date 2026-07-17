@@ -197,7 +197,14 @@ async function cancelActiveRunsForCleanup(
   timeoutMs = 3_000,
 ) {
   const deadline = Date.now() + timeoutMs;
+  let idlePolls = 0;
   while (Date.now() < deadline) {
+    const pendingWakeups = await db
+      .select({
+        id: agentWakeupRequests.id,
+      })
+      .from(agentWakeupRequests)
+      .where(inArray(agentWakeupRequests.status, ["queued", "claimed"]));
     const activeRuns = await db
       .select({
         id: heartbeatRuns.id,
@@ -211,26 +218,37 @@ async function cancelActiveRunsForCleanup(
         ),
       );
 
-    if (activeRuns.length === 0) return;
-
     const now = new Date();
+    if (pendingWakeups.length > 0) {
+      await db
+        .update(agentWakeupRequests)
+        .set({
+          status: "cancelled",
+          finishedAt: now,
+          error: "Cancelled by heartbeat-process-recovery test cleanup",
+        })
+        .where(inArray(agentWakeupRequests.id, pendingWakeups.map((wakeup) => wakeup.id)));
+    }
+
     const runIds = activeRuns.map((run) => run.id);
     const wakeupRequestIds = activeRuns
       .map((run) => run.wakeupRequestId)
       .filter((value): value is string => typeof value === "string" && value.length > 0);
 
-    await db
-      .update(heartbeatRuns)
-      .set({
-        status: "cancelled",
-        finishedAt: now,
-        updatedAt: now,
-        errorCode: "test_cleanup",
-        error: "Cancelled by heartbeat-process-recovery test cleanup",
-        processPid: null,
-        processGroupId: null,
-      })
-      .where(inArray(heartbeatRuns.id, runIds));
+    if (runIds.length > 0) {
+      await db
+        .update(heartbeatRuns)
+        .set({
+          status: "cancelled",
+          finishedAt: now,
+          updatedAt: now,
+          errorCode: "test_cleanup",
+          error: "Cancelled by heartbeat-process-recovery test cleanup",
+          processPid: null,
+          processGroupId: null,
+        })
+        .where(inArray(heartbeatRuns.id, runIds));
+    }
 
     if (wakeupRequestIds.length > 0) {
       await db
@@ -243,8 +261,29 @@ async function cancelActiveRunsForCleanup(
         .where(inArray(agentWakeupRequests.id, wakeupRequestIds));
     }
 
+    await waitForAllHeartbeatRunExecutionsDrain({
+      timeoutMs: Math.max(1, deadline - Date.now()),
+    });
+
+    const [remainingRuns, remainingWakeups] = await Promise.all([
+      db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(or(eq(heartbeatRuns.status, "queued"), eq(heartbeatRuns.status, "running"))),
+      db
+        .select({ id: agentWakeupRequests.id })
+        .from(agentWakeupRequests)
+        .where(inArray(agentWakeupRequests.status, ["queued", "claimed"])),
+    ]);
+    if (remainingRuns.length === 0 && remainingWakeups.length === 0) {
+      idlePolls += 1;
+      if (idlePolls >= 3) return;
+    } else {
+      idlePolls = 0;
+    }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+  throw new Error("Heartbeat test cleanup did not reach durable idle state");
 }
 
 async function spawnOrphanedProcessGroup() {
