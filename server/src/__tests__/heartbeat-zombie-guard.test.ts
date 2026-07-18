@@ -2,7 +2,27 @@ import { describe, expect, it } from "vitest";
 import {
   isZombieRun,
   filterZombieCoalesceTarget,
+  normalizeGlobalMaxConcurrentRuns,
 } from "../services/heartbeat.ts";
+
+describe("normalizeGlobalMaxConcurrentRuns", () => {
+  it("defaults to the operational instance cap when unset", () => {
+    expect(normalizeGlobalMaxConcurrentRuns(undefined)).toBe(12);
+    expect(normalizeGlobalMaxConcurrentRuns("")).toBe(12);
+  });
+
+  it("clamps configured caps to the supported range", () => {
+    expect(normalizeGlobalMaxConcurrentRuns("0")).toBe(1);
+    expect(normalizeGlobalMaxConcurrentRuns("72")).toBe(50);
+    expect(normalizeGlobalMaxConcurrentRuns("19.8")).toBe(19);
+  });
+
+  it("rejects invalid configured caps loudly", () => {
+    expect(() => normalizeGlobalMaxConcurrentRuns("not-a-number")).toThrow(
+      "Invalid PAPERCLIP_GLOBAL_MAX_CONCURRENT_RUNS",
+    );
+  });
+});
 
 // ---------------------------------------------------------------------------
 // isZombieRun — the core predicate

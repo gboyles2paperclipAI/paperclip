@@ -51,6 +51,20 @@ The first boundary never receives production secrets and never installs or
 activates Paperclip on a live host. A passing source bundle does not authorize
 the second boundary.
 
+Before any Help2day runtime rebuild, repackaging, or production-runtime
+installation from HEAD, verify the heartbeat scheduler still enforces the
+instance-wide `PAPERCLIP_GLOBAL_MAX_CONCURRENT_RUNS` admission cap:
+
+- default cap is 12
+- accepted values are clamped to 1-50
+- invalid configured values fail loudly instead of silently falling back
+- `claimQueuedRun` checks the global cap before moving a queued run to
+  `running`
+
+Do not rebuild or repackage from a source ref where this gate is absent or
+failing. This protects the single-host fleet from recreating the OOM-prone
+unbounded scheduler regression tracked in FUL-16648.
+
 Run the manual `Help2day Source Release Evidence` workflow with a full commit
 SHA, governed version, frozen upstream base, and company-fork anchor. The
 candidate remains unreleased until that workflow passes, its evidence receives
