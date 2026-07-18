@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, desc, eq, gte, inArray, isNotNull, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -1781,9 +1781,11 @@ export function issueThreadInteractionService(db: Db) {
         createdAt: Date | string;
         authorUserId?: string | null;
         authorAgentId?: string | null;
+        createdByRunId?: string | null;
       },
       actor: InteractionActor,
     ) => {
+      if (comment.createdByRunId) return [];
       if (!comment.authorUserId && !comment.authorAgentId) return [];
 
       const rows = await db
@@ -1859,6 +1861,7 @@ export function issueThreadInteractionService(db: Db) {
             eq(issueComments.companyId, issue.companyId),
             eq(issueComments.issueId, issue.id),
             isNotNull(issueComments.authorUserId),
+            isNull(issueComments.createdByRunId),
           ))
           .orderBy(asc(issueComments.createdAt)),
       ]);

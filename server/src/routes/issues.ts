@@ -1713,7 +1713,7 @@ const TRIAGE_STALE_ACTIVITY_MS = 15 * 60 * 1000;
 function getTriageAuthorityFields(input: unknown) {
   if (!Array.isArray(input)) return TRIAGE_AUTHORITY_FIELDS_DEFAULT;
   const candidate = input.filter((field): field is string => typeof field === "string");
-  return candidate.length > 0 ? candidate : TRIAGE_AUTHORITY_FIELDS_DEFAULT;
+  return candidate;
 }
 
 type IssueTriageAuthorityPatchDecision = {
@@ -3259,8 +3259,7 @@ export function issueRoutes(
 
   function localImplicitConfirmationResolutionRequiresTrustedMode(req: Request) {
     return req.actor.type === "board" &&
-      req.actor.source === "local_implicit" &&
-      opts.deploymentMode !== "local_trusted";
+      req.actor.source === "local_implicit";
   }
 
   async function rejectUntrustedLocalImplicitConfirmationResolution(
@@ -3281,6 +3280,22 @@ export function issueRoutes(
       res.status(403).json({ error: "Authenticated board access is required to resolve confirmation interactions" });
       return true;
     }
+    return false;
+  }
+
+  async function assertAgentCanCreateIssueThreadInteraction(req: Request, res: Response, companyId: string) {
+    if (req.actor.type !== "agent") return true;
+    if (!req.actor.agentId) {
+      res.status(403).json({ error: "Forbidden" });
+      return false;
+    }
+    const actorAgent = await agentsSvc.getById(req.actor.agentId);
+    if (!actorAgent || actorAgent.companyId !== companyId) {
+      res.status(403).json({ error: "Forbidden" });
+      return false;
+    }
+    if (actorAgent.permissions?.canCreateInteractions === true) return true;
+    res.status(403).json({ error: "Missing permission to create issue-thread interactions" });
     return false;
   }
 
@@ -3402,6 +3417,8 @@ export function issueRoutes(
     existing: {
       id: string;
       companyId: string;
+      projectId?: string | null;
+      parentId?: string | null;
       assigneeAgentId: string | null;
       status: string;
       originKind?: string | null;
@@ -3411,6 +3428,7 @@ export function issueRoutes(
       lastActivityAt?: string | Date | null;
     },
     body: Record<string, unknown>,
+    normalizedAssigneeAgentId: string | null | undefined,
   ): Promise<IssueTriageAuthorityPatchDecision> {
     const patchKeys = Object.keys(body);
     const hasDirectExecutionStatePatch = Object.prototype.hasOwnProperty.call(body, "executionState");
@@ -3489,7 +3507,7 @@ export function issueRoutes(
       return { skipOwnership: false, allowed: false };
     }
 
-    if (body.assigneeAgentId === req.actor.agentId) {
+    if (normalizedAssigneeAgentId === req.actor.agentId) {
       res.status(403).json({
         error: "Agent cannot assign issue to self",
         details: {
@@ -3521,9 +3539,20 @@ export function issueRoutes(
       return { skipOwnership: false, allowed: false };
     }
 
-    const latestActivityAt = existing.lastActivityAt
-      ? new Date(existing.lastActivityAt).getTime()
-      : new Date(existing.updatedAt).getTime();
+    const latestActivityAt = toValidTimestamp(existing.lastActivityAt) ?? toValidTimestamp(existing.updatedAt);
+    if (latestActivityAt === null) {
+      res.status(422).json({
+        error: "Issue is too recent for triage-authority patch",
+        details: {
+          issueId: existing.id,
+          lastActivityAt: null,
+          stalenessMs: null,
+          requiredStalenessMs: TRIAGE_STALE_ACTIVITY_MS,
+          reason: "invalid_activity_timestamp",
+        },
+      });
+      return { skipOwnership: false, allowed: false };
+    }
     const stalenessMs = Date.now() - latestActivityAt;
     if (stalenessMs < TRIAGE_STALE_ACTIVITY_MS) {
       res.status(422).json({
@@ -3536,6 +3565,24 @@ export function issueRoutes(
         },
       });
       return { skipOwnership: false, allowed: false };
+    }
+
+    if (
+      Object.prototype.hasOwnProperty.call(body, "assigneeAgentId") &&
+      normalizedAssigneeAgentId !== undefined &&
+      normalizedAssigneeAgentId !== req.actor.agentId
+    ) {
+      await assertCanAssignTasks(req, existing.companyId, {
+        issueId: existing.id,
+        projectId: await resolveAssignmentProjectId({
+          companyId: existing.companyId,
+          projectId: existing.projectId,
+          parentIssueId: existing.parentId,
+        }),
+        parentIssueId: existing.parentId ?? null,
+        assigneeAgentId: normalizedAssigneeAgentId,
+        assigneeUserId: null,
+      });
     }
 
     return { skipOwnership: true, allowed: true };
@@ -4811,6 +4858,10 @@ export function issueRoutes(
   router.get("/companies/:companyId/interactions", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
+    if (isTaskBridgeKeyActor(req)) {
+      res.status(403).json({ error: "Task bridge keys cannot use company-wide interaction audit APIs" });
+      return;
+    }
     const pagination = parseInteractionAuditPagination(req, res);
     if (!pagination) return;
 
@@ -7932,11 +7983,16 @@ export function issueRoutes(
       existing,
       req.body.assigneeUserId,
     ))) return;
+    const normalizedAssigneeAgentId = await normalizeIssueAssigneeAgentReference(
+      existing.companyId,
+      req.body.assigneeAgentId as string | null | undefined,
+    );
     const triageAuthorityPatch = await assertBoardTriageAuthorityForIssuePatch(
       req,
       res,
       existing,
       req.body as Record<string, unknown>,
+      normalizedAssigneeAgentId,
     );
     if (!triageAuthorityPatch.allowed) return;
     if (!(await assertAgentIssueMutationAllowed(
@@ -7950,10 +8006,6 @@ export function issueRoutes(
     const actor = getActorInfo(req);
     const isClosed = isClosedIssueStatus(existing.status);
     const isBlocked = existing.status === "blocked";
-    const normalizedAssigneeAgentId = await normalizeIssueAssigneeAgentReference(
-      existing.companyId,
-      req.body.assigneeAgentId as string | null | undefined,
-    );
     const titleOrDescriptionChanged = req.body.title !== undefined || req.body.description !== undefined;
     const existingRelations =
       Array.isArray(req.body.blockedByIssueIds)
@@ -9586,6 +9638,7 @@ export function issueRoutes(
     if (req.actor.type === "agent") {
       if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
       if (await assertLowTrustControlPlaneDenied(req, res, issue.companyId, issue)) return;
+      if (!(await assertAgentCanCreateIssueThreadInteraction(req, res, issue.companyId))) return;
     } else {
       assertBoard(req);
     }
