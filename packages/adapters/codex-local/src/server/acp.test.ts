@@ -373,6 +373,7 @@ describe("codex_local ACP lane", () => {
       fastMode: true,
       agentCommand: "custom-codex-acp",
       mode: "persistent",
+      acpAgentMode: "agent-full-access",
       permissionMode: "approve-all",
       nonInteractivePermissions: "deny",
       warmHandleIdleMs: 25,

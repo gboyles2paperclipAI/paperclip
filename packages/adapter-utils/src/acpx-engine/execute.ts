@@ -73,6 +73,16 @@ import {
   DEFAULT_ACP_ENGINE_TIMEOUT_SEC,
   DEFAULT_ACP_ENGINE_WARM_HANDLE_IDLE_MS,
 } from "./constants.js";
+import {
+  DEFAULT_CODEX_ACP_MEMORY_LIMIT_MB,
+  codexAcpProcessMetadataPath,
+  readCodexAcpProcessMetadata,
+  startCodexAcpMemoryGuard,
+  terminateCodexAcpProcessGroup,
+  waitForCodexAcpProcessMetadata,
+  type CodexAcpMemoryLimitEvent,
+  type CodexAcpProcessMetadata,
+} from "./process-lifecycle.js";
 
 const defaultModuleDir = path.dirname(fileURLToPath(import.meta.url));
 const WRAPPER_CLEANUP_RETENTION_MS = 15 * 60 * 1000;
@@ -132,6 +142,8 @@ interface AcpxPreparedRuntime {
   requestedModel: string;
   requestedThinkingEffort: string;
   fastMode: boolean;
+  codexAgentMode: "read-only" | "agent" | "agent-full-access" | null;
+  memoryLimitMb: number;
   timeoutSec: number;
   timeoutResolution: AdapterExecutionTargetTimeoutResolution;
   sessionKey: string;
@@ -145,6 +157,10 @@ interface AcpxPreparedRuntime {
   skillsIdentity: Record<string, unknown>;
   childStderrLogPath: string | null;
   paperclipClaudeSettings: PaperclipClaudeSettingsResult | null;
+  processMetadataPath: string | null;
+  processMetadata: CodexAcpProcessMetadata | null;
+  memoryGuard: { stop: () => void } | null;
+  memoryLimitExceeded: CodexAcpMemoryLimitEvent | null;
 }
 
 const defaultWarmHandles = new Map<string, RuntimeCacheEntry>();
@@ -721,6 +737,14 @@ function normalizeRequestedThinkingEffort(config: Record<string, unknown>): stri
   ).trim();
 }
 
+function normalizeCodexAgentMode(
+  config: Record<string, unknown>,
+): "read-only" | "agent" | "agent-full-access" {
+  const value = asString(config.acpAgentMode, "agent-full-access").trim();
+  if (value === "read-only" || value === "agent") return value;
+  return "agent-full-access";
+}
+
 function isCompatibleSession(
   params: Record<string, unknown>,
   runtime: Pick<AcpxPreparedRuntime, "fingerprint" | "sessionKey" | "cwd" | "mode" | "acpxAgent" | "remoteExecutionIdentity">,
@@ -861,6 +885,7 @@ async function writeAgentWrapper(input: {
   agentCommandShell: string;
   env: Record<string, string>;
   childStderrDir: string;
+  processMetadataDir: string;
 }): Promise<{ wrapperPath: string; envFilePath: string }> {
   const wrappersDir = path.join(input.stateDir, "wrappers");
   await fs.mkdir(wrappersDir, { recursive: true });
@@ -873,6 +898,7 @@ async function writeAgentWrapper(input: {
     command: input.agentCommandShell,
     env: envLines,
     childStderrDir: input.childStderrDir,
+    processMetadataDir: input.processMetadataDir,
   });
   const wrapperPath = path.join(wrappersDir, `${input.acpxAgent}-${wrapperHash}.sh`);
   const envFilePath = path.join(wrappersDir, `${input.acpxAgent}-${wrapperHash}.env`);
@@ -884,6 +910,26 @@ async function writeAgentWrapper(input: {
     "  set -a",
     "  source \"$env_file\"",
     "  set +a",
+    "fi",
+    `process_metadata_dir=${shellQuote(input.processMetadataDir)}`,
+    `if [[ ${shellQuote(input.acpxAgent)} == "codex" && -n "\${PAPERCLIP_RUN_ID:-}" ]]; then`,
+    "  if [[ \"${PAPERCLIP_ACP_GROUP_READY:-}\" != \"1\" ]] && command -v setsid >/dev/null 2>&1; then",
+    "    export PAPERCLIP_ACP_GROUP_READY=1",
+    "    exec setsid \"$0\" \"$@\"",
+    "  fi",
+    "  safe_run_id=\"$(printf '%s' \"$PAPERCLIP_RUN_ID\" | sed 's/[^A-Za-z0-9._-]/_/g' | cut -c1-180)\"",
+    "  [[ -n \"$safe_run_id\" ]] || safe_run_id=run",
+    "  mkdir -p \"$process_metadata_dir\"",
+    "  chmod 700 \"$process_metadata_dir\" 2>/dev/null || true",
+    "  process_group_id=\"$(ps -o pgid= -p $$ | tr -d '[:space:]')\"",
+    "  process_start_ticks=\"$(awk '{print $22}' /proc/$$/stat 2>/dev/null || true)\"",
+    "  if [[ \"$process_group_id\" =~ ^[0-9]+$ && \"$process_group_id\" == \"$$\" && \"$process_start_ticks\" =~ ^[0-9]+$ ]]; then",
+    "    umask 077",
+    "    process_metadata_file=\"$process_metadata_dir/$safe_run_id.json\"",
+    "    process_metadata_temp=\"$process_metadata_file.tmp.$$\"",
+    "    printf '{\"pid\":%s,\"processGroupId\":%s,\"startTimeTicks\":%s,\"startedAt\":\"%s\"}\\n' \"$$\" \"$process_group_id\" \"$process_start_ticks\" \"$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)\" > \"$process_metadata_temp\"",
+    "    mv -f \"$process_metadata_temp\" \"$process_metadata_file\"",
+    "  fi",
     "fi",
     `stderr_dir=${shellQuote(input.childStderrDir)}`,
     "if [[ -n \"${PAPERCLIP_RUN_ID:-}\" ]]; then",
@@ -973,6 +1019,14 @@ async function buildRuntime(input: {
   const requestedModel = asString(config.model, "").trim();
   const requestedThinkingEffort = normalizeRequestedThinkingEffort(config);
   const fastMode = acpxAgent === "codex" && config.fastMode === true;
+  const codexAgentMode = acpxAgent === "codex" ? normalizeCodexAgentMode(config) : null;
+  const configuredMemoryLimit =
+    config.memoryLimitMb ??
+    parseObject(config.env).PAPERCLIP_CODEX_ACP_MEMORY_LIMIT_MB ??
+    process.env.PAPERCLIP_CODEX_ACP_MEMORY_LIMIT_MB;
+  const memoryLimitMb = acpxAgent === "codex"
+    ? Math.max(0, asNumber(configuredMemoryLimit, DEFAULT_CODEX_ACP_MEMORY_LIMIT_MB))
+    : 0;
   // Resolve the wall-clock timeout through the shared execution-target
   // resolver so sandbox-backed runs pick up the 4h backstop default while
   // local/SSH runs keep the historical "0 = no adapter timeout" behavior.
@@ -1033,6 +1087,7 @@ async function buildRuntime(input: {
     if (typeof value === "string") env[key] = value;
   }
   if (!hasExplicitApiKey && authToken) env.PAPERCLIP_API_KEY = authToken;
+  if (codexAgentMode) env.INITIAL_AGENT_MODE = codexAgentMode;
   // For the claude agent, set model via ANTHROPIC_MODEL at startup rather than
   // via session/set_config_option — the ACP server's set_config_option handler
   // validates the value against its internal available-models list and rejects
@@ -1117,6 +1172,11 @@ async function buildRuntime(input: {
   }
   const childStderrDir = path.join(stateDir, "run-stderr");
   const childStderrLogPath = agentCommand ? path.join(childStderrDir, `${runId}.log`) : null;
+  const processMetadataDir = path.join(stateDir, "run-processes");
+  const processMetadataPath = acpxAgent === "codex"
+    ? codexAcpProcessMetadataPath(stateDir, runId)
+    : null;
+  if (processMetadataPath) await fs.rm(processMetadataPath, { force: true }).catch(() => {});
   const wrapper = agentCommand
     ? await writeAgentWrapper({
         stateDir,
@@ -1124,6 +1184,7 @@ async function buildRuntime(input: {
         agentCommandShell,
         env,
         childStderrDir,
+        processMetadataDir,
       })
     : null;
   const wrapperPath = wrapper?.wrapperPath ?? null;
@@ -1190,6 +1251,8 @@ async function buildRuntime(input: {
     requestedModel,
     requestedThinkingEffort,
     fastMode,
+    codexAgentMode,
+    memoryLimitMb,
     remoteExecutionIdentity,
     skillsIdentity,
     skillPromptInstructions,
@@ -1225,6 +1288,8 @@ async function buildRuntime(input: {
     requestedModel,
     requestedThinkingEffort,
     fastMode,
+    codexAgentMode,
+    memoryLimitMb,
     timeoutSec,
     timeoutResolution,
     sessionKey,
@@ -1241,6 +1306,10 @@ async function buildRuntime(input: {
     },
     childStderrLogPath,
     paperclipClaudeSettings,
+    processMetadataPath,
+    processMetadata: null,
+    memoryGuard: null,
+    memoryLimitExceeded: null,
   };
 }
 
@@ -1294,7 +1363,63 @@ async function applySessionConfigOptions(input: {
   }
 }
 
-async function cleanupRemoteBridges(prepared: AcpxPreparedRuntime): Promise<void> {
+async function attachCodexProcessLifecycle(
+  ctx: AdapterExecutionContext,
+  prepared: AcpxPreparedRuntime,
+): Promise<void> {
+  if (
+    prepared.acpxAgent !== "codex" ||
+    !prepared.processMetadataPath ||
+    prepared.processSessionBridge
+  ) return;
+  const metadata = await waitForCodexAcpProcessMetadata(prepared.processMetadataPath);
+  if (!metadata) {
+    await ctx.onLog(
+      "stderr",
+      "[paperclip] Codex ACP process metadata was not published; process-group supervision is unavailable for this run.\n",
+    );
+    return;
+  }
+  prepared.processMetadata = metadata;
+  if (ctx.onSpawn) await ctx.onSpawn(metadata);
+  prepared.memoryGuard = startCodexAcpMemoryGuard({
+    metadata,
+    limitMb: prepared.memoryLimitMb,
+    onExceeded: async (event) => {
+      prepared.memoryLimitExceeded = event;
+      await Promise.allSettled([
+        ctx.onLog(
+          "stderr",
+          `[paperclip] Codex ACP process group exceeded the ${prepared.memoryLimitMb} MB memory limit; terminating the run.\n`,
+        ),
+        terminateCodexAcpProcessGroup(metadata, 500),
+      ]);
+    },
+  });
+}
+
+function codexMemoryLimitMessage(prepared: AcpxPreparedRuntime): string | null {
+  const event = prepared.memoryLimitExceeded;
+  if (!event) return null;
+  const observedMb = Math.ceil(event.rssBytes / (1024 * 1024));
+  return `Codex ACP process group exceeded the configured memory limit (${observedMb} MB observed; ${prepared.memoryLimitMb} MB limit).`;
+}
+
+async function cleanupExecutionResources(prepared: AcpxPreparedRuntime): Promise<void> {
+  prepared.memoryGuard?.stop();
+  prepared.memoryGuard = null;
+  const metadata =
+    prepared.processMetadata ??
+    (prepared.processMetadataPath
+      ? await readCodexAcpProcessMetadata(prepared.processMetadataPath)
+      : null);
+  if (metadata) await terminateCodexAcpProcessGroup(metadata).catch(() => {});
+  if (prepared.processMetadataPath) {
+    const current = await readCodexAcpProcessMetadata(prepared.processMetadataPath);
+    if (!current || !metadata || current.pid === metadata.pid) {
+      await fs.rm(prepared.processMetadataPath, { force: true }).catch(() => {});
+    }
+  }
   await Promise.allSettled([
     prepared.processSessionBridge?.stop(),
     prepared.paperclipBridge?.stop(),
@@ -1588,7 +1713,7 @@ export function summarizeAcpxTurnUsage(input: {
   return { usage, usageDetail, costUsd, cumulativeCostUsd };
 }
 
-type AcpxExecutionPhase = "ensure_session" | "configure_session" | "turn";
+type AcpxExecutionPhase = "ensure_session" | "process_supervision" | "configure_session" | "turn";
 
 function describeErrorDiagnostics(err: unknown): {
   errorName: string;
@@ -1914,7 +2039,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         err,
         phase: "ensure_session",
       });
-      await cleanupRemoteBridges(prepared);
+      await cleanupExecutionResources(prepared);
       return {
         exitCode: 1,
         signal: null,
@@ -1930,7 +2055,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
     }
 
     if (!handle) {
-      await cleanupRemoteBridges(prepared);
+      await cleanupExecutionResources(prepared);
       return {
         exitCode: 1,
         signal: null,
@@ -1944,6 +2069,34 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       };
     }
     const sessionHandle = handle;
+    try {
+      await attachCodexProcessLifecycle(ctx, prepared);
+    } catch (err) {
+      await runtime.close({
+        handle: sessionHandle,
+        reason: "paperclip process supervision setup failed",
+        discardPersistentState: false,
+      }).catch(() => {});
+      const { classified, message } = await emitAcpxFailure({
+        ctx,
+        prepared,
+        err,
+        phase: "process_supervision",
+      });
+      await cleanupExecutionResources(prepared);
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: message,
+        ...classified,
+        ...billingFields,
+        model: prepared.requestedModel || null,
+        clearSession,
+        resultJson: { phase: "process_supervision" },
+        summary: message,
+      };
+    }
     try {
       await applySessionConfigOptions({
         runtime,
@@ -1968,7 +2121,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         clearWarmHandleTimer(existing);
         warmHandles.delete(prepared.sessionKey);
       }
-      await cleanupRemoteBridges(prepared);
+      await cleanupExecutionResources(prepared);
       return {
         exitCode: 1,
         signal: null,
@@ -2098,7 +2251,12 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             discardPersistentState: terminal.status === "cancelled" || timedOut,
           }).catch(() => {});
         }
-      } else if (prepared.mode === "persistent" && warmIdleMs > 0 && !prepared.processSessionBridge) {
+      } else if (
+        prepared.mode === "persistent" &&
+        warmIdleMs > 0 &&
+        !prepared.processSessionBridge &&
+        prepared.acpxAgent !== "codex"
+      ) {
         const existing = warmHandles.get(prepared.sessionKey);
         if (existing && !warmHandleMatches(existing, runtime, sessionHandle)) {
           await runtime.close({
@@ -2140,9 +2298,10 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         }
       }
 
-      const errorMessage = timedOut
+      const memoryLimitMessage = codexMemoryLimitMessage(prepared);
+      const errorMessage = memoryLimitMessage ?? (timedOut
         ? formatAdapterExecutionTimeoutErrorMessage(prepared.timeoutResolution)
-        : resultErrorMessage(terminal);
+        : resultErrorMessage(terminal));
       const terminalStopReason = terminal.status === "failed" ? terminal.error.message : terminal.stopReason;
       await emitAcpxLog(ctx, {
         type: terminal.status === "completed" ? "acpx.result" : "acpx.error",
@@ -2150,13 +2309,19 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         stopReason: terminalStopReason,
         message: errorMessage,
       });
-      await cleanupRemoteBridges(prepared);
+      await cleanupExecutionResources(prepared);
       return {
-        exitCode: terminal.status === "completed" ? 0 : 1,
-        signal: timedOut ? "SIGTERM" : null,
+        exitCode: terminal.status === "completed" && !memoryLimitMessage ? 0 : 1,
+        signal: timedOut || memoryLimitMessage ? "SIGTERM" : null,
         timedOut,
         errorMessage,
-        errorCode: terminal.status === "failed" ? "acpx_turn_failed" : timedOut ? "acpx_timeout" : null,
+        errorCode: memoryLimitMessage
+          ? "acpx_memory_limit"
+          : terminal.status === "failed"
+            ? "acpx_turn_failed"
+            : timedOut
+              ? "acpx_timeout"
+              : null,
         sessionId: sessionHandle.backendSessionId ?? sessionHandle.runtimeSessionName,
         sessionParams: buildSessionParams({ prepared, handle: sessionHandle }),
         sessionDisplayId: sessionHandle.agentSessionId ?? sessionHandle.backendSessionId ?? sessionHandle.runtimeSessionName,
@@ -2182,9 +2347,10 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       };
     } catch (err) {
       if (timeout) clearTimeout(timeout);
-      const messageOverride = timedOut
+      const memoryLimitMessage = codexMemoryLimitMessage(prepared);
+      const messageOverride = memoryLimitMessage ?? (timedOut
         ? formatAdapterExecutionTimeoutErrorMessage(prepared.timeoutResolution)
-        : undefined;
+        : undefined);
       const cancel = cancelActiveTurn as ((reason: string) => Promise<void>) | null;
       const preEmitMessage =
         messageOverride ?? (err instanceof Error ? err.message : String(err));
@@ -2206,13 +2372,13 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         phase: "turn",
         messageOverride,
       });
-      await cleanupRemoteBridges(prepared);
+      await cleanupExecutionResources(prepared);
       return {
         exitCode: 1,
-        signal: timedOut ? "SIGTERM" : null,
+        signal: timedOut || memoryLimitMessage ? "SIGTERM" : null,
         timedOut,
         errorMessage: message,
-        errorCode: timedOut ? "acpx_timeout" : classified.errorCode,
+        errorCode: memoryLimitMessage ? "acpx_memory_limit" : timedOut ? "acpx_timeout" : classified.errorCode,
         errorMeta: classified.errorMeta,
         ...billingFields,
         model: prepared.requestedModel || null,

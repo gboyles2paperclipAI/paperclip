@@ -98,9 +98,11 @@ Operational fields:
 - outputInactivityTimeoutMs (number | null, optional): inactivity monitor around the codex child. Resets on every parsed JSONL event from stdout. Defaults to 7 * 60_000 ms when unset or non-positive. Set to \`null\` to disable the monitor entirely (only do this for known-slow tasks; the platform-level 1h silent-run safety net still applies). On fire, the adapter sends SIGTERM to the process group, waits 5s, then SIGKILL, and surfaces the run as failed with errorMessage "monitor: no codex output for {N}m {S}s".
 - agentCommand (string, optional): ACP server command override used only when engine="acp"; defaults to the package-local codex-acp binary
 - mode (string, optional): ACP session mode when engine="acp"; persistent or oneshot
+- acpAgentMode (string, optional): Codex ACP sandbox preset; defaults to agent-full-access so local ACP runs can reach the Paperclip control plane
 - nonInteractivePermissions (string, optional): ACP non-interactive permission fallback when engine="acp"; deny or fail
 - stateDir (string, optional): ACP state directory override when engine="acp"
-- warmHandleIdleMs (number, optional): warm ACP process idle timeout when engine="acp"; defaults to 0
+- warmHandleIdleMs (number, optional): warm ACP process idle timeout when engine="acp"; Codex ACP processes are always closed after each run
+- memoryLimitMb (number, optional): aggregate Codex ACP process-group RSS limit in MB; defaults to 4096, set 0 to disable, or set PAPERCLIP_CODEX_ACP_MEMORY_LIMIT_MB as the host default
 
 Notes:
 - filesystemScope and networkScope are spawn-level confinement and are orthogonal to Codex approval/sandbox flags. Both require Bubblewrap on the host and select the CLI engine in auto mode; engine="acp" is rejected because ACP confinement is not yet supported. networkScope="allowlist" injects HTTP_PROXY/HTTPS_PROXY for the CLI while its private network namespace blocks direct sockets, so every required provider/API hostname must be listed explicitly.

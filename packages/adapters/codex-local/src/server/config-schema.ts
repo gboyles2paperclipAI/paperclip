@@ -4,6 +4,7 @@ import {
   DEFAULT_ACP_ENGINE_NON_INTERACTIVE_PERMISSIONS,
   DEFAULT_ACP_ENGINE_WARM_HANDLE_IDLE_MS,
 } from "@paperclipai/adapter-utils/acpx-engine/constants";
+import { DEFAULT_CODEX_ACP_MEMORY_LIMIT_MB } from "@paperclipai/adapter-utils/acpx-engine/process-lifecycle";
 
 const acpVisible = { visibleWhen: { key: "engine", values: ["acp"] } };
 
@@ -42,6 +43,19 @@ export function getConfigSchema(): AdapterConfigSchema {
         meta: acpVisible,
       },
       {
+        key: "acpAgentMode",
+        label: "Codex ACP access mode",
+        type: "select",
+        default: "agent-full-access",
+        options: [
+          { value: "agent-full-access", label: "Agent (full access)" },
+          { value: "agent", label: "Agent (workspace, no network)" },
+          { value: "read-only", label: "Read-only (no network)" },
+        ],
+        hint: "Full access matches the local CLI lane and lets the agent call the Paperclip control plane.",
+        meta: acpVisible,
+      },
+      {
         key: "nonInteractivePermissions",
         label: "ACP non-interactive permissions",
         type: "select",
@@ -66,6 +80,14 @@ export function getConfigSchema(): AdapterConfigSchema {
         type: "number",
         default: DEFAULT_ACP_ENGINE_WARM_HANDLE_IDLE_MS,
         hint: "Defaults to 0, which closes the ACP process after each run while retaining persistent session state.",
+        meta: acpVisible,
+      },
+      {
+        key: "memoryLimitMb",
+        label: "ACP process-group memory limit (MB)",
+        type: "number",
+        default: DEFAULT_CODEX_ACP_MEMORY_LIMIT_MB,
+        hint: "Aggregate RSS limit for the Codex ACP process group. Set 0 to disable. The PAPERCLIP_CODEX_ACP_MEMORY_LIMIT_MB environment variable can set the host default.",
         meta: acpVisible,
       },
     ],

@@ -786,6 +786,34 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(wrapper).toContain("exec node ./fake-acp.js");
   });
 
+  it("isolates Codex ACP in a process group and defaults it to control-plane-capable access", async () => {
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const codexHome = path.join(root, "codex-home");
+
+    const result = await runExecutor({
+      agent: "codex",
+      agentCommand: "node ./fake-acp.js",
+      stateDir,
+      env: { CODEX_HOME: codexHome },
+    });
+
+    const wrappers = await fs.readdir(path.join(stateDir, "wrappers"));
+    const wrapperFile = wrappers.find((name) => name.endsWith(".sh"));
+    const envFile = wrappers.find((name) => name.endsWith(".env"));
+    expect(wrapperFile).toBeTruthy();
+    expect(envFile).toBeTruthy();
+    const wrapper = await fs.readFile(path.join(stateDir, "wrappers", wrapperFile!), "utf8");
+    const wrapperEnv = await fs.readFile(path.join(stateDir, "wrappers", envFile!), "utf8");
+    expect(wrapper).toContain('exec setsid "$0" "$@"');
+    expect(wrapper).toContain("processGroupId");
+    expect(wrapperEnv).toContain("INITIAL_AGENT_MODE='agent-full-access'");
+    expect(result.logs).toContainEqual({
+      stream: "stderr",
+      text: "[paperclip] Codex ACP process metadata was not published; process-group supervision is unavailable for this run.\n",
+    });
+  });
+
   it("starts sandbox ACP process sessions in the remote execution cwd", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
