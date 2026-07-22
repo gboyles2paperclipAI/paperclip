@@ -258,11 +258,22 @@ describe("shared ACPX engine runtime behavior", () => {
 
   it("closes the runtime when prompt metadata publication fails", async () => {
     const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const metadataPath = codexAcpProcessMetadataPath(stateDir, "run-meta-failure");
     let closed = false;
     const execute = createAcpxEngineExecutor({
       requireCodexProcessMetadata: false,
       createRuntime: () => ({
         ...buildRuntime(),
+        ensureSession: async () => {
+          await fs.mkdir(path.dirname(metadataPath), { recursive: true });
+          await fs.writeFile(metadataPath, "{}", "utf8");
+          return {
+            backendSessionId: "backend-session",
+            agentSessionId: "agent-session",
+            runtimeSessionName: "runtime-session",
+          };
+        },
         close: async () => {
           closed = true;
         },
@@ -274,9 +285,9 @@ describe("shared ACPX engine runtime behavior", () => {
       agent: { id: "agent-1", companyId: "company-1" },
       runtime: {},
       config: {
-        agent: "custom",
+        agent: "codex",
         agentCommand: "node ./fake-acp.js",
-        stateDir: path.join(root, "state"),
+        stateDir,
       },
       context: {},
       onLog: async () => {},
@@ -291,6 +302,7 @@ describe("shared ACPX engine runtime behavior", () => {
       errorMessage: "meta publication failed",
     });
     expect(closed).toBe(true);
+    await expect(fs.access(metadataPath)).rejects.toThrow();
   });
 
   it.skipIf(process.platform !== "linux")(

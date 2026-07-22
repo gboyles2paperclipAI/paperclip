@@ -2218,6 +2218,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         clearWarmHandleTimer(existing);
         warmHandles.delete(prepared.sessionKey);
       }
+      await cleanupExecutionResources(prepared);
       return {
         exitCode: 1,
         signal: null,
