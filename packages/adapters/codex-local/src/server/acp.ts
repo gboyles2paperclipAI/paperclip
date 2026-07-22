@@ -31,6 +31,7 @@ import {
   asString,
   parseObject,
 } from "@paperclipai/adapter-utils/server-utils";
+import { DEFAULT_CODEX_LOCAL_TIMEOUT_SEC } from "../index.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const packageRootDir = path.resolve(moduleDir, "../..");
@@ -108,7 +109,6 @@ export function buildCodexAcpConfig(config: Record<string, unknown>): Record<str
   const agentCommand = firstNonEmptyString(config.agentCommand, config.acpAgentCommand);
   const stateDir = firstNonEmptyString(config.stateDir, config.acpStateDir);
   const mode = firstNonEmptyString(config.mode, config.acpMode) ?? DEFAULT_ACP_ENGINE_MODE;
-  const acpAgentMode = firstNonEmptyString(config.acpAgentMode) ?? "agent-full-access";
   const permissionMode =
     firstNonEmptyString(config.permissionMode, config.acpPermissionMode) ??
     DEFAULT_ACP_ENGINE_PERMISSION_MODE;
@@ -124,10 +124,10 @@ export function buildCodexAcpConfig(config: Record<string, unknown>): Record<str
     ...config,
     agent: "codex",
     mode,
-    acpAgentMode,
     permissionMode,
     nonInteractivePermissions,
     warmHandleIdleMs,
+    timeoutSec: config.timeoutSec ?? DEFAULT_CODEX_LOCAL_TIMEOUT_SEC,
     ...(agentCommand ? { agentCommand } : {}),
     ...(stateDir ? { stateDir } : {}),
   };

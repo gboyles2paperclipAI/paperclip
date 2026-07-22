@@ -43,19 +43,6 @@ export function getConfigSchema(): AdapterConfigSchema {
         meta: acpVisible,
       },
       {
-        key: "acpAgentMode",
-        label: "Codex ACP access mode",
-        type: "select",
-        default: "agent-full-access",
-        options: [
-          { value: "agent-full-access", label: "Agent (full access)" },
-          { value: "agent", label: "Agent (workspace, no network)" },
-          { value: "read-only", label: "Read-only (no network)" },
-        ],
-        hint: "Full access matches the local CLI lane and lets the agent call the Paperclip control plane.",
-        meta: acpVisible,
-      },
-      {
         key: "nonInteractivePermissions",
         label: "ACP non-interactive permissions",
         type: "select",

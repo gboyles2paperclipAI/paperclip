@@ -114,7 +114,7 @@ export async function startServer(): Promise<StartedServer> {
   let config = loadConfig();
   initTelemetry({ enabled: config.telemetryEnabled });
   try {
-    const orphanReap = await reapOrphanedCodexAcpProcesses();
+    const orphanReap = await reapOrphanedCodexAcpProcesses(resolvePaperclipInstanceRoot());
     if (orphanReap.reapedPids.length > 0) {
       logger.warn(
         { reapedPids: orphanReap.reapedPids, scannedProcesses: orphanReap.scanned },

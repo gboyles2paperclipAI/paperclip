@@ -64,7 +64,7 @@ import {
 import { prepareCodexRuntimeConfig } from "./runtime-config.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
-import { SANDBOX_INSTALL_COMMAND } from "../index.js";
+import { DEFAULT_CODEX_LOCAL_TIMEOUT_SEC, SANDBOX_INSTALL_COMMAND } from "../index.js";
 import {
   CODEX_OUTPUT_INACTIVITY_MONITOR_SIGTERM_GRACE_MS,
   createCodexOutputInactivityMonitor,
@@ -481,7 +481,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
     const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(
       executionTarget,
-      asNumber(config.timeoutSec, 0),
+      asNumber(config.timeoutSec, DEFAULT_CODEX_LOCAL_TIMEOUT_SEC),
     );
     const graceSec = asNumber(config.graceSec, 20);
     let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);

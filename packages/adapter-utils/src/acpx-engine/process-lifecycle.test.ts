@@ -1,9 +1,14 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   isKnownCodexAcpCommand,
+  isPaperclipOwnedCodexAcpProcess,
   readProcessGroupRssBytes,
+  reapOrphanedCodexAcpProcesses,
   startCodexAcpMemoryGuard,
   terminateCodexAcpProcessGroup,
   type CodexAcpProcessMetadata,
@@ -86,5 +91,58 @@ describe("Codex ACP orphan matching", () => {
     ).toBe(true);
     expect(isKnownCodexAcpCommand(["node", "/app/server/dist/index.js"])).toBe(false);
     expect(isKnownCodexAcpCommand(["bash", "-c", "echo codex-acp"])).toBe(false);
+    expect(isKnownCodexAcpCommand(["node", "/app/server.js", "/usr/bin/codex-acp"])).toBe(false);
   });
+
+  it("requires Paperclip ownership markers scoped to the current instance", () => {
+    const processInfo = {
+      commandLine: ["node", "/app/node_modules/@agentclientprotocol/codex-acp/dist/index.js"],
+      paperclipManaged: true,
+      paperclipRunId: "run-1",
+      paperclipAcpStateDir: "/paperclip/instances/default/companies/company-1/acp-engine/agent-1",
+      instanceRoot: "/paperclip/instances/default",
+    };
+    expect(isPaperclipOwnedCodexAcpProcess(processInfo)).toBe(true);
+    expect(isPaperclipOwnedCodexAcpProcess({ ...processInfo, paperclipManaged: false })).toBe(false);
+    expect(isPaperclipOwnedCodexAcpProcess({ ...processInfo, paperclipRunId: null })).toBe(false);
+    expect(
+      isPaperclipOwnedCodexAcpProcess({
+        ...processInfo,
+        instanceRoot: "/paperclip/instances/another",
+      }),
+    ).toBe(false);
+  });
+
+  it.skipIf(process.platform !== "linux")(
+    "reaps an orphan only when it carries current-instance ownership markers",
+    async () => {
+      const instanceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-acp-reaper-"));
+      const stateDir = path.join(instanceRoot, "companies", "company-1", "acp-engine", "agent-1");
+      const launcher = spawn(
+        "setsid",
+        [
+          "-f",
+          "env",
+          "PAPERCLIP_ACP_MANAGED=1",
+          "PAPERCLIP_RUN_ID=reaper-test-run",
+          `PAPERCLIP_ACP_STATE_DIR=${stateDir}`,
+          "bash",
+          "-c",
+          "exec -a codex-acp sleep 60",
+        ],
+        { stdio: "ignore" },
+      );
+      try {
+        await once(launcher, "exit");
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+        const result = await reapOrphanedCodexAcpProcesses(instanceRoot, 50);
+        expect(result.reapedPids.length).toBeGreaterThan(0);
+        for (const pid of result.reapedPids) {
+          expect(() => process.kill(pid, 0)).toThrow();
+        }
+      } finally {
+        await fs.rm(instanceRoot, { recursive: true, force: true });
+      }
+    },
+  );
 });

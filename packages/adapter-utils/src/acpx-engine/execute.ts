@@ -112,6 +112,10 @@ export interface AcpxEngineBillingIdentity {
 
 export interface AcpxEngineExecutorOptions {
   createRuntime?: AcpxRuntimeFactory;
+  /** Test/runtime escape hatch; production Codex ACP execution fails closed. */
+  requireCodexProcessMetadata?: boolean;
+  /** Primarily for deterministic tests; production defaults to ten seconds. */
+  codexProcessMetadataTimeoutMs?: number;
   now?: () => number;
   warmHandles?: Map<string, RuntimeCacheEntry>;
   adapterType?: string;
@@ -142,7 +146,6 @@ interface AcpxPreparedRuntime {
   requestedModel: string;
   requestedThinkingEffort: string;
   fastMode: boolean;
-  codexAgentMode: "read-only" | "agent" | "agent-full-access" | null;
   memoryLimitMb: number;
   timeoutSec: number;
   timeoutResolution: AdapterExecutionTargetTimeoutResolution;
@@ -737,14 +740,6 @@ function normalizeRequestedThinkingEffort(config: Record<string, unknown>): stri
   ).trim();
 }
 
-function normalizeCodexAgentMode(
-  config: Record<string, unknown>,
-): "read-only" | "agent" | "agent-full-access" {
-  const value = asString(config.acpAgentMode, "agent-full-access").trim();
-  if (value === "read-only" || value === "agent") return value;
-  return "agent-full-access";
-}
-
 function isCompatibleSession(
   params: Record<string, unknown>,
   runtime: Pick<AcpxPreparedRuntime, "fingerprint" | "sessionKey" | "cwd" | "mode" | "acpxAgent" | "remoteExecutionIdentity">,
@@ -913,7 +908,11 @@ async function writeAgentWrapper(input: {
     "fi",
     `process_metadata_dir=${shellQuote(input.processMetadataDir)}`,
     `if [[ ${shellQuote(input.acpxAgent)} == "codex" && -n "\${PAPERCLIP_RUN_ID:-}" ]]; then`,
-    "  if [[ \"${PAPERCLIP_ACP_GROUP_READY:-}\" != \"1\" ]] && command -v setsid >/dev/null 2>&1; then",
+    "  if [[ \"${PAPERCLIP_ACP_GROUP_READY:-}\" != \"1\" ]]; then",
+    "    if ! command -v setsid >/dev/null 2>&1; then",
+    "      echo '[paperclip] setsid is required for supervised Codex ACP execution.' >&2",
+    "      exit 70",
+    "    fi",
     "    export PAPERCLIP_ACP_GROUP_READY=1",
     "    exec setsid \"$0\" \"$@\"",
     "  fi",
@@ -929,6 +928,9 @@ async function writeAgentWrapper(input: {
     "    process_metadata_temp=\"$process_metadata_file.tmp.$$\"",
     "    printf '{\"pid\":%s,\"processGroupId\":%s,\"startTimeTicks\":%s,\"startedAt\":\"%s\"}\\n' \"$$\" \"$process_group_id\" \"$process_start_ticks\" \"$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)\" > \"$process_metadata_temp\"",
     "    mv -f \"$process_metadata_temp\" \"$process_metadata_file\"",
+    "  else",
+    "    echo '[paperclip] failed to establish an isolated Codex ACP process group.' >&2",
+    "    exit 70",
     "  fi",
     "fi",
     `stderr_dir=${shellQuote(input.childStderrDir)}`,
@@ -1019,7 +1021,6 @@ async function buildRuntime(input: {
   const requestedModel = asString(config.model, "").trim();
   const requestedThinkingEffort = normalizeRequestedThinkingEffort(config);
   const fastMode = acpxAgent === "codex" && config.fastMode === true;
-  const codexAgentMode = acpxAgent === "codex" ? normalizeCodexAgentMode(config) : null;
   const configuredMemoryLimit =
     config.memoryLimitMb ??
     parseObject(config.env).PAPERCLIP_CODEX_ACP_MEMORY_LIMIT_MB ??
@@ -1086,8 +1087,14 @@ async function buildRuntime(input: {
   for (const [key, value] of Object.entries(shapedEnvConfig)) {
     if (typeof value === "string") env[key] = value;
   }
+  if (acpxAgent === "codex") {
+    // Force run ownership markers after user env merging so startup recovery
+    // can distinguish Paperclip-managed ACP trees from unrelated processes.
+    env.PAPERCLIP_RUN_ID = runId;
+    env.PAPERCLIP_ACP_MANAGED = "1";
+    env.PAPERCLIP_ACP_STATE_DIR = stateDir;
+  }
   if (!hasExplicitApiKey && authToken) env.PAPERCLIP_API_KEY = authToken;
-  if (codexAgentMode) env.INITIAL_AGENT_MODE = codexAgentMode;
   // For the claude agent, set model via ANTHROPIC_MODEL at startup rather than
   // via session/set_config_option — the ACP server's set_config_option handler
   // validates the value against its internal available-models list and rejects
@@ -1251,7 +1258,6 @@ async function buildRuntime(input: {
     requestedModel,
     requestedThinkingEffort,
     fastMode,
-    codexAgentMode,
     memoryLimitMb,
     remoteExecutionIdentity,
     skillsIdentity,
@@ -1288,7 +1294,6 @@ async function buildRuntime(input: {
     requestedModel,
     requestedThinkingEffort,
     fastMode,
-    codexAgentMode,
     memoryLimitMb,
     timeoutSec,
     timeoutResolution,
@@ -1366,14 +1371,22 @@ async function applySessionConfigOptions(input: {
 async function attachCodexProcessLifecycle(
   ctx: AdapterExecutionContext,
   prepared: AcpxPreparedRuntime,
+  requireMetadata: boolean,
+  metadataTimeoutMs: number,
 ): Promise<void> {
   if (
     prepared.acpxAgent !== "codex" ||
     !prepared.processMetadataPath ||
     prepared.processSessionBridge
   ) return;
-  const metadata = await waitForCodexAcpProcessMetadata(prepared.processMetadataPath);
+  const metadata = await waitForCodexAcpProcessMetadata(
+    prepared.processMetadataPath,
+    requireMetadata ? metadataTimeoutMs : 0,
+  );
   if (!metadata) {
+    if (requireMetadata && process.platform === "linux") {
+      throw new Error("Codex ACP process metadata was not published; refusing an unsupervised run.");
+    }
     await ctx.onLog(
       "stderr",
       "[paperclip] Codex ACP process metadata was not published; process-group supervision is unavailable for this run.\n",
@@ -1405,7 +1418,9 @@ function codexMemoryLimitMessage(prepared: AcpxPreparedRuntime): string | null {
   return `Codex ACP process group exceeded the configured memory limit (${observedMb} MB observed; ${prepared.memoryLimitMb} MB limit).`;
 }
 
-async function cleanupExecutionResources(prepared: AcpxPreparedRuntime): Promise<void> {
+async function terminateCodexExecutionProcess(
+  prepared: AcpxPreparedRuntime,
+): Promise<CodexAcpProcessMetadata | null> {
   prepared.memoryGuard?.stop();
   prepared.memoryGuard = null;
   const metadata =
@@ -1413,7 +1428,15 @@ async function cleanupExecutionResources(prepared: AcpxPreparedRuntime): Promise
     (prepared.processMetadataPath
       ? await readCodexAcpProcessMetadata(prepared.processMetadataPath)
       : null);
-  if (metadata) await terminateCodexAcpProcessGroup(metadata).catch(() => {});
+  if (metadata) {
+    prepared.processMetadata = metadata;
+    await terminateCodexAcpProcessGroup(metadata).catch(() => {});
+  }
+  return metadata;
+}
+
+async function cleanupExecutionResources(prepared: AcpxPreparedRuntime): Promise<void> {
+  const metadata = await terminateCodexExecutionProcess(prepared);
   if (prepared.processMetadataPath) {
     const current = await readCodexAcpProcessMetadata(prepared.processMetadataPath);
     if (!current || !metadata || current.pid === metadata.pid) {
@@ -1951,6 +1974,8 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
   const createRuntime = deps.createRuntime ?? createAcpRuntime;
   const now = deps.now ?? (() => Date.now());
   const warmHandles = deps.warmHandles ?? defaultWarmHandles;
+  const requireCodexProcessMetadata = deps.requireCodexProcessMetadata ?? true;
+  const codexProcessMetadataTimeoutMs = deps.codexProcessMetadataTimeoutMs ?? 10_000;
   const engine = resolveEngineSettings(deps);
 
   return async function executeAcpxEngine(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
@@ -2005,17 +2030,33 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
     let handle = cached?.handle ?? null;
     let resumedSession = Boolean(handle ?? resumeSessionId);
     let clearSession = false;
+    const processLifecyclePromise = attachCodexProcessLifecycle(
+      ctx,
+      prepared,
+      requireCodexProcessMetadata,
+      codexProcessMetadataTimeoutMs,
+    );
+
+    const ensureSessionWithSupervision = async (
+      resumeId?: string,
+    ): Promise<AcpRuntimeHandle> => {
+      const ensurePromise = runtime.ensureSession({
+        sessionKey: prepared.sessionKey,
+        agent: prepared.acpxAgent,
+        mode: prepared.mode,
+        cwd: prepared.cwd,
+        ...(resumeId ? { resumeSessionId: resumeId } : {}),
+      });
+      return await Promise.race([
+        ensurePromise,
+        processLifecyclePromise.then(() => ensurePromise),
+      ]);
+    };
 
     try {
       if (!handle) {
         try {
-          handle = await runtime.ensureSession({
-            sessionKey: prepared.sessionKey,
-            agent: prepared.acpxAgent,
-            mode: prepared.mode,
-            cwd: prepared.cwd,
-            resumeSessionId,
-          });
+          handle = await ensureSessionWithSupervision(resumeSessionId);
         } catch (err) {
           if (!resumeSessionId || !isResumeFailure(err)) throw err;
           clearSession = true;
@@ -2024,22 +2065,27 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             "stdout",
             `[paperclip] ACPX resume session "${resumeSessionId}" is unavailable; retrying with a fresh session.\n`,
           );
-          handle = await runtime.ensureSession({
-            sessionKey: prepared.sessionKey,
-            agent: prepared.acpxAgent,
-            mode: prepared.mode,
-            cwd: prepared.cwd,
-          });
+          handle = await ensureSessionWithSupervision();
         }
       }
+      await processLifecyclePromise;
     } catch (err) {
+      await processLifecyclePromise.catch(() => {});
+      if (handle) {
+        await terminateCodexExecutionProcess(prepared);
+        await runtime.close({
+          handle,
+          reason: "paperclip process supervision setup failed",
+          discardPersistentState: false,
+        }).catch(() => {});
+      }
+      await cleanupExecutionResources(prepared);
       const { classified, message } = await emitAcpxFailure({
         ctx,
         prepared,
         err,
         phase: "ensure_session",
       });
-      await cleanupExecutionResources(prepared);
       return {
         exitCode: 1,
         signal: null,
@@ -2070,34 +2116,6 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
     }
     const sessionHandle = handle;
     try {
-      await attachCodexProcessLifecycle(ctx, prepared);
-    } catch (err) {
-      await runtime.close({
-        handle: sessionHandle,
-        reason: "paperclip process supervision setup failed",
-        discardPersistentState: false,
-      }).catch(() => {});
-      const { classified, message } = await emitAcpxFailure({
-        ctx,
-        prepared,
-        err,
-        phase: "process_supervision",
-      });
-      await cleanupExecutionResources(prepared);
-      return {
-        exitCode: 1,
-        signal: null,
-        timedOut: false,
-        errorMessage: message,
-        ...classified,
-        ...billingFields,
-        model: prepared.requestedModel || null,
-        clearSession,
-        resultJson: { phase: "process_supervision" },
-        summary: message,
-      };
-    }
-    try {
       await applySessionConfigOptions({
         runtime,
         handle: sessionHandle,
@@ -2105,12 +2123,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         onLog: ctx.onLog,
       });
     } catch (err) {
-      const { classified, message } = await emitAcpxFailure({
-        ctx,
-        prepared,
-        err,
-        phase: "configure_session",
-      });
+      await terminateCodexExecutionProcess(prepared);
       await runtime.close({
         handle: sessionHandle,
         reason: "paperclip config cleanup",
@@ -2122,6 +2135,12 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         warmHandles.delete(prepared.sessionKey);
       }
       await cleanupExecutionResources(prepared);
+      const { classified, message } = await emitAcpxFailure({
+        ctx,
+        prepared,
+        err,
+        phase: "configure_session",
+      });
       return {
         exitCode: 1,
         signal: null,
@@ -2141,48 +2160,76 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         summary: message,
       };
     }
-    const { prompt, promptMetrics, commandNotes } = await buildPrompt(ctx, resumedSession, prepared.env);
-    const runPrompt = joinPromptSections([prepared.skillPromptInstructions, prompt]);
-    await emitAcpxLog(ctx, {
-      type: "acpx.session",
-      agent: prepared.acpxAgent,
-      sessionId: sessionHandle.backendSessionId,
-      acpSessionId: sessionHandle.backendSessionId,
-      agentSessionId: sessionHandle.agentSessionId,
-      runtimeSessionName: sessionHandle.runtimeSessionName,
-      mode: prepared.mode,
-      permissionMode: prepared.permissionMode,
-      model: prepared.requestedModel || null,
-      thinkingEffort: prepared.requestedThinkingEffort || null,
-      fastMode: prepared.fastMode,
-    });
-    if (ctx.onMeta) {
-      await ctx.onMeta({
-        adapterType: engine.adapterType,
-        command: prepared.agentCommand ?? prepared.acpxAgent,
-        cwd: prepared.cwd,
-        commandNotes: [
-          `ACPX runtime embedded in Paperclip with ${prepared.mode} session mode.`,
-          `Effective ACPX permission mode: ${prepared.permissionMode}.`,
-          ...(prepared.requestedModel
-            ? [
-                prepared.acpxAgent === "claude"
-                  ? `Requested ACPX model: ${prepared.requestedModel} (set via ANTHROPIC_MODEL env at startup).`
-                  : `Requested ACPX model: ${prepared.requestedModel}.`,
-              ]
-            : []),
-          ...(prepared.requestedThinkingEffort ? [`Requested ACPX thinking effort: ${prepared.requestedThinkingEffort}.`] : []),
-          ...(prepared.fastMode ? ["Requested ACPX Codex fast mode."] : []),
-          ...(Array.isArray(prepared.skillsIdentity.commandNotes)
-            ? prepared.skillsIdentity.commandNotes.filter((note): note is string => typeof note === "string")
-            : []),
-          ...commandNotes,
-        ],
-        env: prepared.loggedEnv,
-        prompt: runPrompt,
-        promptMetrics,
-        context: ctx.context,
+    let runPrompt = "";
+    try {
+      const { prompt, promptMetrics, commandNotes } = await buildPrompt(ctx, resumedSession, prepared.env);
+      runPrompt = joinPromptSections([prepared.skillPromptInstructions, prompt]);
+      await emitAcpxLog(ctx, {
+        type: "acpx.session",
+        agent: prepared.acpxAgent,
+        sessionId: sessionHandle.backendSessionId,
+        acpSessionId: sessionHandle.backendSessionId,
+        agentSessionId: sessionHandle.agentSessionId,
+        runtimeSessionName: sessionHandle.runtimeSessionName,
+        mode: prepared.mode,
+        permissionMode: prepared.permissionMode,
+        model: prepared.requestedModel || null,
+        thinkingEffort: prepared.requestedThinkingEffort || null,
+        fastMode: prepared.fastMode,
       });
+      if (ctx.onMeta) {
+        await ctx.onMeta({
+          adapterType: engine.adapterType,
+          command: prepared.agentCommand ?? prepared.acpxAgent,
+          cwd: prepared.cwd,
+          commandNotes: [
+            `ACPX runtime embedded in Paperclip with ${prepared.mode} session mode.`,
+            `Effective ACPX permission mode: ${prepared.permissionMode}.`,
+            ...(prepared.requestedModel
+              ? [
+                  prepared.acpxAgent === "claude"
+                    ? `Requested ACPX model: ${prepared.requestedModel} (set via ANTHROPIC_MODEL env at startup).`
+                    : `Requested ACPX model: ${prepared.requestedModel}.`,
+                ]
+              : []),
+            ...(prepared.requestedThinkingEffort ? [`Requested ACPX thinking effort: ${prepared.requestedThinkingEffort}.`] : []),
+            ...(prepared.fastMode ? ["Requested ACPX Codex fast mode."] : []),
+            ...(Array.isArray(prepared.skillsIdentity.commandNotes)
+              ? prepared.skillsIdentity.commandNotes.filter((note): note is string => typeof note === "string")
+              : []),
+            ...commandNotes,
+          ],
+          env: prepared.loggedEnv,
+          prompt: runPrompt,
+          promptMetrics,
+          context: ctx.context,
+        });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await terminateCodexExecutionProcess(prepared);
+      await runtime.close({
+        handle: sessionHandle,
+        reason: "paperclip prompt preparation cleanup",
+        discardPersistentState: false,
+      }).catch(() => {});
+      const existing = warmHandles.get(prepared.sessionKey);
+      if (warmHandleMatches(existing, runtime, sessionHandle) && existing) {
+        clearWarmHandleTimer(existing);
+        warmHandles.delete(prepared.sessionKey);
+      }
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: message,
+        errorCode: "acpx_prepare_failed",
+        ...billingFields,
+        model: prepared.requestedModel || null,
+        clearSession,
+        resultJson: { phase: "prepare_prompt" },
+        summary: message,
+      };
     }
 
     let cancelActiveTurn: ((reason: string) => Promise<void>) | null = null;
@@ -2234,6 +2281,10 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         eventBreakdown,
         eventCostUsd,
       });
+      // ACPX close only owns the direct child. Terminate the verified Codex
+      // process group first, while its recorded leader identity is still
+      // available, so descendants cannot survive the handle close.
+      await terminateCodexExecutionProcess(prepared);
       if (terminal.status === "failed" || terminal.status === "cancelled" || timedOut) {
         const existing = warmHandles.get(prepared.sessionKey);
         if (warmHandleMatches(existing, runtime, sessionHandle) && existing) {
@@ -2303,13 +2354,13 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         ? formatAdapterExecutionTimeoutErrorMessage(prepared.timeoutResolution)
         : resultErrorMessage(terminal));
       const terminalStopReason = terminal.status === "failed" ? terminal.error.message : terminal.stopReason;
+      await cleanupExecutionResources(prepared);
       await emitAcpxLog(ctx, {
         type: terminal.status === "completed" ? "acpx.result" : "acpx.error",
         summary: terminal.status,
         stopReason: terminalStopReason,
         message: errorMessage,
       });
-      await cleanupExecutionResources(prepared);
       return {
         exitCode: terminal.status === "completed" && !memoryLimitMessage ? 0 : 1,
         signal: timedOut || memoryLimitMessage ? "SIGTERM" : null,
@@ -2355,6 +2406,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       const preEmitMessage =
         messageOverride ?? (err instanceof Error ? err.message : String(err));
       if (cancel) await cancel(preEmitMessage).catch(() => {});
+      await terminateCodexExecutionProcess(prepared);
       await runtime.close({
         handle: sessionHandle,
         reason: timedOut ? "paperclip timeout cleanup" : "paperclip error cleanup",
@@ -2365,6 +2417,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         clearWarmHandleTimer(existing);
         warmHandles.delete(prepared.sessionKey);
       }
+      await cleanupExecutionResources(prepared);
       const { classified, message } = await emitAcpxFailure({
         ctx,
         prepared,
@@ -2372,7 +2425,6 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         phase: "turn",
         messageOverride,
       });
-      await cleanupExecutionResources(prepared);
       return {
         exitCode: 1,
         signal: timedOut || memoryLimitMessage ? "SIGTERM" : null,

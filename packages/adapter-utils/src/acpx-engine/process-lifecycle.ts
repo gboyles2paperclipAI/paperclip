@@ -24,6 +24,9 @@ interface ProcIdentity {
   startTimeTicks: number;
   state: string;
   commandLine: string[];
+  paperclipManaged: boolean;
+  paperclipRunId: string | null;
+  paperclipAcpStateDir: string | null;
 }
 
 export function safeRunProcessFileName(runId: string): string {
@@ -91,6 +94,10 @@ async function readProcIdentity(pid: number): Promise<ProcIdentity | null> {
       .toString("utf8")
       .split("\0")
       .filter(Boolean);
+    const environmentRaw = await fs.readFile(`/proc/${pid}/environ`).catch(() => Buffer.alloc(0));
+    const environment = environmentRaw.toString("utf8").split("\0").filter(Boolean);
+    const environmentValue = (key: string) =>
+      environment.find((entry) => entry.startsWith(`${key}=`))?.slice(key.length + 1) ?? null;
     return {
       pid,
       parentPid,
@@ -98,6 +105,9 @@ async function readProcIdentity(pid: number): Promise<ProcIdentity | null> {
       startTimeTicks,
       state: fields[0] ?? "",
       commandLine,
+      paperclipManaged: environmentValue("PAPERCLIP_ACP_MANAGED") === "1",
+      paperclipRunId: environmentValue("PAPERCLIP_RUN_ID"),
+      paperclipAcpStateDir: environmentValue("PAPERCLIP_ACP_STATE_DIR"),
     };
   } catch {
     return null;
@@ -223,7 +233,7 @@ export function startCodexAcpMemoryGuard(input: {
 }
 
 export function isKnownCodexAcpCommand(commandLine: string[]): boolean {
-  return commandLine.some((entry) => {
+  return commandLine.slice(0, 2).some((entry) => {
     const normalized = entry.replaceAll("\\", "/");
     return (
       path.basename(normalized) === "codex-acp" ||
@@ -234,26 +244,36 @@ export function isKnownCodexAcpCommand(commandLine: string[]): boolean {
   });
 }
 
-function descendantsOf(rootPid: number, identities: ProcIdentity[]): number[] {
-  const result = new Set<number>([rootPid]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const identity of identities) {
-      if (!result.has(identity.pid) && result.has(identity.parentPid)) {
-        result.add(identity.pid);
-        changed = true;
-      }
-    }
-  }
-  return [...result];
+function pathIsWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
-function signalPid(pid: number, signal: NodeJS.Signals): void {
+export function isPaperclipOwnedCodexAcpProcess(input: {
+  commandLine: string[];
+  paperclipManaged: boolean;
+  paperclipRunId: string | null;
+  paperclipAcpStateDir: string | null;
+  instanceRoot: string;
+}): boolean {
+  return Boolean(
+    input.paperclipManaged &&
+    input.paperclipRunId &&
+    input.paperclipAcpStateDir &&
+    pathIsWithin(input.instanceRoot, input.paperclipAcpStateDir) &&
+    isKnownCodexAcpCommand(input.commandLine),
+  );
+}
+
+async function signalPidIfUnchanged(identity: ProcIdentity, signal: NodeJS.Signals): Promise<boolean> {
+  const current = await readProcIdentity(identity.pid);
+  if (!current || current.startTimeTicks !== identity.startTimeTicks) return false;
   try {
-    process.kill(pid, signal);
+    process.kill(identity.pid, signal);
+    return true;
   } catch {
     // The process may have exited between the /proc snapshot and the signal.
+    return false;
   }
 }
 
@@ -263,30 +283,59 @@ export interface CodexAcpOrphanReapResult {
 }
 
 export async function reapOrphanedCodexAcpProcesses(
+  instanceRoot: string,
   graceMs = DEFAULT_CODEX_ACP_TERMINATION_GRACE_MS,
 ): Promise<CodexAcpOrphanReapResult> {
   const identities = await listProcIdentities();
   const orphans = identities.filter(
-    (identity) => identity.parentPid === 1 && identity.state !== "Z" && isKnownCodexAcpCommand(identity.commandLine),
+    (identity) =>
+      identity.parentPid === 1 &&
+      identity.state !== "Z" &&
+      isPaperclipOwnedCodexAcpProcess({ ...identity, instanceRoot }),
   );
   const reaped = new Set<number>();
+  const handledRuns = new Set<string>();
   for (const orphan of orphans) {
-    const targets = descendantsOf(orphan.pid, identities);
-    if (orphan.processGroupId === orphan.pid) {
+    const runKey = `${orphan.paperclipAcpStateDir}\0${orphan.paperclipRunId}`;
+    if (handledRuns.has(runKey)) continue;
+    handledRuns.add(runKey);
+    const belongsToRun = (identity: ProcIdentity) =>
+      identity.paperclipManaged &&
+      identity.paperclipRunId === orphan.paperclipRunId &&
+      identity.paperclipAcpStateDir === orphan.paperclipAcpStateDir;
+    const initialTargets = identities.filter(belongsToRun);
+    const currentOrphan = await readProcIdentity(orphan.pid);
+    if (
+      currentOrphan &&
+      currentOrphan.startTimeTicks === orphan.startTimeTicks &&
+      orphan.processGroupId === orphan.pid
+    ) {
       try {
         process.kill(-orphan.processGroupId, "SIGTERM");
+        for (const identity of initialTargets) reaped.add(identity.pid);
       } catch {
-        // Fall through to direct descendant signaling below.
-        for (const pid of targets) signalPid(pid, "SIGTERM");
+        for (const identity of initialTargets) {
+          if (await signalPidIfUnchanged(identity, "SIGTERM")) reaped.add(identity.pid);
+        }
       }
     } else {
-      for (const pid of targets) signalPid(pid, "SIGTERM");
+      for (const identity of initialTargets) {
+        if (await signalPidIfUnchanged(identity, "SIGTERM")) reaped.add(identity.pid);
+      }
     }
     await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, graceMs)));
-    for (const pid of targets) {
-      const identity = await readProcIdentity(pid);
-      if (identity && identity.state !== "Z") signalPid(pid, "SIGKILL");
-      reaped.add(pid);
+    // Rescan by the inherited ownership markers so descendants created after
+    // the first snapshot are included and stale/reused PIDs are never used.
+    for (let pass = 0; pass < 2; pass += 1) {
+      const liveTargets = (await listProcIdentities()).filter(
+        (identity) => identity.state !== "Z" && belongsToRun(identity),
+      );
+      for (const identity of liveTargets) {
+        if (await signalPidIfUnchanged(identity, "SIGKILL")) reaped.add(identity.pid);
+      }
+      if (pass === 0 && liveTargets.length > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      }
     }
   }
   return { scanned: identities.length, reapedPids: [...reaped].sort((a, b) => a - b) };

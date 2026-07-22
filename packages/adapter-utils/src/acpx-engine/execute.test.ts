@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AcpRuntimeOptions } from "acpx/runtime";
@@ -15,6 +16,7 @@ import {
   summarizeAcpxTurnUsage,
 } from "./execute.js";
 import { runChildProcess } from "../server-utils.js";
+import { codexAcpProcessMetadataPath } from "./process-lifecycle.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -121,6 +123,7 @@ async function runExecutor(
   const meta: Record<string, unknown>[] = [];
   const logs: Array<{ stream: string; text: string }> = [];
   const execute = createAcpxEngineExecutor({
+    requireCodexProcessMetadata: false,
     createRuntime: (options) => {
       runtimeOptions.push(options as unknown as Record<string, unknown>);
       return buildRuntime() as never;
@@ -252,6 +255,80 @@ describe("shared ACPX engine runtime behavior", () => {
       })}\n`,
     });
   });
+
+  it("closes the runtime when prompt metadata publication fails", async () => {
+    const root = await makeTempRoot();
+    let closed = false;
+    const execute = createAcpxEngineExecutor({
+      requireCodexProcessMetadata: false,
+      createRuntime: () => ({
+        ...buildRuntime(),
+        close: async () => {
+          closed = true;
+        },
+      }) as never,
+    });
+
+    const result = await execute({
+      runId: "run-meta-failure",
+      agent: { id: "agent-1", companyId: "company-1" },
+      runtime: {},
+      config: {
+        agent: "custom",
+        agentCommand: "node ./fake-acp.js",
+        stateDir: path.join(root, "state"),
+      },
+      context: {},
+      onLog: async () => {},
+      onMeta: async () => {
+        throw new Error("meta publication failed");
+      },
+    } as never);
+
+    expect(result).toMatchObject({
+      exitCode: 1,
+      errorCode: "acpx_prepare_failed",
+      errorMessage: "meta publication failed",
+    });
+    expect(closed).toBe(true);
+  });
+
+  it.skipIf(process.platform !== "linux")(
+    "fails closed and closes the runtime when Codex process metadata is missing",
+    async () => {
+      const root = await makeTempRoot();
+      let closed = false;
+      const execute = createAcpxEngineExecutor({
+        requireCodexProcessMetadata: true,
+        codexProcessMetadataTimeoutMs: 25,
+        createRuntime: () => ({
+          ...buildRuntime(),
+          close: async () => {
+            closed = true;
+          },
+        }) as never,
+      });
+
+      const result = await execute({
+        runId: "run-missing-process-metadata",
+        agent: { id: "agent-1", companyId: "company-1" },
+        runtime: {},
+        config: {
+          agent: "codex",
+          agentCommand: "node ./fake-acp.js",
+          stateDir: path.join(root, "state"),
+        },
+        context: {},
+        onLog: async () => {},
+      } as never);
+
+      expect(result).toMatchObject({
+        exitCode: 1,
+        errorMessage: expect.stringContaining("refusing an unsupervised run"),
+      });
+      expect(closed).toBe(true);
+    },
+  );
 
   it("captures per-run usage, cost deltas, and billing identity from the ACP runtime", async () => {
     const root = await makeTempRoot();
@@ -786,7 +863,7 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(wrapper).toContain("exec node ./fake-acp.js");
   });
 
-  it("isolates Codex ACP in a process group and defaults it to control-plane-capable access", async () => {
+  it("isolates Codex ACP in a process group", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
     const codexHome = path.join(root, "codex-home");
@@ -804,15 +881,101 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(wrapperFile).toBeTruthy();
     expect(envFile).toBeTruthy();
     const wrapper = await fs.readFile(path.join(stateDir, "wrappers", wrapperFile!), "utf8");
-    const wrapperEnv = await fs.readFile(path.join(stateDir, "wrappers", envFile!), "utf8");
     expect(wrapper).toContain('exec setsid "$0" "$@"');
     expect(wrapper).toContain("processGroupId");
-    expect(wrapperEnv).toContain("INITIAL_AGENT_MODE='agent-full-access'");
     expect(result.logs).toContainEqual({
       stream: "stderr",
       text: "[paperclip] Codex ACP process metadata was not published; process-group supervision is unavailable for this run.\n",
     });
   });
+
+  it.skipIf(process.platform !== "linux")(
+    "terminates the verified Codex ACP group before closing the direct runtime handle",
+    async () => {
+      const root = await makeTempRoot();
+      const stateDir = path.join(root, "state");
+      const runId = "run-process-order";
+      const child = spawn("setsid", ["bash", "-c", "sleep 60 & wait"], { stdio: "ignore" });
+      if (!child.pid) throw new Error("fixture process did not publish a pid");
+      const exited = once(child, "exit");
+      let groupAliveWhenRuntimeClosed = true;
+      let supervisionAttachedDuringInitialization = false;
+      try {
+        await new Promise<void>((resolve) => setTimeout(resolve, 75));
+        const stat = await fs.readFile(`/proc/${child.pid}/stat`, "utf8");
+        const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+        const metadataPath = codexAcpProcessMetadataPath(stateDir, runId);
+        const execute = createAcpxEngineExecutor({
+          createRuntime: () => ({
+            ensureSession: async () => {
+              await fs.mkdir(path.dirname(metadataPath), { recursive: true, mode: 0o700 });
+              await fs.writeFile(
+                metadataPath,
+                JSON.stringify({
+                  pid: child.pid,
+                  processGroupId: child.pid,
+                  startTimeTicks: Number.parseInt(fields[19]!, 10),
+                  startedAt: new Date().toISOString(),
+                }),
+                { mode: 0o600 },
+              );
+              const deadline = Date.now() + 1000;
+              while (!supervisionAttachedDuringInitialization && Date.now() < deadline) {
+                await new Promise<void>((resolve) => setTimeout(resolve, 10));
+              }
+              if (!supervisionAttachedDuringInitialization) {
+                throw new Error("process supervision did not attach during initialization");
+              }
+              return {
+                backendSessionId: "backend-session",
+                agentSessionId: "agent-session",
+                runtimeSessionName: "runtime-session",
+              };
+            },
+            startTurn: buildRuntime().startTurn,
+            close: async () => {
+              try {
+                process.kill(-child.pid!, 0);
+              } catch {
+                groupAliveWhenRuntimeClosed = false;
+              }
+            },
+          }) as never,
+        });
+
+        const result = await execute({
+          runId,
+          agent: { id: "agent-1", companyId: "company-1" },
+          runtime: {},
+          config: {
+            agent: "codex",
+            agentCommand: "node ./fake-acp.js",
+            stateDir,
+            memoryLimitMb: 0,
+          },
+          context: {},
+          onLog: async () => {},
+          onSpawn: async () => {
+            supervisionAttachedDuringInitialization = true;
+          },
+        } as never);
+
+        await exited;
+        expect(result.exitCode).toBe(0);
+        expect(supervisionAttachedDuringInitialization).toBe(true);
+        expect(groupAliveWhenRuntimeClosed).toBe(false);
+        expect(() => process.kill(-child.pid!, 0)).toThrow();
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) {
+          try {
+            process.kill(-child.pid, "SIGKILL");
+          } catch {
+            child.kill("SIGKILL");
+          }
+        }
+      }
+    },
+  );
 
   it("starts sandbox ACP process sessions in the remote execution cwd", async () => {
     const root = await makeTempRoot();
@@ -1079,6 +1242,7 @@ describe("shared ACPX engine runtime behavior", () => {
     for (const agent of ["claude", "codex", "custom"] as const) {
       const runtimeOptions: AcpRuntimeOptions[] = [];
       const execute = createAcpxEngineExecutor({
+        requireCodexProcessMetadata: false,
         createRuntime: (options) => {
           runtimeOptions.push(options as AcpRuntimeOptions);
           return buildRuntime() as never;
