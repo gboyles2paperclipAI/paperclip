@@ -5833,6 +5833,10 @@ export function issueRoutes(
     const activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(existing.companyId, existing.id);
     const submittedActionMatchesActive =
       Boolean(activeRecoveryAction) && (!actionId || actionId === activeRecoveryAction?.id);
+    if (req.actor.type === "agent" && !submittedActionMatchesActive) {
+      res.status(403).json({ error: "Issue is outside this actor's authorization boundary" });
+      return;
+    }
     const actorIsCurrentRecoveryOwner =
       req.actor.type === "agent" &&
       submittedActionMatchesActive &&
