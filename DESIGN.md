@@ -51,6 +51,18 @@ Aspirational (NOT gating this run): no duplicate components; every component has
 
 No visual redesign, no new colors or typefaces, no layout restructuring, no new dependencies beyond snapshot tooling, no component consolidation/merges (audit + recommend only), no copy renames, no changes to server code or app logic. Simplification means fewer parts, same product.
 
+## Operator interaction lifecycle
+
+Operator-facing interaction cards must remain actionable long enough for a human to see them, surface their lifecycle outside the board, and fail visibly instead of disappearing silently.
+
+- `PAPERCLIP_INTERACTION_TTL_SECONDS` controls ordinary operator-interaction lifetime. Its default is seven days.
+- `PAPERCLIP_APPROVAL_TTL_SECONDS` controls confirmation, checkbox-confirmation, and item-verdict cards. Its raised default is fourteen days.
+- `PAPERCLIP_INTERACTION_NOTIFICATION_WEBHOOK_URL` optionally receives creation and timeout-expiry events. The configuration name is public; its value is never persisted or logged. An absent setting preserves the existing no-outbound-notification behavior.
+- Creation persists the resolved `expiresAt` in the interaction payload so later config changes do not rewrite an existing card's deadline.
+- A timeout expiry atomically marks the unanswered card expired and creates at most one replacement. The replacement carries `escalated: true` and `originalInteractionId`, uses a deterministic idempotency key, and is never reissued again.
+- Superseded comments, stale document targets, manual cancellation, and answered cards keep their existing semantics and do not auto-reissue.
+- Webhook delivery is best-effort and bounded. Delivery failure cannot roll back creation, expiry, or reissue state.
+
 ## Prior art (read before auditing)
 
 See `doc/design/PRIOR-ART.md` — a previous audit pass (PAP-280/283/284, on the `PAP-282-playground` branch, NOT on master) found that of ~220 hardcoded drift sites, only 6 were exact-value-mappable to existing tokens; expect the verbatim extraction to mint many new tokens that the human scale-collapse step later merges. It also drafted usage rules (radius tiers, CTA tiers, named type styles) that are good candidates for the post-audit scale decision.

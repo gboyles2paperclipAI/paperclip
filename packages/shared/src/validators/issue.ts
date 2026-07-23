@@ -611,6 +611,12 @@ export const issueThreadInteractionContinuationPolicySchema = z.enum(
   ISSUE_THREAD_INTERACTION_CONTINUATION_POLICIES,
 );
 
+const interactionLifecyclePayloadShape = {
+  expiresAt: z.string().datetime({ offset: true }).optional(),
+  escalated: z.boolean().optional(),
+  originalInteractionId: z.string().uuid().nullable().optional(),
+};
+
 export const issueDocumentKeySchema = z
   .string()
   .trim()
@@ -644,6 +650,7 @@ export const suggestedTaskDraftSchema = z.object({
 });
 
 export const suggestTasksPayloadSchema = z.object({
+  ...interactionLifecyclePayloadShape,
   version: z.literal(1),
   defaultParentId: z.string().uuid().nullable().optional(),
   tasks: z.array(suggestedTaskDraftSchema).min(1).max(50),
@@ -694,6 +701,7 @@ export const askUserQuestionsQuestionSchema = z.object({
 });
 
 export const askUserQuestionsPayloadSchema = z.object({
+  ...interactionLifecyclePayloadShape,
   version: z.literal(1),
   title: z.string().trim().max(240).nullable().optional(),
   submitLabel: z.string().trim().max(120).nullable().optional(),
@@ -736,7 +744,7 @@ export const askUserQuestionsResultSchema = z.object({
   answers: z.array(askUserQuestionsAnswerSchema).max(20),
   cancelled: z.literal(true).optional(),
   cancellationReason: z.string().trim().max(4000).nullable().optional(),
-  expirationReason: z.literal("superseded_by_comment").optional(),
+  expirationReason: z.enum(["superseded_by_comment", "timeout"]).optional(),
   commentId: z.string().uuid().nullable().optional(),
   summaryMarkdown: z.string().max(20000).nullable().optional(),
 });
@@ -790,6 +798,7 @@ export const requestConfirmationToolActionPayloadSchema = z.object({
 });
 
 export const requestConfirmationPayloadSchema = z.object({
+  ...interactionLifecyclePayloadShape,
   version: z.literal(1),
   prompt: z.string().trim().min(1).max(1000),
   acceptLabel: z.string().trim().min(1).max(80).nullable().optional(),
@@ -811,6 +820,7 @@ export const requestCheckboxConfirmationOptionSchema = z.object({
 });
 
 export const requestCheckboxConfirmationPayloadSchema = z.object({
+  ...interactionLifecyclePayloadShape,
   version: z.literal(1),
   prompt: z.string().trim().min(1).max(1000),
   detailsMarkdown: z.string().max(20000).nullable().optional(),
@@ -930,7 +940,7 @@ export const requestConfirmationToolActionResultSchema = z.object({
 
 export const requestConfirmationResultSchema = z.object({
   version: z.literal(1),
-  outcome: z.enum(["accepted", "rejected", "superseded_by_comment", "stale_target"]),
+  outcome: z.enum(["accepted", "rejected", "superseded_by_comment", "stale_target", "timeout"]),
   reason: z.string().trim().max(4000).nullable().optional(),
   commentId: z.string().uuid().nullable().optional(),
   staleTarget: requestConfirmationTargetSchema.nullable().optional(),
@@ -969,6 +979,7 @@ export const requestItemVerdictsItemSchema = z.object({
 });
 
 export const requestItemVerdictsPayloadSchema = z.object({
+  ...interactionLifecyclePayloadShape,
   version: z.literal(1),
   prompt: z.string().trim().min(1).max(1000),
   detailsMarkdown: z.string().max(20000).nullable().optional(),
@@ -1052,7 +1063,7 @@ export const requestItemVerdictsResultItemSchema = z.object({
 
 export const requestItemVerdictsResultSchema = z.object({
   version: z.literal(1),
-  outcome: z.enum(["resolved", "superseded_by_comment", "stale_target", "cancelled"]),
+  outcome: z.enum(["resolved", "superseded_by_comment", "stale_target", "cancelled", "timeout"]),
   complete: z.boolean(),
   items: z.array(requestItemVerdictsResultItemSchema)
     .max(REQUEST_ITEM_VERDICTS_ITEM_LIMIT),
