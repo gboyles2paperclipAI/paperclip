@@ -2302,6 +2302,58 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     });
   });
 
+  it("expires an unanswered approval and auto-reissues it exactly once", async () => {
+    const { companyId, issueId } = await seedConfirmationIssue("Timed approval lifecycle");
+    const created = await interactionsSvc.create({ id: issueId, companyId }, {
+      kind: "request_confirmation",
+      continuationPolicy: "none",
+      title: "Operator approval",
+      payload: {
+        version: 1,
+        prompt: "Approve the proposed action?",
+      },
+    }, { agentId: null, userId: "local-board" });
+
+    expect(created.payload.expiresAt).toBeTruthy();
+    expect(created.payload.escalated).toBe(false);
+    const expiresAt = new Date(created.payload.expiresAt!);
+    const sweepAt = new Date(expiresAt.getTime() + 1);
+    const config = {
+      interactionTtlSeconds: 60,
+      approvalTtlSeconds: 60,
+      notificationWebhookUrl: undefined,
+    };
+
+    const concurrent = await Promise.all([
+      interactionsSvc.expireDueOperatorInteractions(sweepAt, { config }),
+      interactionsSvc.expireDueOperatorInteractions(sweepAt, { config }),
+    ]);
+    expect(concurrent.reduce((sum, result) => sum + result.expired, 0)).toBe(1);
+    expect(concurrent.reduce((sum, result) => sum + result.reissued, 0)).toBe(1);
+
+    const afterFirstSweep = await interactionsSvc.listForIssue(issueId);
+    expect(afterFirstSweep).toHaveLength(2);
+    const original = afterFirstSweep.find((row) => row.id === created.id);
+    const replacement = afterFirstSweep.find((row) => row.id !== created.id);
+    expect(original).toMatchObject({ status: "expired", result: { outcome: "timeout" } });
+    expect(replacement).toMatchObject({
+      status: "pending",
+      idempotencyKey: `timeout-reissue:${created.id}`,
+      payload: {
+        escalated: true,
+        originalInteractionId: created.id,
+      },
+    });
+
+    const replacementExpiry = new Date(replacement!.payload.expiresAt!);
+    const finalSweep = await interactionsSvc.expireDueOperatorInteractions(
+      new Date(replacementExpiry.getTime() + 1),
+      { config },
+    );
+    expect(finalSweep).toMatchObject({ expired: 1, reissued: 0 });
+    expect(await interactionsSvc.listForIssue(issueId)).toHaveLength(2);
+  });
+
   describe("workspace_finalize accept gate", () => {
     type AcceptGateInteractionKind = "request_confirmation" | "request_checkbox_confirmation";
 
