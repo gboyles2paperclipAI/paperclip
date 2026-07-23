@@ -50,6 +50,12 @@ import {
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { issueService, runWorkspaceIsFinalized } from "./issues.js";
+import {
+  emitInteractionLifecycleNotification,
+  expiresAtForInteraction,
+  loadInteractionLifecycleConfig,
+  type InteractionLifecycleConfig,
+} from "./interaction-lifecycle.js";
 
 type InteractionActor = {
   agentId?: string | null;
@@ -184,8 +190,62 @@ function isEquivalentCreateRequest(
     && (row.summary ?? null) === (input.summary ?? null)
     && (row.createdByAgentId ?? null) === (actor.agentId ?? null)
     && (row.createdByUserId ?? null) === (actor.userId ?? null)
-    && isDeepStrictEqual(row.payload, input.payload)
+    && isDeepStrictEqual(withoutLifecycleMetadata(row.payload), withoutLifecycleMetadata(input.payload))
   );
+}
+
+function withoutLifecycleMetadata(payload: unknown): Record<string, unknown> {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
+  const {
+    expiresAt: _expiresAt,
+    escalated: _escalated,
+    originalInteractionId: _originalInteractionId,
+    ...rest
+  } = payload as Record<string, unknown>;
+  return rest;
+}
+
+function withInitialLifecycleMetadata(
+  kind: IssueThreadInteraction["kind"],
+  payload: IssueThreadInteraction["payload"],
+  createdAt: Date,
+  config: InteractionLifecycleConfig,
+) {
+  const expiresAt = expiresAtForInteraction(kind, createdAt, config);
+  return {
+    ...withoutLifecycleMetadata(payload),
+    ...(expiresAt ? { expiresAt: expiresAt.toISOString() } : {}),
+    escalated: false,
+    originalInteractionId: null,
+  } as IssueThreadInteraction["payload"];
+}
+
+function timeoutResultForInteraction(row: IssueThreadInteractionRow) {
+  switch (row.kind) {
+    case "ask_user_questions":
+      return {
+        version: 1,
+        answers: [],
+        expirationReason: "timeout",
+        summaryMarkdown: null,
+      } as const;
+    case "suggest_tasks":
+      return { version: 1, rejectionReason: "Expired unanswered" } as const;
+    case "request_confirmation":
+    case "request_checkbox_confirmation":
+      return { version: 1, outcome: "timeout", reason: "Expired unanswered" } as const;
+    case "request_item_verdicts": {
+      const interaction = hydrateInteraction(row) as RequestItemVerdictsInteraction;
+      return {
+        version: 1,
+        outcome: "timeout",
+        complete: false,
+        items: interaction.result?.items ?? [],
+      } as const;
+    }
+    default:
+      return { version: 1, outcome: "timeout" } as const;
+  }
 }
 
 function hydrateInteraction(
@@ -582,6 +642,15 @@ async function emitResolvedInteractionsTelemetry(
   ));
 }
 
+async function emitExpiredInteractionNotifications(
+  interactions: readonly IssueThreadInteraction[],
+  config = loadInteractionLifecycleConfig(),
+) {
+  await Promise.all(interactions.map((interaction) =>
+    emitInteractionLifecycleNotification("interaction.expired", interaction, { config })
+  ));
+}
+
 function isCommentAtOrAfterInteraction(args: {
   commentCreatedAt: Date | string;
   interactionCreatedAt: Date | string;
@@ -955,6 +1024,7 @@ async function expireStaleRequestConfirmationTarget(db: Db | any, args: {
   await touchIssue(db, args.row.issueId);
   const expired = hydrateInteraction(updated);
   await emitInteractionResolvedTelemetry(db, expired);
+  await emitExpiredInteractionNotifications([expired]);
   return expired;
 }
 
@@ -1328,6 +1398,14 @@ export function issueThreadInteractionService(db: Db) {
         });
       }
 
+      const createdAt = new Date();
+      const lifecycleConfig = loadInteractionLifecycleConfig();
+      const lifecyclePayload = withInitialLifecycleMetadata(
+        data.kind,
+        data.payload,
+        createdAt,
+        lifecycleConfig,
+      );
       let created: IssueThreadInteractionRow;
       try {
         [created] = await db
@@ -1345,7 +1423,9 @@ export function issueThreadInteractionService(db: Db) {
             summary: data.summary ?? null,
             createdByAgentId: actor.agentId ?? null,
             createdByUserId: actor.userId ?? null,
-            payload: data.payload,
+            payload: lifecyclePayload,
+            createdAt,
+            updatedAt: createdAt,
           })
           .returning();
       } catch (error) {
@@ -1367,7 +1447,136 @@ export function issueThreadInteractionService(db: Db) {
       }
 
       await touchIssue(db, issue.id);
-      return hydrateInteraction(created);
+      const hydrated = hydrateInteraction(created);
+      await emitInteractionLifecycleNotification("interaction.created", hydrated, {
+        config: lifecycleConfig,
+      });
+      return hydrated;
+    },
+
+    expireDueOperatorInteractions: async (
+      now = new Date(),
+      options?: { limit?: number; config?: InteractionLifecycleConfig },
+    ) => {
+      const config = options?.config ?? loadInteractionLifecycleConfig();
+      const limit = Math.max(1, Math.min(1_000, Math.floor(options?.limit ?? 500)));
+      const candidates = await db
+        .select()
+        .from(issueThreadInteractions)
+        .where(eq(issueThreadInteractions.status, "pending"))
+        .orderBy(asc(issueThreadInteractions.createdAt), asc(issueThreadInteractions.id))
+        .limit(limit);
+
+      const due = candidates.filter((row) => {
+        const payload = row.payload as unknown as Record<string, unknown>;
+        const persistedExpiresAt = typeof payload.expiresAt === "string"
+          ? new Date(payload.expiresAt)
+          : expiresAtForInteraction(
+              row.kind as IssueThreadInteraction["kind"],
+              row.createdAt,
+              config,
+            );
+        return Boolean(
+          persistedExpiresAt
+          && Number.isFinite(persistedExpiresAt.getTime())
+          && persistedExpiresAt.getTime() <= now.getTime(),
+        );
+      });
+
+      const expired: IssueThreadInteraction[] = [];
+      const reissued: IssueThreadInteraction[] = [];
+      for (const row of due) {
+        const result = await db.transaction(async (tx) => {
+          const [claimed] = await tx
+            .update(issueThreadInteractions)
+            .set({
+              status: "expired",
+              result: timeoutResultForInteraction(row),
+              resolvedByAgentId: null,
+              resolvedByUserId: null,
+              resolutionAudit: buildResolutionAudit({ resolutionMethod: "api_automated" }, now),
+              resolvedAt: now,
+              updatedAt: now,
+            })
+            .where(and(
+              eq(issueThreadInteractions.id, row.id),
+              eq(issueThreadInteractions.status, "pending"),
+            ))
+            .returning();
+          if (!claimed) return null;
+
+          const expiredInteraction = hydrateInteraction(claimed);
+          const payload = expiredInteraction.payload;
+          const mayReissue =
+            payload.escalated !== true
+            && !payload.originalInteractionId;
+          if (!mayReissue) return { expiredInteraction, reissuedInteraction: null };
+
+          const reissuedAt = now;
+          const reissuedExpiresAt = expiresAtForInteraction(
+            expiredInteraction.kind,
+            reissuedAt,
+            config,
+          );
+          const reissuedPayload = {
+            ...withoutLifecycleMetadata(payload),
+            ...(reissuedExpiresAt ? { expiresAt: reissuedExpiresAt.toISOString() } : {}),
+            escalated: true,
+            originalInteractionId: expiredInteraction.id,
+          } as IssueThreadInteraction["payload"];
+
+          const [reissuedRow] = await tx
+            .insert(issueThreadInteractions)
+            .values({
+              companyId: claimed.companyId,
+              issueId: claimed.issueId,
+              kind: claimed.kind,
+              status: "pending",
+              continuationPolicy: claimed.continuationPolicy,
+              idempotencyKey: `timeout-reissue:${claimed.id}`,
+              sourceCommentId: claimed.sourceCommentId,
+              sourceRunId: claimed.sourceRunId,
+              title: claimed.title,
+              summary: claimed.summary,
+              createdByAgentId: claimed.createdByAgentId,
+              createdByUserId: claimed.createdByUserId,
+              payload: reissuedPayload,
+              createdAt: reissuedAt,
+              updatedAt: reissuedAt,
+            })
+            .returning();
+
+          return {
+            expiredInteraction,
+            reissuedInteraction: hydrateInteraction(reissuedRow),
+          };
+        });
+
+        if (!result) continue;
+        expired.push(result.expiredInteraction);
+        if (result.reissuedInteraction) reissued.push(result.reissuedInteraction);
+        await touchIssue(db, result.expiredInteraction.issueId);
+        await emitInteractionResolvedTelemetry(db, result.expiredInteraction);
+        await emitInteractionLifecycleNotification(
+          "interaction.expired",
+          result.expiredInteraction,
+          { config },
+        );
+        if (result.reissuedInteraction) {
+          await emitInteractionLifecycleNotification(
+            "interaction.created",
+            result.reissuedInteraction,
+            { config },
+          );
+        }
+      }
+
+      return {
+        expired: expired.length,
+        reissued: reissued.length,
+        expiredInteractions: expired,
+        reissuedInteractions: reissued,
+      };
     },
 
     acceptInteraction: async (
@@ -1835,6 +2044,7 @@ export function issueThreadInteractionService(db: Db) {
       if (expired.length > 0) {
         await touchIssue(db, issue.id);
         await emitResolvedInteractionsTelemetry(db, expired);
+        await emitExpiredInteractionNotifications(expired);
       }
       return expired;
     },
@@ -1975,6 +2185,7 @@ export function issueThreadInteractionService(db: Db) {
       if (expired.length > 0) {
         await touchIssue(db, issue.id);
         await emitResolvedInteractionsTelemetry(db, expired);
+        await emitExpiredInteractionNotifications(expired);
       }
       return expired;
     },
@@ -2047,6 +2258,7 @@ export function issueThreadInteractionService(db: Db) {
       if (expired.length > 0) {
         await touchIssue(db, issue.id);
         await emitResolvedInteractionsTelemetry(db, expired);
+        await emitExpiredInteractionNotifications(expired);
       }
       return expired;
     },

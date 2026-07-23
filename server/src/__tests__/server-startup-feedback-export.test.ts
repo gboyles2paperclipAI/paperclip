@@ -19,6 +19,8 @@ const {
   fakeServer,
   heartbeatServiceFactoryMock,
   heartbeatServiceMock,
+  interactionLifecycleServiceFactoryMock,
+  interactionLifecycleServiceMock,
   loadConfigMock,
   resolveHeartbeatSchedulingSuppressionMock,
   routineServiceFactoryMock,
@@ -59,6 +61,10 @@ const {
     tickTimers: vi.fn(async () => ({ checked: 0, enqueued: 0, skipped: 0 })),
   };
   const heartbeatServiceFactoryMock = vi.fn(() => heartbeatServiceMock);
+  const interactionLifecycleServiceMock = {
+    expireDueOperatorInteractions: vi.fn(async () => ({ expired: 0, reissued: 0 })),
+  };
+  const interactionLifecycleServiceFactoryMock = vi.fn(() => interactionLifecycleServiceMock);
   const environmentCustomImagesServiceMock = {
     cleanupExpiredSetupSessions: vi.fn(async () => ({ scanned: 0, timedOut: 0, failed: 0 })),
   };
@@ -95,6 +101,8 @@ const {
     fakeServer,
     heartbeatServiceFactoryMock,
     heartbeatServiceMock,
+    interactionLifecycleServiceFactoryMock,
+    interactionLifecycleServiceMock,
     loadConfigMock,
     resolveHeartbeatSchedulingSuppressionMock,
     routineServiceFactoryMock,
@@ -198,6 +206,7 @@ vi.mock("../services/index.js", () => ({
   bootstrapExecutionPolicyFromEnv: vi.fn(async () => null),
   environmentCustomImageService: environmentCustomImagesServiceFactoryMock,
   heartbeatService: heartbeatServiceFactoryMock,
+  issueThreadInteractionService: interactionLifecycleServiceFactoryMock,
   instanceSettingsService: vi.fn(() => ({
     getGeneral: vi.fn(async () => ({
       backupRetention: {
@@ -309,6 +318,7 @@ describe("startServer feedback export wiring", () => {
       expect(heartbeatServiceMock.reapOrphanedRuns).not.toHaveBeenCalled();
       expect(heartbeatServiceMock.tickTimers).not.toHaveBeenCalled();
       expect(environmentCustomImagesServiceMock.cleanupExpiredSetupSessions).toHaveBeenCalledTimes(1);
+      expect(interactionLifecycleServiceMock.expireDueOperatorInteractions).toHaveBeenCalledTimes(1);
 
       expect(intervalCallback).not.toBeNull();
       intervalCallback?.();
@@ -318,6 +328,7 @@ describe("startServer feedback export wiring", () => {
       expect(heartbeatServiceMock.tickTimers).not.toHaveBeenCalled();
       expect(routineServiceMock.tickScheduledTriggers).toHaveBeenCalledTimes(1);
       expect(environmentCustomImagesServiceMock.cleanupExpiredSetupSessions).toHaveBeenCalledTimes(2);
+      expect(interactionLifecycleServiceMock.expireDueOperatorInteractions).toHaveBeenCalledTimes(2);
     } finally {
       setIntervalSpy.mockRestore();
     }

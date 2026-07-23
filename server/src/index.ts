@@ -42,6 +42,7 @@ import {
   environmentCustomImageService,
   heartbeatService,
   instanceSettingsService,
+  issueThreadInteractionService,
   reconcileBuiltInAgentsOnStartup,
   reconcileCloudUpstreamRunsOnStartup,
   reconcileCodexLocalManagedHomesOnStartup,
@@ -857,6 +858,7 @@ export async function startServer(): Promise<StartedServer> {
     drainHeartbeatRunsForShutdown = heartbeat.drainRunningRunsForShutdown;
     const environmentCustomImages = environmentCustomImageService(db as any, { pluginWorkerManager });
     const routines = routineService(db as any, { pluginWorkerManager, providerCooldownService });
+    const interactionLifecycle = issueThreadInteractionService(db as any);
     const worktreeRunExecutionActivation = await resolveWorktreeRunExecutionActivationState({
       getExperimental: () => instanceSettingsService(db).getExperimental(),
     });
@@ -957,6 +959,14 @@ export async function startServer(): Promise<StartedServer> {
       logger.warn({ ...setupCleanup }, "startup environment customImage setup cleanup changed sessions");
     }
 
+    const startupInteractionExpiry = await interactionLifecycle.expireDueOperatorInteractions();
+    if (startupInteractionExpiry.expired > 0) {
+      logger.warn(
+        { expired: startupInteractionExpiry.expired, reissued: startupInteractionExpiry.reissued },
+        "startup operator-interaction expiry processed cards",
+      );
+    }
+
     heartbeatSchedulerInterval = setInterval(() => {
       // Async so the suppression checks below can honor the override-aware
       // resolver (e.g. worktree run-execution opt-in). The gated work is still
@@ -1005,6 +1015,20 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "environment customImage setup cleanup failed");
+        }));
+
+      trackHeartbeatSchedulerWork(interactionLifecycle
+        .expireDueOperatorInteractions()
+        .then((result) => {
+          if (result.expired > 0) {
+            logger.warn(
+              { expired: result.expired, reissued: result.reissued },
+              "operator-interaction expiry processed cards",
+            );
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "operator-interaction expiry failed");
         }));
 
       if (heartbeatSchedulerStopped) return;
