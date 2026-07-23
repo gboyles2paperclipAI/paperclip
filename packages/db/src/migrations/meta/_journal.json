@@ -1205,6 +1205,13 @@
       "when": 1783026540000,
       "tag": "0171_tool_gateway_protocol_rate_limit_counters",
       "breakpoints": true
+    },
+    {
+      "idx": 172,
+      "version": "7",
+      "when": 1783026541000,
+      "tag": "0172_issue_last_activity_and_heartbeat_lookup",
+      "breakpoints": true
     }
   ]
 }
