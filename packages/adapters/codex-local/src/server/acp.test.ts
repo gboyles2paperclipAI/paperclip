@@ -376,6 +376,7 @@ describe("codex_local ACP lane", () => {
       permissionMode: "approve-all",
       nonInteractivePermissions: "deny",
       warmHandleIdleMs: 25,
+      timeoutSec: 900,
     });
   });
 
@@ -431,6 +432,7 @@ describe("codex_local ACP lane", () => {
     const runtimes: FakeRuntime[] = [];
     const meta: AdapterInvocationMeta[] = [];
     const execute = createCodexAcpExecutor({
+      requireCodexProcessMetadata: false,
       createRuntime: (options: FakeRuntimeOptions) => {
         const runtime = new FakeRuntime(options);
         runtimes.push(runtime);
@@ -491,6 +493,7 @@ describe("codex_local ACP lane", () => {
     const root = await makeTempRoot("paperclip-codex-acp-resume-");
     const runtimes: FakeRuntime[] = [];
     const execute = createCodexAcpExecutor({
+      requireCodexProcessMetadata: false,
       createRuntime: (options: FakeRuntimeOptions) => {
         const runtime = new FakeRuntime(options);
         runtimes.push(runtime);

@@ -41,6 +41,7 @@ describe("buildCodexLocalConfig", () => {
     const config = buildCodexLocalConfig(makeValues({ codexEngine: "auto" }));
 
     expect(config).not.toHaveProperty("engine");
+    expect(config.timeoutSec).toBe(900);
   });
 
   it("persists explicit engine pins", () => {
