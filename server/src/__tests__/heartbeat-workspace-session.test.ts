@@ -127,6 +127,16 @@ async function runGit(cwd: string, args: string[]) {
   await execFile("git", args, { cwd });
 }
 
+async function gitOutput(cwd: string, args: string[]) {
+  const result = await execFile("git", args, { cwd });
+  return result.stdout.trim();
+}
+
+async function configureGitIdentity(cwd: string) {
+  await runGit(cwd, ["config", "user.name", "Paperclip Test"]);
+  await runGit(cwd, ["config", "user.email", "test@paperclip.dev"]);
+}
+
 async function createGitCheckout(options: { withRemote: boolean }) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-push-preflight-"));
   await runGit(root, ["init"]);
@@ -134,6 +144,42 @@ async function createGitCheckout(options: { withRemote: boolean }) {
     await runGit(root, ["remote", "add", "origin", "https://github.com/example/repo.git"]);
   }
   return root;
+}
+
+async function createStaleGithubPrReviewCheckout() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pr-head-preflight-"));
+  const origin = path.join(root, "origin.git");
+  const source = path.join(root, "source");
+  const review = path.join(root, "review");
+  await runGit(root, ["init", "--bare", origin]);
+  await fs.mkdir(source);
+  await runGit(source, ["init"]);
+  await configureGitIdentity(source);
+  await fs.writeFile(path.join(source, "tracked.txt"), "old\n");
+  await runGit(source, ["add", "tracked.txt"]);
+  await runGit(source, ["commit", "-m", "old pr head"]);
+  await runGit(source, ["remote", "add", "origin", origin]);
+  await runGit(source, ["push", "origin", "HEAD:refs/pull/713/head"]);
+
+  await fs.mkdir(review);
+  await runGit(review, ["init"]);
+  await runGit(review, ["remote", "add", "origin", origin]);
+  await runGit(review, ["fetch", "origin", "refs/pull/713/head:refs/remotes/origin/pull/713/head"]);
+  await runGit(review, ["checkout", "--detach", "refs/remotes/origin/pull/713/head"]);
+  const staleReviewedSha = await gitOutput(review, ["rev-parse", "HEAD"]);
+
+  await fs.writeFile(path.join(source, "tracked.txt"), "new\n");
+  await runGit(source, ["add", "tracked.txt"]);
+  await runGit(source, ["commit", "-m", "new pr head"]);
+  await runGit(source, ["push", "--force", "origin", "HEAD:refs/pull/713/head"]);
+  const livePrHeadSha = await gitOutput(source, ["rev-parse", "HEAD"]);
+
+  return {
+    root,
+    review,
+    staleReviewedSha,
+    livePrHeadSha,
+  };
 }
 
 async function expectWorkspaceValidationFailure(
@@ -695,9 +741,40 @@ describe("assertPushCapabilityCheckoutValid", () => {
           identifier: "PAP-1",
         },
         cwd,
-      })).resolves.toBeUndefined();
+      })).resolves.toBeNull();
     } finally {
       await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("fails before review findings when the reviewed checkout is behind the refreshed PR head", async () => {
+    const fixture = await createStaleGithubPrReviewCheckout();
+    try {
+      await expect(assertPushCapabilityCheckoutValid({
+        enabled: true,
+        issue: {
+          id: "issue-1",
+          identifier: "PAP-1",
+          title: "Review PR #713",
+          description: "Review https://github.com/example/repo/pull/713 before approval.",
+        },
+        cwd: fixture.review,
+      })).rejects.toMatchObject({
+        code: "workspace_validation_failed",
+        message: expect.stringContaining("Refusing to dispatch stale review findings"),
+        resultJson: {
+          workspaceValidation: expect.objectContaining({
+            reason: "stale_pr_head_checkout",
+            issueId: "issue-1",
+            prNumber: 713,
+            refreshedRef: "refs/remotes/origin/pull/713/head",
+            livePrHeadSha: fixture.livePrHeadSha,
+            reviewedSha: fixture.staleReviewedSha,
+          }),
+        },
+      });
+    } finally {
+      await fs.rm(fixture.root, { recursive: true, force: true });
     }
   });
 });

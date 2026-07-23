@@ -1494,6 +1494,123 @@ async function hasGitPushRemote(cwd: string | null | undefined) {
   return false;
 }
 
+type GithubPrHeadReviewPreflight = {
+  prNumber: number;
+  livePrHeadSha: string;
+  reviewedSha: string;
+  refreshedRef: string;
+};
+
+const GITHUB_PULL_URL_RE = /\bgithub\.com\/[^\s/]+\/[^\s/]+\/pull\/(\d+)\b/i;
+const GITHUB_PULL_PATH_RE = /\bpull\/(\d+)\b/i;
+const GITHUB_PR_NUMBER_RE = /\bPR\s*#?(\d+)\b/i;
+
+function extractGithubPrNumberFromIssueText(issue: {
+  title?: string | null;
+  description?: string | null;
+} | null | undefined): number | null {
+  const text = `${issue?.title ?? ""}\n${issue?.description ?? ""}`;
+  for (const pattern of [GITHUB_PULL_URL_RE, GITHUB_PULL_PATH_RE, GITHUB_PR_NUMBER_RE]) {
+    const match = pattern.exec(text);
+    const parsed = match?.[1] ? Number.parseInt(match[1], 10) : NaN;
+    if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+async function resolveGitCommitSha(cwd: string, ref: string) {
+  return execFile("git", ["rev-parse", "--verify", `${ref}^{commit}`], { cwd })
+    .then((result) => readNonEmptyString(result.stdout)?.trim() ?? null)
+    .catch(() => null);
+}
+
+async function refreshGithubPrHeadForReview(input: {
+  cwd: string;
+  issue: {
+    id: string;
+    identifier: string | null;
+    title?: string | null;
+    description?: string | null;
+  };
+}): Promise<GithubPrHeadReviewPreflight | null> {
+  const prNumber = extractGithubPrNumberFromIssueText(input.issue);
+  if (!prNumber) return null;
+
+  const refreshedRef = `refs/remotes/origin/pull/${prNumber}/head`;
+  const refspec = `+refs/pull/${prNumber}/head:${refreshedRef}`;
+  const issueLabel = input.issue.identifier ?? input.issue.id;
+  const fetchResult = await execFile("git", ["fetch", "--force", "origin", refspec], { cwd: input.cwd })
+    .then(() => ({ ok: true as const, message: null as string | null }))
+    .catch((error) => ({
+      ok: false as const,
+      message: error instanceof Error ? error.message : String(error),
+    }));
+  if (!fetchResult.ok) {
+    throw new WorkspaceValidationFailure(
+      `Issue ${issueLabel} names GitHub PR #${prNumber}, but Paperclip could not refresh refs/pull/${prNumber}/head before review. Refusing to dispatch review findings from an unverified checkout.`,
+      {
+        workspaceValidation: {
+          reason: "pr_head_fetch_failed",
+          issueId: input.issue.id,
+          issueIdentifier: input.issue.identifier,
+          executionWorkspaceCwd: input.cwd,
+          prNumber,
+          refreshedRef,
+          fetchRef: `refs/pull/${prNumber}/head`,
+          errorMessage: fetchResult.message,
+        },
+      },
+    );
+  }
+
+  const [livePrHeadSha, reviewedSha] = await Promise.all([
+    resolveGitCommitSha(input.cwd, refreshedRef),
+    resolveGitCommitSha(input.cwd, "HEAD"),
+  ]);
+  if (!livePrHeadSha || !reviewedSha) {
+    throw new WorkspaceValidationFailure(
+      `Issue ${issueLabel} names GitHub PR #${prNumber}, but Paperclip could not resolve both the live PR head and reviewed checkout SHAs before review.`,
+      {
+        workspaceValidation: {
+          reason: "pr_head_sha_unresolved",
+          issueId: input.issue.id,
+          issueIdentifier: input.issue.identifier,
+          executionWorkspaceCwd: input.cwd,
+          prNumber,
+          refreshedRef,
+          livePrHeadSha,
+          reviewedSha,
+        },
+      },
+    );
+  }
+
+  if (livePrHeadSha !== reviewedSha) {
+    throw new WorkspaceValidationFailure(
+      `Issue ${issueLabel} names GitHub PR #${prNumber}, but the reviewed checkout SHA ${reviewedSha} does not match live PR head ${livePrHeadSha}. Refusing to dispatch stale review findings.`,
+      {
+        workspaceValidation: {
+          reason: "stale_pr_head_checkout",
+          issueId: input.issue.id,
+          issueIdentifier: input.issue.identifier,
+          executionWorkspaceCwd: input.cwd,
+          prNumber,
+          refreshedRef,
+          livePrHeadSha,
+          reviewedSha,
+        },
+      },
+    );
+  }
+
+  return {
+    prNumber,
+    livePrHeadSha,
+    reviewedSha,
+    refreshedRef,
+  };
+}
+
 export async function assertGitWorktreeBaseWorkspaceReady(input: {
   requestedExecutionWorkspaceMode: ReturnType<typeof resolveExecutionWorkspaceMode>;
   config: Record<string, unknown>;
@@ -1564,25 +1681,29 @@ export async function assertPushCapabilityCheckoutValid(input: {
   issue: {
     id: string;
     identifier: string | null;
+    title?: string | null;
+    description?: string | null;
   } | null;
   cwd: string | null | undefined;
-}) {
-  if (!input.enabled || !input.issue) return;
+}): Promise<GithubPrHeadReviewPreflight | null> {
+  if (!input.enabled || !input.issue) return null;
   const cwd = readNonEmptyString(input.cwd);
-  if (!cwd) return;
-  if (await hasGitPushRemote(cwd)) return;
-  throw new WorkspaceValidationFailure(
-    `Issue ${input.issue.identifier ?? input.issue.id} requested the GitHub PR workflow, but checkout "${cwd}" has no configured push remote. Bind the run to a writable repo checkout before dispatching the agent.`,
-    {
-      workspaceValidation: {
-        reason: "missing_git_push_remote",
-        issueId: input.issue.id,
-        issueIdentifier: input.issue.identifier,
-        executionWorkspaceCwd: cwd,
-        requiredEnvKeys: [...PUSH_CAPABILITY_ENV_KEYS],
+  if (!cwd) return null;
+  if (!await hasGitPushRemote(cwd)) {
+    throw new WorkspaceValidationFailure(
+      `Issue ${input.issue.identifier ?? input.issue.id} requested the GitHub PR workflow, but checkout "${cwd}" has no configured push remote. Bind the run to a writable repo checkout before dispatching the agent.`,
+      {
+        workspaceValidation: {
+          reason: "missing_git_push_remote",
+          issueId: input.issue.id,
+          issueIdentifier: input.issue.identifier,
+          executionWorkspaceCwd: cwd,
+          requiredEnvKeys: [...PUSH_CAPABILITY_ENV_KEYS],
+        },
       },
-    },
-  );
+    );
+  }
+  return await refreshGithubPrHeadForReview({ cwd, issue: input.issue });
 }
 
 export async function assertGitSensitiveAdapterWorkspaceValid(input: {
@@ -12987,16 +13108,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         environmentDriver: selectedEnvironment.driver,
         leaseMetadata: activeEnvironmentLease.lease.metadata,
       });
-      await assertPushCapabilityCheckoutValid({
+      const prHeadReviewPreflight = await assertPushCapabilityCheckoutValid({
         enabled: pushCapabilityPreflightRequired && executionTarget?.kind === "local",
         issue: issueRef
           ? {
               id: issueRef.id,
               identifier: issueRef.identifier,
+              title: issueRef.title,
+              description: issueRef.description,
             }
           : null,
         cwd: executionWorkspace.cwd,
       });
+      if (prHeadReviewPreflight) {
+        await onLog(
+          "stdout",
+          `[paperclip] GitHub PR review preflight: PR #${prHeadReviewPreflight.prNumber} live head ${prHeadReviewPreflight.livePrHeadSha} reviewed checkout ${prHeadReviewPreflight.reviewedSha} from ${prHeadReviewPreflight.refreshedRef}.\n`,
+        );
+      }
       const adapterEnv = Object.fromEntries(
         Object.entries(parseObject(resolvedConfig.env)).filter(
           (entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string",
