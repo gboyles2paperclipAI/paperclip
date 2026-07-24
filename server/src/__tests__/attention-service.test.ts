@@ -540,14 +540,14 @@ describeEmbeddedPostgres("attention service", () => {
 
     const feed = await attentionService(db).list(companyId, { userId: "board-user" });
 
-    expect(feed.totalCount).toBe(11);
+    expect(feed.totalCount).toBe(10);
     expect(feed.countsBySourceKind).toMatchObject({
       approval: 1,
       issue_thread_interaction: 1,
       join_request: 1,
       recovery_action: 1,
       productivity_review: 1,
-      blocker_attention: 1,
+      blocker_attention: 0,
       review: 1,
       failed_run: 1,
       budget_alert: 2,
@@ -559,7 +559,6 @@ describeEmbeddedPostgres("attention service", () => {
       "join_request",
       "recovery_action",
       "productivity_review",
-      "blocker_attention",
       "review",
       "failed_run",
       "budget_alert",
@@ -589,10 +588,6 @@ describeEmbeddedPostgres("attention service", () => {
       kind: "questions",
       questionCount: 0,
     });
-    expect(feed.items.find((item) => item.sourceKind === "blocker_attention")?.detail).toMatchObject({
-      kind: "blocker",
-      blockingIssue: { identifier: "ATN-5", title: "Stalled review blocker" },
-    });
     expect(feed.items.find((item) => item.sourceKind === "failed_run")?.detail).toMatchObject({
       kind: "failed_run",
       agentName: "Worker",
@@ -606,6 +601,110 @@ describeEmbeddedPostgres("attention service", () => {
       agentName: "Broken Agent",
       failureReasonExcerpt: "adapter config missing",
     });
+  });
+
+  it("hides pending interactions on terminal issues", async () => {
+    const { companyId, workerId } = await seedCompany("ATI");
+    const activeIssueId = await insertIssue({
+      companyId,
+      identifier: "ATI-1",
+      title: "Active decision",
+      status: "in_progress",
+      assigneeAgentId: workerId,
+    });
+    const doneIssueId = await insertIssue({
+      companyId,
+      identifier: "ATI-2",
+      title: "Completed decision",
+      status: "done",
+      assigneeAgentId: workerId,
+    });
+    const cancelledIssueId = await insertIssue({
+      companyId,
+      identifier: "ATI-3",
+      title: "Cancelled decision",
+      status: "cancelled",
+      assigneeAgentId: workerId,
+    });
+
+    await db.insert(issueThreadInteractions).values(
+      [activeIssueId, doneIssueId, cancelledIssueId].map((issueId, index) => ({
+        companyId,
+        issueId,
+        kind: "request_confirmation" as const,
+        status: "pending" as const,
+        continuationPolicy: "wake_assignee" as const,
+        title: `Decision ${index + 1}`,
+        payload: { version: 1 as const, prompt: "Continue?" },
+      })),
+    );
+
+    const feed = await attentionService(db).list(companyId, { userId: "board-user" });
+    const interactions = feed.items.filter((item) => item.sourceKind === "issue_thread_interaction");
+
+    expect(interactions).toHaveLength(1);
+    expect(interactions[0]?.relatedIssue?.id).toBe(activeIssueId);
+  });
+
+  it("shows one approval card when an in-review issue links the same pending approval", async () => {
+    const { companyId } = await seedCompany("ATA");
+    const issueId = await insertIssue({
+      companyId,
+      identifier: "ATA-1",
+      title: "Governed change",
+      status: "in_review",
+      assigneeUserId: "board-user",
+      executionState: pendingUserExecutionState(),
+    });
+    const approvalId = randomUUID();
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "request_board_approval",
+      status: "pending",
+      payload: { title: "Approve governed change" },
+    });
+    await db.insert(issueApprovals).values({ companyId, issueId, approvalId });
+
+    const feed = await attentionService(db).list(companyId, { userId: "board-user" });
+
+    expect(feed.items.filter((item) => item.sourceKind === "approval")).toHaveLength(1);
+    expect(feed.items.filter((item) => item.sourceKind === "review")).toHaveLength(0);
+  });
+
+  it("does not escalate stalled blockers that already have an agent owner", async () => {
+    const { companyId, workerId } = await seedCompany("ATB");
+    const stalledAt = new Date("2020-01-01T00:00:00.000Z");
+    const blockedIssueId = await insertIssue({
+      companyId,
+      identifier: "ATB-1",
+      title: "Blocked delivery",
+      status: "blocked",
+      assigneeAgentId: workerId,
+      createdAt: stalledAt,
+      updatedAt: stalledAt,
+    });
+    const blockingIssueId = await insertIssue({
+      companyId,
+      identifier: "ATB-2",
+      title: "Agent-owned prerequisite",
+      status: "in_review",
+      assigneeAgentId: workerId,
+      createdAt: stalledAt,
+      updatedAt: stalledAt,
+    });
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockingIssueId,
+      relatedIssueId: blockedIssueId,
+      type: "blocks",
+      createdAt: stalledAt,
+      updatedAt: stalledAt,
+    });
+
+    const feed = await attentionService(db).list(companyId, { userId: "board-user" });
+
+    expect(feed.items.filter((item) => item.sourceKind === "blocker_attention")).toHaveLength(0);
   });
 
   it("suppresses failed-run attention after a newer run for the same issue", async () => {
