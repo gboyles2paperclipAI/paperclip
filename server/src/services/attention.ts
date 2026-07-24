@@ -75,7 +75,7 @@ const SOURCE_RANK: Record<AttentionSourceKind, number> = {
 const PENDING_INTERACTION_STATUSES = ["pending"] as const;
 const OPEN_RECOVERY_STATUSES = ["active", "escalated"] as const;
 const HUMAN_RECOVERY_OWNER_TYPES = ["user", "board"] as const;
-const PRODUCTIVITY_REVIEW_TERMINAL_STATUSES = ["done", "cancelled"] as const;
+const ISSUE_TERMINAL_STATUSES = ["done", "cancelled"] as const;
 const FAILED_RUN_STATUSES = ["failed", "timed_out"] as const;
 const DETAIL_EXCERPT_LENGTH = 160;
 const DETAIL_IMAGE_LIMIT = 3;
@@ -112,6 +112,8 @@ type BlockingIssueSummary = {
   id: string | null;
   identifier: string | null;
   title: string | null;
+  assigneeAgentId: string | null;
+  assigneeUserId: string | null;
 };
 
 type AttentionListOptions = {
@@ -553,6 +555,8 @@ async function blockingIssueMap(db: Db, companyId: string, blockedIssueIds: Arra
       id: issues.id,
       identifier: issues.identifier,
       title: issues.title,
+      assigneeAgentId: issues.assigneeAgentId,
+      assigneeUserId: issues.assigneeUserId,
     })
     .from(issueRelations)
     .innerJoin(issues, eq(issueRelations.issueId, issues.id))
@@ -567,7 +571,13 @@ async function blockingIssueMap(db: Db, companyId: string, blockedIssueIds: Arra
   const map = new Map<string, BlockingIssueSummary>();
   for (const row of rows) {
     if (!map.has(row.blockedIssueId)) {
-      map.set(row.blockedIssueId, { id: row.id, identifier: row.identifier, title: row.title });
+      map.set(row.blockedIssueId, {
+        id: row.id,
+        identifier: row.identifier,
+        title: row.title,
+        assigneeAgentId: row.assigneeAgentId,
+        assigneeUserId: row.assigneeUserId,
+      });
     }
   }
   return map;
@@ -671,6 +681,9 @@ export function attentionService(db: Db) {
 
       for (const interaction of interactionRows) {
         const issue = interactionIssueMap.get(interaction.issueId) ?? null;
+        if (issue && ISSUE_TERMINAL_STATUSES.includes(issue.status as (typeof ISSUE_TERMINAL_STATUSES)[number])) {
+          continue;
+        }
         const payload = readRecord(interaction.payload);
         const detail = interactionDetail({
           kind: interaction.kind,
@@ -859,7 +872,7 @@ export function attentionService(db: Db) {
           eq(issues.originKind, PRODUCTIVITY_REVIEW_ORIGIN_KIND),
           isNull(issues.hiddenAt),
           isNotNull(issues.assigneeUserId),
-          notInArray(issues.status, [...PRODUCTIVITY_REVIEW_TERMINAL_STATUSES]),
+          notInArray(issues.status, [...ISSUE_TERMINAL_STATUSES]),
         ))
         .orderBy(desc(issues.updatedAt), desc(issues.id));
       const productivitySourceMap = await issueSummaryMap(db, companyId, productivityRows.map((row) => row.originId));
@@ -905,7 +918,14 @@ export function attentionService(db: Db) {
         const issueSummary = blockedIssueSummaries.get(issue.id) ?? null;
         const summarizedIssue = issueSummary ?? issue;
         const sample = blockerAttention.sampleStalledBlockerIdentifier ?? blockerAttention.sampleBlockerIdentifier ?? issue.identifier ?? issue.id;
-        const blockingIssue = blockingIssues.get(issue.id) ?? { id: null, identifier: sample, title: null };
+        const blockingIssue = blockingIssues.get(issue.id) ?? {
+          id: null,
+          identifier: sample,
+          title: null,
+          assigneeAgentId: null,
+          assigneeUserId: null,
+        };
+        if (blockingIssue.assigneeAgentId && !blockingIssue.assigneeUserId) continue;
         const dedupKey = `blocker:${issue.id}:${sample}`;
         add(createItem({
           companyId,
@@ -970,7 +990,8 @@ export function attentionService(db: Db) {
         const currentParticipant = state?.status === "pending" ? state.currentParticipant : null;
         const hasHumanParticipant = currentParticipant?.type === "user";
         const pendingApprovalId = pendingApprovalByIssueId.get(review.id) ?? null;
-        if (!hasHumanParticipant && !review.assigneeUserId && !pendingApprovalId) continue;
+        if (pendingApprovalId) continue;
+        if (!hasHumanParticipant && !review.assigneeUserId) continue;
         const issue = reviewIssueMap.get(review.id);
         if (!issue) continue;
         const dedupKey = `review:${review.id}`;
@@ -978,17 +999,15 @@ export function attentionService(db: Db) {
           companyId,
           sourceKind: "review",
           subject: issueSubject(prefix, issue),
-          whyNow: pendingApprovalId
-            ? "Issue is in review with a linked pending approval."
-            : hasHumanParticipant
-              ? "Issue is in review and the current execution participant is a user."
-              : "Issue is in review and assigned to a user.",
+          whyNow: hasHumanParticipant
+            ? "Issue is in review and the current execution participant is a user."
+            : "Issue is in review and assigned to a user.",
           decisionVerbs: decisionVerbs(
             { id: "approve", label: "Approve", description: "Approve the review and advance the issue." },
             { id: "request_changes", label: "Request changes", description: "Return the issue to the assignee with changes requested." },
           ),
           inlineResolvable: false,
-          entryRule: "issues.status = 'in_review' and human reviewer, user assignee, or linked pending approval exists.",
+          entryRule: "issues.status = 'in_review' and a human reviewer or user assignee exists without a linked pending approval.",
           exitRule: "Issue leaves in_review or the human review path resolves.",
           dedupKey,
           severity: "medium",
