@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
 import { agents as agentsTable, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable } from "@paperclipai/db";
-import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, not, notInArray, sql } from "drizzle-orm";
 import {
   agentSkillSyncSchema,
   agentMineInboxQuerySchema,
@@ -917,6 +917,97 @@ export function agentRoutes(
     });
     if (decision.allowed) return;
     throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
+  }
+
+  async function boardOperationsActor(req: Request, companyId: string) {
+    if (req.actor.type !== "agent" || !req.actor.agentId) return null;
+    const actorAgent = await svc.getById(req.actor.agentId);
+    if (!actorAgent || actorAgent.companyId !== companyId) return null;
+    return actorAgent.permissions?.boardOperationsAuthority === true ? actorAgent : null;
+  }
+
+  async function canApplyScopedBoardOperationsReparent(
+    req: Request,
+    targetAgent: { id: string; companyId: string; reportsTo: string | null; status: string },
+    patchData: Record<string, unknown>,
+  ) {
+    const patchKeys = Object.keys(patchData);
+    if (patchKeys.length !== 1 || patchKeys[0] !== "reportsTo") return false;
+    const actorAgent = await boardOperationsActor(req, targetAgent.companyId);
+    if (!actorAgent) return false;
+    if (actorAgent.id === targetAgent.id) {
+      throw forbidden("Board-operations authority cannot reparent its own agent record");
+    }
+    if (!actorAgent.reportsTo || targetAgent.reportsTo !== actorAgent.reportsTo) {
+      throw forbidden("Board-operations authority can only reparent a peer with the same manager");
+    }
+    if (!["active", "idle", "error", "paused"].includes(targetAgent.status)) {
+      throw conflict(`Cannot reparent an agent while its status is ${targetAgent.status}`);
+    }
+
+    const proposedManagerId = patchData.reportsTo;
+    if (typeof proposedManagerId !== "string") {
+      throw forbidden("Board-operations authority cannot clear a peer's manager");
+    }
+    const proposedManager = await svc.getById(proposedManagerId);
+    if (
+      !proposedManager
+      || proposedManager.companyId !== targetAgent.companyId
+      || proposedManager.reportsTo !== actorAgent.reportsTo
+      || !["active", "idle", "error", "paused"].includes(proposedManager.status)
+    ) {
+      throw forbidden("Board-operations authority can only select an operational manager from the same peer group");
+    }
+    await assertBoardOperationsTargetHasNoWork(targetAgent, "reparent");
+    return true;
+  }
+
+  async function assertBoardOperationsTargetHasNoWork(
+    targetAgent: { id: string; companyId: string },
+    operation: "pause" | "reparent",
+  ) {
+    const [openIssue] = await db
+      .select({ id: issuesTable.id })
+      .from(issuesTable)
+      .where(and(
+        eq(issuesTable.companyId, targetAgent.companyId),
+        eq(issuesTable.assigneeAgentId, targetAgent.id),
+        notInArray(issuesTable.status, ["done", "cancelled"]),
+      ))
+      .limit(1);
+    if (openIssue) {
+      throw conflict(`Cannot ${operation} an agent with open assigned issues`);
+    }
+
+    const [activeRun] = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.companyId, targetAgent.companyId),
+        eq(heartbeatRuns.agentId, targetAgent.id),
+        inArray(heartbeatRuns.status, ["queued", "running"]),
+      ))
+      .limit(1);
+    if (activeRun) {
+      throw conflict(`Cannot ${operation} an agent with a queued or running execution`);
+    }
+  }
+
+  async function assertBoardOperationsPauseIsSafe(
+    req: Request,
+    targetAgent: { id: string; companyId: string; status: string },
+  ) {
+    const actorAgent = await boardOperationsActor(req, targetAgent.companyId);
+    if (!actorAgent) {
+      throw forbidden("Agent does not have board-operations authority");
+    }
+    if (actorAgent.id === targetAgent.id) {
+      throw forbidden("Board-operations authority cannot pause itself");
+    }
+    if (!["active", "idle", "error", "paused"].includes(targetAgent.status)) {
+      throw conflict(`Cannot pause an agent while its status is ${targetAgent.status}`);
+    }
+    await assertBoardOperationsTargetHasNoWork(targetAgent, "pause");
   }
 
   async function assertCanReadAgent(req: Request, targetAgent: { id: string; companyId: string }) {
@@ -2791,6 +2882,7 @@ export function agentRoutes(
         canCreateSkills: agent.permissions?.canCreateSkills ?? true,
         canAssignTasks: effectiveCanAssignTasks,
         trustPreset: agent.permissions?.trustPreset ?? "standard",
+        boardOperationsAuthority: agent.permissions?.boardOperationsAuthority ?? false,
       },
     });
 
@@ -3165,7 +3257,7 @@ export function agentRoutes(
     );
     if (profileOnlyChange) {
       await assertCanApplyAgentProfileChange(req, existing);
-    } else {
+    } else if (!(await canApplyScopedBoardOperationsReparent(req, existing, patchData))) {
       await assertCanUpdateAgent(req, existing);
     }
 
@@ -3198,10 +3290,15 @@ export function agentRoutes(
   });
 
   router.post("/agents/:id/pause", async (req, res) => {
-    assertBoard(req);
     const id = req.params.id as string;
-    if (!(await getAccessibleAgent(req, res, id))) {
+    const existing = await getAccessibleAgent(req, res, id);
+    if (!existing) {
       return;
+    }
+    if (req.actor.type === "board") {
+      assertBoard(req);
+    } else {
+      await assertBoardOperationsPauseIsSafe(req, existing);
     }
     const agent = await svc.pause(id);
     if (!agent) {
@@ -3211,10 +3308,13 @@ export function agentRoutes(
 
     await heartbeat.cancelActiveForAgent(id);
 
+    const actor = getActorInfo(req);
     await logActivity(db, {
       companyId: agent.companyId,
-      actorType: "user",
-      actorId: req.actor.userId ?? "board",
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
       action: "agent.paused",
       entityType: "agent",
       entityId: agent.id,

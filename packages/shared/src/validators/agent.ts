@@ -17,6 +17,7 @@ export const agentPermissionsSchema = z.object({
   authorizationPolicy: trustAuthorizationPolicySchema.optional(),
   triageAuthority: z.boolean().optional().default(false),
   triageAuthorityFields: z.array(z.string()).optional(),
+  boardOperationsAuthority: z.boolean().optional().default(false),
 }).catchall(z.unknown());
 
 export const agentInstructionsBundleModeSchema = z.enum(["managed", "external"]);
@@ -251,6 +252,7 @@ export const updateAgentPermissionsSchema = z.object({
   authorizationPolicy: trustAuthorizationPolicySchema.optional(),
   triageAuthority: z.boolean().optional(),
   triageAuthorityFields: z.array(z.string()).optional(),
+  boardOperationsAuthority: z.boolean().optional(),
 });
 
 export type UpdateAgentPermissions = z.infer<typeof updateAgentPermissionsSchema>;
