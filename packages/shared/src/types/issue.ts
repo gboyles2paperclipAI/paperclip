@@ -992,7 +992,13 @@ export interface SuggestedTaskDraft {
   hiddenInPreview?: boolean;
 }
 
-export interface SuggestTasksPayload {
+export interface InteractionLifecyclePayload {
+  expiresAt?: string;
+  escalated?: boolean;
+  originalInteractionId?: string | null;
+}
+
+export interface SuggestTasksPayload extends InteractionLifecyclePayload {
   version: 1;
   defaultParentId?: string | null;
   tasks: SuggestedTaskDraft[];
@@ -1029,7 +1035,7 @@ export interface AskUserQuestionsQuestion {
   options: AskUserQuestionsQuestionOption[];
 }
 
-export interface AskUserQuestionsPayload {
+export interface AskUserQuestionsPayload extends InteractionLifecyclePayload {
   version: 1;
   title?: string | null;
   submitLabel?: string | null;
@@ -1048,7 +1054,7 @@ export interface AskUserQuestionsResult {
   answers: AskUserQuestionsAnswer[];
   cancelled?: true;
   cancellationReason?: string | null;
-  expirationReason?: "superseded_by_comment";
+  expirationReason?: "superseded_by_comment" | "timeout";
   commentId?: string | null;
   summaryMarkdown?: string | null;
 }
@@ -1114,7 +1120,7 @@ export interface RequestConfirmationToolActionResult {
   updatedAt: string;
 }
 
-export interface RequestConfirmationPayload {
+export interface RequestConfirmationPayload extends InteractionLifecyclePayload {
   version: 1;
   prompt: string;
   acceptLabel?: string | null;
@@ -1135,7 +1141,7 @@ export interface RequestCheckboxConfirmationOption {
   description?: string | null;
 }
 
-export interface RequestCheckboxConfirmationPayload {
+export interface RequestCheckboxConfirmationPayload extends InteractionLifecyclePayload {
   version: 1;
   prompt: string;
   detailsMarkdown?: string | null;
@@ -1164,7 +1170,7 @@ export interface RequestItemVerdictsItem {
   attachmentId?: string | null;
 }
 
-export interface RequestItemVerdictsPayload {
+export interface RequestItemVerdictsPayload extends InteractionLifecyclePayload {
   version: 1;
   prompt: string;
   detailsMarkdown?: string | null;
@@ -1179,7 +1185,7 @@ export interface RequestItemVerdictsPayload {
 
 export interface RequestConfirmationResult {
   version: 1;
-  outcome: "accepted" | "rejected" | "superseded_by_comment" | "stale_target";
+  outcome: "accepted" | "rejected" | "superseded_by_comment" | "stale_target" | "timeout";
   reason?: string | null;
   commentId?: string | null;
   staleTarget?: RequestConfirmationTarget | null;
@@ -1211,7 +1217,7 @@ export interface RequestItemVerdictsResultItem {
 
 export interface RequestItemVerdictsResult {
   version: 1;
-  outcome: "resolved" | "superseded_by_comment" | "stale_target" | "cancelled";
+  outcome: "resolved" | "superseded_by_comment" | "stale_target" | "cancelled" | "timeout";
   complete: boolean;
   items: RequestItemVerdictsResultItem[];
   commentId?: string | null;

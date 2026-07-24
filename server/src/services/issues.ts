@@ -596,12 +596,6 @@ type IssueReadStat = {
   issueId: string;
   myLastReadAt: Date | null;
 };
-type IssueLastActivityStat = {
-  issueId: string;
-  latestCommentAt: Date | null;
-  latestLogAt: Date | null;
-};
-
 function serializeAcceptedPlanDecomposition(
   decomposition: IssuePlanDecompositionRow,
 ): AcceptedPlanDecomposition {
@@ -1386,52 +1380,6 @@ function issueLastActivityAtExpr(companyId: string, userId: string) {
   `;
 }
 
-const ISSUE_LOCAL_INBOX_ACTIVITY_ACTIONS = [
-  "issue.read_marked",
-  "issue.read_unmarked",
-  "issue.inbox_archived",
-  "issue.inbox_unarchived",
-] as const;
-
-function issueLatestCommentAtExpr(companyId: string) {
-  return sql<Date | null>`
-    (
-      SELECT MAX(${issueComments.createdAt})
-      FROM ${issueComments}
-      WHERE ${issueComments.issueId} = ${issues.id}
-        AND ${issueComments.companyId} = ${companyId}
-    )
-  `;
-}
-
-function issueLatestLogAtExpr(companyId: string) {
-  return sql<Date | null>`
-    (
-      SELECT MAX(${activityLog.createdAt})
-      FROM ${activityLog}
-      WHERE ${activityLog.companyId} = ${companyId}
-        AND ${activityLog.entityType} = 'issue'
-        AND ${activityLog.entityId} = ${issues.id}::text
-        AND ${activityLog.action} NOT IN (${sql.join(
-          ISSUE_LOCAL_INBOX_ACTIVITY_ACTIONS.map((action) => sql`${action}`),
-          sql`, `,
-        )})
-    )
-  `;
-}
-
-function issueCanonicalLastActivityAtExpr(companyId: string) {
-  const latestCommentAt = issueLatestCommentAtExpr(companyId);
-  const latestLogAt = issueLatestLogAtExpr(companyId);
-  return sql<Date>`
-    GREATEST(
-      ${issues.updatedAt},
-      COALESCE(${latestCommentAt}, to_timestamp(0)),
-      COALESCE(${latestLogAt}, to_timestamp(0))
-    )
-  `;
-}
-
 function unreadForUserCondition(companyId: string, userId: string) {
   const touchedCondition = touchedByUserCondition(companyId, userId);
   const myLastTouchAt = myLastTouchAtExpr(companyId, userId);
@@ -1531,21 +1479,7 @@ export function deriveIssueUserContext(
   };
 }
 
-function latestIssueActivityAt(...values: Array<Date | string | null | undefined>): Date | null {
-  const normalized = values
-    .map((value) => {
-      if (!value) return null;
-      if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
-      const parsed = new Date(value);
-      return Number.isNaN(parsed.getTime()) ? null : parsed;
-    })
-    .filter((value): value is Date => value instanceof Date)
-    .sort((a, b) => b.getTime() - a.getTime());
-  return normalized[0] ?? null;
-}
-
 function issueListOrderBy(
-  companyId: string,
   {
     hasSearch,
     priorityOrder,
@@ -1560,7 +1494,7 @@ function issueListOrderBy(
     sortDir?: IssueFilters["sortDir"];
   },
 ) {
-  const canonicalLastActivityAt = issueCanonicalLastActivityAtExpr(companyId);
+  const canonicalLastActivityAt = issues.lastActivityAt;
   if (sortField === "updated") {
     const activityOrder = sortDir === "asc"
       ? asc(canonicalLastActivityAt)
@@ -2545,6 +2479,7 @@ const issueListSelect = {
   hiddenAt: issues.hiddenAt,
   createdAt: issues.createdAt,
   updatedAt: issues.updatedAt,
+  lastActivityAt: issues.lastActivityAt,
 };
 
 function withActiveRuns(
@@ -2617,69 +2552,6 @@ async function userReadStatsForIssues(
     stats.push(...rows);
   }
   return stats;
-}
-
-async function lastActivityStatsForIssues(
-  dbOrTx: any,
-  companyId: string,
-  issueIds: string[],
-): Promise<IssueLastActivityStat[]> {
-  const byIssueId = new Map<string, IssueLastActivityStat>();
-  for (const issueIdChunk of chunkList(issueIds, ISSUE_LIST_RELATED_QUERY_CHUNK_SIZE)) {
-    const [commentRows, logRows] = await Promise.all([
-      dbOrTx
-        .select({
-          issueId: issueComments.issueId,
-          latestCommentAt: sql<Date | null>`MAX(${issueComments.createdAt})`,
-        })
-        .from(issueComments)
-        .where(
-          and(
-            eq(issueComments.companyId, companyId),
-            inArray(issueComments.issueId, issueIdChunk),
-          ),
-        )
-        .groupBy(issueComments.issueId),
-      dbOrTx
-        .select({
-          issueId: activityLog.entityId,
-          latestLogAt: sql<Date | null>`MAX(${activityLog.createdAt})`,
-        })
-        .from(activityLog)
-        .where(
-          and(
-            eq(activityLog.companyId, companyId),
-            eq(activityLog.entityType, "issue"),
-            inArray(activityLog.entityId, issueIdChunk),
-            sql`${activityLog.action} NOT IN (${sql.join(
-              ISSUE_LOCAL_INBOX_ACTIVITY_ACTIONS.map((action) => sql`${action}`),
-              sql`, `,
-            )})`,
-          ),
-        )
-        .groupBy(activityLog.entityId),
-    ]);
-
-    for (const row of commentRows) {
-      byIssueId.set(row.issueId, {
-        issueId: row.issueId,
-        latestCommentAt: row.latestCommentAt,
-        latestLogAt: null,
-      });
-    }
-    for (const row of logRows) {
-      const existing = byIssueId.get(row.issueId);
-      if (existing) existing.latestLogAt = row.latestLogAt;
-      else {
-        byIssueId.set(row.issueId, {
-          issueId: row.issueId,
-          latestCommentAt: null,
-          latestLogAt: row.latestLogAt,
-        });
-      }
-    }
-  }
-  return [...byIssueId.values()];
 }
 
 async function blockedByMapForIssues(
@@ -3563,7 +3435,7 @@ async function listBlockedInboxIssues(
     .select(issueListSelect)
     .from(issues)
     .where(and(...conditions))
-    .orderBy(desc(issueCanonicalLastActivityAtExpr(companyId)), desc(issues.updatedAt), desc(issues.id)))
+    .orderBy(desc(issues.lastActivityAt), desc(issues.updatedAt), desc(issues.id)))
     .map((row: any) => ({
       ...row,
       description: decodeDatabaseTextPreview(row.description, ISSUE_LIST_DESCRIPTION_MAX_CHARS),
@@ -3577,7 +3449,6 @@ async function listBlockedInboxIssues(
   const [
     statsRows,
     readRows,
-    lastActivityRows,
     blockedByMap,
     blockerAttentionByIssueId,
     productivityReviewByIssueId,
@@ -3586,7 +3457,6 @@ async function listBlockedInboxIssues(
   ] = await Promise.all([
     contextUserId ? userCommentStatsForIssues(dbOrTx, companyId, contextUserId, issueIds) : Promise.resolve([]),
     contextUserId ? userReadStatsForIssues(dbOrTx, companyId, contextUserId, issueIds) : Promise.resolve([]),
-    lastActivityStatsForIssues(dbOrTx, companyId, issueIds),
     blockedByMapForIssues(dbOrTx, companyId, issueIds),
     listIssueBlockerAttentionMap(dbOrTx, companyId, withRuns),
     listIssueProductivityReviewMap(dbOrTx, companyId, issueIds),
@@ -3616,7 +3486,6 @@ async function listBlockedInboxIssues(
   }
   const statsByIssueId = new Map(statsRows.map((row) => [row.issueId, row]));
   const readByIssueId = new Map(readRows.map((row) => [row.issueId, row.myLastReadAt]));
-  const lastActivityByIssueId = new Map(lastActivityRows.map((row) => [row.issueId, row]));
 
   const enriched = withRuns.flatMap((row) => {
     const blockedInboxAttention = blockedInboxAttentionByIssueId.get(row.id);
@@ -3627,17 +3496,11 @@ async function listBlockedInboxIssues(
       && !commentSearchMatchIssueIds.has(row.id)
     ) return [];
 
-    const activity = lastActivityByIssueId.get(row.id);
-    const lastActivityAt = latestIssueActivityAt(
-      row.updatedAt,
-      activity?.latestCommentAt ?? null,
-      activity?.latestLogAt ?? null,
-    ) ?? row.updatedAt;
     return [{
       ...row,
       description: blockedInboxResponseDescription(blockedInboxAttention, row),
       blockedBy: blockedByMap.get(row.id) ?? [],
-      lastActivityAt,
+      lastActivityAt: row.lastActivityAt,
       ...(blockerAttentionByIssueId.has(row.id) ? { blockerAttention: blockerAttentionByIssueId.get(row.id) } : {}),
       blockedInboxAttention,
       ...(productivityReviewByIssueId.has(row.id)
@@ -4818,7 +4681,7 @@ export function issueService(db: Db) {
         .select(issueListSelect)
         .from(issues)
         .where(and(...conditions))
-        .orderBy(...issueListOrderBy(companyId, {
+        .orderBy(...issueListOrderBy({
           hasSearch,
           priorityOrder,
           searchOrder,
@@ -4840,14 +4703,13 @@ export function issueService(db: Db) {
       }
 
       const issueIds = withRuns.map((row) => row.id);
-      const [statsRows, readRows, lastActivityRows, blockedByMap, liveDescendantCountByIssueId] = await Promise.all([
+      const [statsRows, readRows, blockedByMap, liveDescendantCountByIssueId] = await Promise.all([
         contextUserId
           ? userCommentStatsForIssues(db, companyId, contextUserId, issueIds)
           : Promise.resolve([]),
         contextUserId
           ? userReadStatsForIssues(db, companyId, contextUserId, issueIds)
           : Promise.resolve([]),
-        lastActivityStatsForIssues(db, companyId, issueIds),
         includeBlockedBy
           ? blockedByMapForIssues(db, companyId, issueIds)
           : Promise.resolve(new Map<string, IssueRelationIssueSummary[]>()),
@@ -4856,7 +4718,6 @@ export function issueService(db: Db) {
           : Promise.resolve(new Map<string, number>()),
       ]);
       const statsByIssueId = new Map(statsRows.map((row) => [row.issueId, row]));
-      const lastActivityByIssueId = new Map(lastActivityRows.map((row) => [row.issueId, row]));
       const [
         blockerAttentionByIssueId,
         productivityReviewByIssueId,
@@ -4871,16 +4732,10 @@ export function issueService(db: Db) {
 
       if (!contextUserId) {
         return withRuns.map((row) => {
-          const activity = lastActivityByIssueId.get(row.id);
-          const lastActivityAt = latestIssueActivityAt(
-            row.updatedAt,
-            activity?.latestCommentAt ?? null,
-            activity?.latestLogAt ?? null,
-          ) ?? row.updatedAt;
           return {
             ...row,
             ...(includeBlockedBy ? { blockedBy: blockedByMap.get(row.id) ?? [] } : {}),
-            lastActivityAt,
+            lastActivityAt: row.lastActivityAt,
             ...(blockerAttentionByIssueId.has(row.id) ? { blockerAttention: blockerAttentionByIssueId.get(row.id) } : {}),
             ...(includeBlockedInboxAttention ? { blockedInboxAttention: blockedInboxAttentionByIssueId.get(row.id) ?? null } : {}),
             ...(includeLiveDescendantSummary ? { liveDescendantCount: liveDescendantCountByIssueId.get(row.id) ?? 0 } : {}),
@@ -4894,16 +4749,10 @@ export function issueService(db: Db) {
       const readByIssueId = new Map(readRows.map((row) => [row.issueId, row.myLastReadAt]));
 
       return withRuns.map((row) => {
-        const activity = lastActivityByIssueId.get(row.id);
-        const lastActivityAt = latestIssueActivityAt(
-          row.updatedAt,
-          activity?.latestCommentAt ?? null,
-          activity?.latestLogAt ?? null,
-        ) ?? row.updatedAt;
         return {
           ...row,
           ...(includeBlockedBy ? { blockedBy: blockedByMap.get(row.id) ?? [] } : {}),
-          lastActivityAt,
+          lastActivityAt: row.lastActivityAt,
           ...(blockerAttentionByIssueId.has(row.id) ? { blockerAttention: blockerAttentionByIssueId.get(row.id) } : {}),
           ...(includeBlockedInboxAttention ? { blockedInboxAttention: blockedInboxAttentionByIssueId.get(row.id) ?? null } : {}),
           ...(includeLiveDescendantSummary ? { liveDescendantCount: liveDescendantCountByIssueId.get(row.id) ?? 0 } : {}),

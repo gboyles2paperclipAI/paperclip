@@ -42,6 +42,7 @@ import {
   environmentCustomImageService,
   heartbeatService,
   instanceSettingsService,
+  issueThreadInteractionService,
   reconcileBuiltInAgentsOnStartup,
   reconcileCloudUpstreamRunsOnStartup,
   reconcileCodexLocalManagedHomesOnStartup,
@@ -64,6 +65,7 @@ import { maybePersistWorktreeRuntimePorts } from "./worktree-config.js";
 import { resolvePaperclipInstanceRoot } from "./home-paths.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { conflict } from "./errors.js";
+import { reapOrphanedCodexAcpProcesses } from "@paperclipai/adapter-utils/acpx-engine/process-lifecycle";
 import type {
   InstanceDatabaseBackupRunResult,
   InstanceDatabaseBackupTrigger,
@@ -112,6 +114,17 @@ export async function startServer(): Promise<StartedServer> {
   await instrumentationReady;
   let config = loadConfig();
   initTelemetry({ enabled: config.telemetryEnabled });
+  try {
+    const orphanReap = await reapOrphanedCodexAcpProcesses(resolvePaperclipInstanceRoot());
+    if (orphanReap.reapedPids.length > 0) {
+      logger.warn(
+        { reapedPids: orphanReap.reapedPids, scannedProcesses: orphanReap.scanned },
+        "reaped orphaned Codex ACP processes from a previous server process",
+      );
+    }
+  } catch (err) {
+    logger.error({ err }, "startup Codex ACP orphan reaping failed");
+  }
   if (process.env.PAPERCLIP_SECRETS_PROVIDER === undefined) {
     process.env.PAPERCLIP_SECRETS_PROVIDER = config.secretsProvider;
   }
@@ -845,6 +858,7 @@ export async function startServer(): Promise<StartedServer> {
     drainHeartbeatRunsForShutdown = heartbeat.drainRunningRunsForShutdown;
     const environmentCustomImages = environmentCustomImageService(db as any, { pluginWorkerManager });
     const routines = routineService(db as any, { pluginWorkerManager, providerCooldownService });
+    const interactionLifecycle = issueThreadInteractionService(db as any);
     const worktreeRunExecutionActivation = await resolveWorktreeRunExecutionActivationState({
       getExperimental: () => instanceSettingsService(db).getExperimental(),
     });
@@ -945,6 +959,14 @@ export async function startServer(): Promise<StartedServer> {
       logger.warn({ ...setupCleanup }, "startup environment customImage setup cleanup changed sessions");
     }
 
+    const startupInteractionExpiry = await interactionLifecycle.expireDueOperatorInteractions();
+    if (startupInteractionExpiry.expired > 0) {
+      logger.warn(
+        { expired: startupInteractionExpiry.expired, reissued: startupInteractionExpiry.reissued },
+        "startup operator-interaction expiry processed cards",
+      );
+    }
+
     heartbeatSchedulerInterval = setInterval(() => {
       // Async so the suppression checks below can honor the override-aware
       // resolver (e.g. worktree run-execution opt-in). The gated work is still
@@ -993,6 +1015,20 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "environment customImage setup cleanup failed");
+        }));
+
+      trackHeartbeatSchedulerWork(interactionLifecycle
+        .expireDueOperatorInteractions()
+        .then((result) => {
+          if (result.expired > 0) {
+            logger.warn(
+              { expired: result.expired, reissued: result.reissued },
+              "operator-interaction expiry processed cards",
+            );
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "operator-interaction expiry failed");
         }));
 
       if (heartbeatSchedulerStopped) return;

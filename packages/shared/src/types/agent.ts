@@ -23,6 +23,7 @@ export interface AgentPermissions extends Record<string, unknown> {
   authorizationPolicy?: TrustAuthorizationPolicy;
   triageAuthority?: boolean;
   triageAuthorityFields?: string[];
+  boardOperationsAuthority?: boolean;
 }
 
 export interface AgentModelProfileConfig extends Record<string, unknown> {

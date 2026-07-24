@@ -71,6 +71,7 @@ export const issues = pgTable(
     hiddenAt: timestamp("hidden_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     companyStatusIdx: index("issues_company_status_idx").on(table.companyId, table.status),
@@ -93,6 +94,12 @@ export const issues = pgTable(
     executionWorkspaceIdx: index("issues_company_execution_workspace_idx").on(table.companyId, table.executionWorkspaceId),
     dueMonitorIdx: index("issues_company_monitor_due_idx").on(table.companyId, table.monitorNextCheckAt),
     companyUpdatedIdx: index("issues_company_updated_idx").on(table.companyId, table.updatedAt),
+    companyLastActivityIdx: index("issues_company_last_activity_idx").on(
+      table.companyId,
+      table.lastActivityAt.desc(),
+      table.updatedAt.desc(),
+      table.id.desc(),
+    ),
     companyCreatedIdx: index("issues_company_created_idx").on(table.companyId, table.createdAt),
     companyPriorityIdx: index("issues_company_priority_idx").on(table.companyId, table.priority),
     identifierIdx: uniqueIndex("issues_identifier_idx").on(table.identifier),
