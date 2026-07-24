@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { REDACTED_EVENT_VALUE, redactEventPayload, redactSensitiveText, sanitizeRecord } from "../redaction.js";
+import {
+  GITHUB_AUTH_OUTPUT_DENY_VALUE,
+  REDACTED_EVENT_VALUE,
+  redactEventPayload,
+  redactSensitiveText,
+  sanitizeRecord,
+} from "../redaction.js";
 
 describe("redaction", () => {
   it("redacts sensitive keys and nested secret values", () => {
@@ -87,6 +93,25 @@ describe("redaction", () => {
     expect(result).not.toContain("paperclip-shell-secret");
     expect(result).not.toContain(githubToken);
     expect(result).not.toContain(jwt);
+  });
+
+  it("blocks token-identifying GitHub auth status output", () => {
+    const input = [
+      "github.com",
+      "  x Logged in to github.com account example-user (keyring)",
+      "  - Active account: true",
+      "  - Git operations protocol: https",
+      "  - Token: present",
+      "  - Token scopes: scope-a, scope-b",
+      "safe line stays visible",
+    ].join("\n");
+
+    const result = redactSensitiveText(input);
+
+    expect(result.includes("example-user")).toBe(false);
+    expect(result.includes("scope-a, scope-b")).toBe(false);
+    expect(result).toContain(GITHUB_AUTH_OUTPUT_DENY_VALUE);
+    expect(result).toContain("safe line stays visible");
   });
 
   it("redacts inline secrets from command metadata without hiding safe command text", () => {
