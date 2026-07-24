@@ -43,6 +43,11 @@ const mockDbSelect = vi.hoisted(() => vi.fn(() => ({ from: mockDbSelectFrom })))
 const mockDb = vi.hoisted(() => ({
   select: mockDbSelect,
 }));
+const mockAgentServiceGetById = vi.hoisted(() => vi.fn(async () => ({
+  id: CREATED_AGENT_ID,
+  companyId: "company-1",
+  permissions: null,
+})));
 
 vi.mock("@paperclipai/shared/telemetry", () => ({
   trackAgentTaskCompleted: vi.fn(),
@@ -69,7 +74,7 @@ function registerModuleMocks() {
       hasPermission: vi.fn(async () => true),
     }),
     agentService: () => ({
-      getById: vi.fn(async () => ({ id: CREATED_AGENT_ID, companyId: "company-1", permissions: null })),
+      getById: mockAgentServiceGetById,
       resolveByReference: vi.fn(async (_companyId: string, raw: string) => ({
         ambiguous: false,
         agent: { id: raw },
@@ -187,6 +192,7 @@ describe.sequential("issue thread interaction routes", () => {
     vi.doUnmock("../services/index.js");
     registerModuleMocks();
     vi.clearAllMocks();
+    mockAgentServiceGetById.mockResolvedValue({ id: CREATED_AGENT_ID, companyId: "company-1", permissions: null });
     mockIssueService.getById.mockResolvedValue(createIssue());
     mockInteractionService.listForIssue.mockResolvedValue([]);
     mockInteractionService.listForCompany.mockResolvedValue([]);
@@ -466,6 +472,61 @@ describe.sequential("issue thread interaction routes", () => {
     );
   }, 10_000);
 
+  it("rejects agent-authored interaction creation without canCreateInteractions permission", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId: ASSIGNEE_AGENT_ID,
+      companyId: "company-1",
+      source: "agent_jwt",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions")
+      .send({
+        kind: "suggest_tasks",
+        payload: {
+          version: 1,
+          tasks: [{ clientKey: "task-1", title: "One" }],
+        },
+      });
+
+    expect(res.status).toBe(403);
+    expect(mockInteractionService.create).not.toHaveBeenCalled();
+  });
+
+  it("allows agent-authored interaction creation with canCreateInteractions permission", async () => {
+    mockAgentServiceGetById.mockResolvedValue({
+      id: ASSIGNEE_AGENT_ID,
+      companyId: "company-1",
+      permissions: { canCreateInteractions: true },
+    });
+    const app = await createApp({
+      type: "agent",
+      agentId: ASSIGNEE_AGENT_ID,
+      companyId: "company-1",
+      source: "agent_jwt",
+      runId: "run-1",
+    });
+
+    const res = await request(app)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions")
+      .send({
+        kind: "suggest_tasks",
+        payload: {
+          version: 1,
+          tasks: [{ clientKey: "task-1", title: "One" }],
+        },
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockInteractionService.create).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
+      expect.objectContaining({ sourceRunId: "run-1" }),
+      expect.objectContaining({ agentId: ASSIGNEE_AGENT_ID }),
+    );
+  });
+
   it("lists the exact company audit projection with normalized filters and default pagination", async () => {
     const projected = [{
       issue: {
@@ -549,6 +610,22 @@ describe.sequential("issue thread interaction routes", () => {
     });
 
     await request(app).get("/api/companies/company-2/interactions").expect(403);
+    expect(mockInteractionService.listForCompany).not.toHaveBeenCalled();
+  });
+
+  it("denies task-bridge keys on the company interaction audit route", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId: CREATED_AGENT_ID,
+      companyId: "company-1",
+      source: "agent_key",
+      keyScope: {
+        kind: "task_bridge",
+        projectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      },
+    });
+
+    await request(app).get("/api/companies/company-1/interactions").expect(403);
     expect(mockInteractionService.listForCompany).not.toHaveBeenCalled();
   });
 
@@ -1277,7 +1354,13 @@ describe.sequential("issue thread interaction routes", () => {
     expect(mockInteractionService.rejectInteraction).not.toHaveBeenCalled();
   });
 
-  it("allows local_implicit actor to accept a request_confirmation in local_trusted mode", async () => {
+  it("returns 403 when local_implicit actor tries to accept a request_confirmation in local_trusted mode", async () => {
+    mockInteractionService.getById.mockResolvedValueOnce({
+      id: "interaction-3",
+      issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      kind: "request_confirmation",
+      status: "pending",
+    });
     mockInteractionService.acceptInteraction.mockResolvedValueOnce({
       interaction: {
         id: "interaction-3",
@@ -1306,11 +1389,17 @@ describe.sequential("issue thread interaction routes", () => {
       .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions/interaction-3/accept")
       .send({});
 
-    expect(res.status).toBe(200);
-    expect(mockInteractionService.acceptInteraction).toHaveBeenCalled();
+    expect(res.status).toBe(403);
+    expect(mockInteractionService.acceptInteraction).not.toHaveBeenCalled();
   });
 
-  it("allows local_implicit actor to reject a request_confirmation in local_trusted mode", async () => {
+  it("returns 403 when local_implicit actor tries to reject a request_confirmation in local_trusted mode", async () => {
+    mockInteractionService.getById.mockResolvedValueOnce({
+      id: "interaction-3",
+      issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      kind: "request_confirmation",
+      status: "pending",
+    });
     mockInteractionService.rejectInteraction.mockResolvedValueOnce({
       id: "interaction-3",
       companyId: "company-1",
@@ -1336,8 +1425,8 @@ describe.sequential("issue thread interaction routes", () => {
       .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions/interaction-3/reject")
       .send({ reason: "Not now" });
 
-    expect(res.status).toBe(200);
-    expect(mockInteractionService.rejectInteraction).toHaveBeenCalled();
+    expect(res.status).toBe(403);
+    expect(mockInteractionService.rejectInteraction).not.toHaveBeenCalled();
   });
 
   it("allows authenticated board user to accept a request_confirmation", async () => {
@@ -1377,6 +1466,11 @@ describe.sequential("issue thread interaction routes", () => {
   });
 
   it("allows agent-authored interaction creation and stamps the active run id", async () => {
+    mockAgentServiceGetById.mockResolvedValue({
+      id: CREATED_AGENT_ID,
+      companyId: "company-1",
+      permissions: { canCreateInteractions: true },
+    });
     mockIssueService.getById.mockResolvedValueOnce(createIssue({
       assigneeAgentId: CREATED_AGENT_ID,
       status: "todo",

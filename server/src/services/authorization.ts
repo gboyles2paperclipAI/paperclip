@@ -210,6 +210,8 @@ type AssignmentPolicyEffect =
   | { kind: "unknown"; explanation: string };
 
 type AgentHierarchyRow = { id: string; reportsTo: string | null };
+
+const MANAGER_CHAIN_ACTIVE_STATUSES = ["active", "idle", "running", "error"] as const;
 type LowTrustBoundaryWithCompany = LowTrustBoundary & { companyId: string };
 type AgentAuthorizationRow = {
   id: string;
@@ -332,11 +334,34 @@ async function loadCompanyAgentHierarchy(db: Db, companyId: string) {
   return new Map(rows.map((agent) => [agent.id, agent]));
 }
 
-async function isAgentInSubtree(db: Db, companyId: string, rootAgentId: string, targetAgentId: string) {
-  return agentIsInSubtree(
-    await loadCompanyAgentHierarchy(db, companyId),
-    rootAgentId,
-    targetAgentId,
+export async function isAgentInSubtree(db: Db, companyId: string, rootAgentId: string, targetAgentId: string) {
+  if (rootAgentId === targetAgentId) return true;
+  const rows = await db.execute(sql`
+    WITH RECURSIVE manager_chain(id, reports_to, depth) AS (
+      SELECT id, reports_to, 0
+      FROM agents
+      WHERE company_id = ${companyId}
+        AND id = ${targetAgentId}
+      UNION ALL
+      SELECT manager.id, manager.reports_to, manager_chain.depth + 1
+      FROM agents manager
+      JOIN manager_chain ON manager.id = manager_chain.reports_to
+      WHERE manager.company_id = ${companyId}
+        AND manager.status IN (${sql.join(MANAGER_CHAIN_ACTIVE_STATUSES.map((status) => sql`${status}`), sql`, `)})
+        AND manager_chain.depth < 49
+    )
+    SELECT EXISTS(
+      SELECT 1
+      FROM manager_chain
+      WHERE id = ${rootAgentId}
+        AND depth > 0
+    ) AS is_manager
+  `);
+  const first = Array.isArray(rows) ? rows[0] : null;
+  return Boolean(
+    first &&
+      typeof first === "object" &&
+      (first as Record<string, unknown>).is_manager === true,
   );
 }
 
@@ -1813,14 +1838,6 @@ export function authorizationService(db: Db) {
       if (grantDecision.allowed) return grantDecision;
     }
 
-    if (input.action === "issue:mutate" && input.resource.type === "issue" && canCreateAgentsLegacy(actorAgent)) {
-      return allow({
-        action: input.action,
-        reason: "allow_legacy_agent_creator",
-        explanation: "Allowed by legacy agent creator authority.",
-      });
-    }
-
     if (
       (input.action === "agents:create" ||
         input.action === "tasks:manage_active_checkouts") &&
@@ -1834,7 +1851,7 @@ export function authorizationService(db: Db) {
     }
 
     if (
-      input.action === "tasks:manage_active_checkouts" &&
+      (input.action === "issue:mutate" || input.action === "tasks:manage_active_checkouts") &&
       input.resource.type === "issue" &&
       input.resource.assigneeAgentId &&
       await isManagerOf(companyId, actorAgentId, input.resource.assigneeAgentId)

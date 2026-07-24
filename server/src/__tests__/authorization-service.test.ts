@@ -38,7 +38,7 @@ async function createCompany(db: ReturnType<typeof createDb>, label: string) {
 async function createAgent(
   db: ReturnType<typeof createDb>,
   companyId: string,
-  input: { role?: string; reportsTo?: string | null; permissions?: Record<string, unknown> } = {},
+  input: { role?: string; reportsTo?: string | null; permissions?: Record<string, unknown>; status?: string } = {},
 ) {
   return db
     .insert(agents)
@@ -46,6 +46,7 @@ async function createAgent(
       companyId,
       name: `Agent ${randomUUID()}`,
       role: input.role ?? "engineer",
+      status: input.status ?? "idle",
       reportsTo: input.reportsTo ?? null,
       permissions: input.permissions ?? {},
       adapterType: "process",
@@ -570,6 +571,115 @@ describeEmbeddedPostgres("authorization service", () => {
       reason: "deny_unsupported_action",
     });
   });
+
+  it("does not let canCreateAgents mutate arbitrary assigned issues", async () => {
+    const company = await createCompany(db, "CreatorNoIssueMutate");
+    const creatorAgent = await createAgent(db, company.id, {
+      role: "engineering-manager",
+      permissions: { canCreateAgents: true },
+    });
+    const targetAgent = await createAgent(db, company.id, { role: "engineer" });
+    const issue = await createIssue(db, company.id, {
+      title: "Assigned issue outside creator ownership",
+      assigneeAgentId: targetAgent.id,
+    });
+
+    await expect(authorizationService(db).decide({
+      actor: {
+        type: "agent",
+        agentId: creatorAgent.id,
+        companyId: company.id,
+        source: "agent_jwt",
+      },
+      action: "issue:mutate",
+      resource: {
+        type: "issue",
+        companyId: company.id,
+        issueId: issue.id,
+        assigneeAgentId: targetAgent.id,
+      },
+    })).resolves.toMatchObject({
+      allowed: false,
+      reason: "deny_missing_grant",
+    });
+  });
+
+  it("allows manager-chain actors to mutate managed assignee issues", async () => {
+    const company = await createCompany(db, "ManagerIssueMutate");
+    const managerAgent = await createAgent(db, company.id, { role: "engineering-manager", status: "active" });
+    const leadAgent = await createAgent(db, company.id, {
+      role: "lead",
+      reportsTo: managerAgent.id,
+      status: "idle",
+    });
+    const targetAgent = await createAgent(db, company.id, {
+      role: "engineer",
+      reportsTo: leadAgent.id,
+      status: "idle",
+    });
+    const issue = await createIssue(db, company.id, {
+      title: "Managed assignee issue",
+      assigneeAgentId: targetAgent.id,
+    });
+
+    await expect(authorizationService(db).decide({
+      actor: {
+        type: "agent",
+        agentId: managerAgent.id,
+        companyId: company.id,
+        source: "agent_jwt",
+      },
+      action: "issue:mutate",
+      resource: {
+        type: "issue",
+        companyId: company.id,
+        issueId: issue.id,
+        assigneeAgentId: targetAgent.id,
+      },
+    })).resolves.toMatchObject({
+      allowed: true,
+      reason: "allow_manager_chain",
+    });
+  });
+
+  it.each(["paused", "archived"])(
+    "denies manager-chain issue mutation through %s managers",
+    async (inactiveStatus) => {
+      const company = await createCompany(db, `InactiveManager${inactiveStatus}`);
+      const managerAgent = await createAgent(db, company.id, {
+        role: "engineering-manager",
+        status: inactiveStatus,
+      });
+      const targetAgent = await createAgent(db, company.id, {
+        role: "engineer",
+        reportsTo: managerAgent.id,
+        status: "idle",
+      });
+      const issue = await createIssue(db, company.id, {
+        title: "Inactive manager issue",
+        assigneeAgentId: targetAgent.id,
+      });
+
+      await expect(authorizationService(db).decide({
+        actor: {
+          type: "agent",
+          agentId: managerAgent.id,
+          companyId: company.id,
+          source: "agent_jwt",
+        },
+        action: "issue:mutate",
+        resource: {
+          type: "issue",
+          companyId: company.id,
+          issueId: issue.id,
+          assigneeAgentId: targetAgent.id,
+        },
+      })).resolves.toMatchObject({
+        allowed: false,
+        reason: "deny_missing_grant",
+      });
+    },
+  );
 
   it("fails closed when the responsible user is unavailable", async () => {
     const company = await createCompany(db, "ResponsibleUserUnavailable");
@@ -1554,7 +1664,7 @@ describeEmbeddedPostgres("authorization service", () => {
     });
   });
 
-  it("allows legacy CEO agent creator authority to mutate same-company assigned issues", async () => {
+  it("does not let legacy CEO agent creator authority mutate arbitrary assigned issues", async () => {
     const company = await createCompany(db, "LegacyIssueMutate");
     const actorAgent = await createAgent(db, company.id, { role: "ceo" });
     const targetAgent = await createAgent(db, company.id, { role: "engineer" });
@@ -1573,8 +1683,8 @@ describeEmbeddedPostgres("authorization service", () => {
     });
 
     expect(decision).toMatchObject({
-      allowed: true,
-      reason: "allow_legacy_agent_creator",
+      allowed: false,
+      reason: "deny_missing_grant",
     });
   });
 

@@ -1051,6 +1051,7 @@ describe("agent issue mutation checkout ownership", () => {
       status: "blocked",
       lastActivityAt: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
     }));
+    mockAgentService.resolveByReference.mockResolvedValue({ ambiguous: false, agent: makeAgent(peerAgentId) });
 
     const res = await request(await createApp(triageAuthorityActor()))
       .patch(`/api/issues/${issueId}`)
@@ -1088,6 +1089,10 @@ describe("agent issue mutation checkout ownership", () => {
       status: "blocked",
       lastActivityAt: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
     }));
+    mockAgentService.resolveByReference.mockResolvedValue({
+      ambiguous: false,
+      agent: makeAgent(triageAuthorityAgentId),
+    });
 
     const res = await request(await createApp(triageAuthorityActor()))
       .patch(`/api/issues/${issueId}`)
@@ -1095,6 +1100,112 @@ describe("agent issue mutation checkout ownership", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(403);
     expect(res.body.error).toBe("Agent cannot assign issue to self");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("blocks triage-authority self-assignment through agent shortname normalization", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => id === triageAuthorityAgentId
+      ? makeAgent(id, { shortname: "security", permissions: { canCreateAgents: false, triageAuthority: true } })
+      : makeAgent(id));
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "blocked",
+      lastActivityAt: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+    }));
+    mockAgentService.resolveByReference.mockResolvedValue({
+      ambiguous: false,
+      agent: makeAgent(triageAuthorityAgentId, { shortname: "security" }),
+    });
+
+    const res = await request(await createApp(triageAuthorityActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeAgentId: "security" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Agent cannot assign issue to self");
+    expect(mockIssueService.assertCheckoutOwner).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("requires assignment authority for triage-authority assignment after shortname normalization", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => id === triageAuthorityAgentId
+      ? makeAgent(id, { permissions: { canCreateAgents: false, triageAuthority: true } })
+      : makeAgent(id));
+    mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+      allowed: input.action !== "tasks:assign",
+      action: input.action,
+      reason: input.action === "tasks:assign" ? "deny_missing_grant" : "allow_explicit_grant",
+      explanation: input.action === "tasks:assign" ? "Missing permission." : "Allowed by test override.",
+    }));
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "blocked",
+      assigneeAgentId: ownerAgentId,
+      lastActivityAt: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+    }));
+    mockAgentService.resolveByReference.mockResolvedValue({
+      ambiguous: false,
+      agent: makeAgent(peerAgentId, { shortname: "peer" }),
+    });
+
+    const res = await request(await createApp(triageAuthorityActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ assigneeAgentId: "peer" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(mockAccessService.decide).toHaveBeenCalledWith(expect.objectContaining({
+      action: "tasks:assign",
+      resource: expect.objectContaining({ assigneeAgentId: peerAgentId }),
+    }));
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it("treats invalid or missing activity timestamps as not stale for triage-authority patches", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => id === triageAuthorityAgentId
+      ? makeAgent(id, { permissions: { canCreateAgents: false, triageAuthority: true } })
+      : makeAgent(id));
+
+    for (const timestamps of [
+      { lastActivityAt: "not-a-date", updatedAt: "also-not-a-date" },
+      { lastActivityAt: null, updatedAt: undefined },
+    ]) {
+      mockIssueService.getById.mockResolvedValue(makeIssue({
+        status: "blocked",
+        ...timestamps,
+      }));
+
+      const res = await request(await createApp(triageAuthorityActor()))
+        .patch(`/api/issues/${issueId}`)
+        .send({ status: "todo" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(422);
+      expect(res.body.error).toBe("Issue is too recent for triage-authority patch");
+      expect(res.body.details.reason).toBe("invalid_activity_timestamp");
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      mockIssueService.update.mockClear();
+    }
+  });
+
+  it("treats explicit empty triage-authority field lists as deny-all", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => id === triageAuthorityAgentId
+      ? makeAgent(id, {
+          permissions: {
+            canCreateAgents: false,
+            triageAuthority: true,
+            triageAuthorityFields: [],
+          },
+        })
+      : makeAgent(id));
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "blocked",
+      lastActivityAt: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+    }));
+
+    const res = await request(await createApp(triageAuthorityActor()))
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "todo" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Request contains fields outside triage authority");
+    expect(res.body.details.allowedTriageFields).toEqual([]);
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
@@ -1812,6 +1923,50 @@ describe("agent issue mutation checkout ownership", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(mockIssueService.update).toHaveBeenCalled();
     expect(mockIssueRecoveryActionService.resolveActiveForIssue).toHaveBeenCalled();
+  });
+
+  it("rejects the named recovery owner when the submitted action id is not the active action", async () => {
+    mockIssueService.getById.mockResolvedValue(
+      makeIssue({ status: "blocked", assigneeAgentId: peerAgentId }),
+    );
+    mockIssueRecoveryActionService.getActiveForIssue.mockResolvedValue({
+      id: recoveryActionId,
+      ownerType: "agent",
+      ownerAgentId,
+    });
+
+    const res = await request(await createApp(ownerActor()))
+      .post(`/api/issues/${issueId}/recovery-actions/resolve`)
+      .send({
+        actionId: "88888888-8888-4888-8888-888888888888",
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Issue is outside this actor's authorization boundary");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockIssueRecoveryActionService.resolveActiveForIssue).not.toHaveBeenCalled();
+  });
+
+  it("rejects the named recovery owner when the submitted action belongs to another source issue", async () => {
+    mockIssueService.getById.mockResolvedValue(
+      makeIssue({ status: "blocked", assigneeAgentId: peerAgentId }),
+    );
+    mockIssueRecoveryActionService.getActiveForIssue.mockResolvedValue(null);
+
+    const res = await request(await createApp(ownerActor()))
+      .post(`/api/issues/${issueId}/recovery-actions/resolve`)
+      .send({
+        actionId: recoveryActionId,
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Issue is outside this actor's authorization boundary");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockIssueRecoveryActionService.resolveActiveForIssue).not.toHaveBeenCalled();
   });
 
   it("allows an assigned triage-authority agent to complete its own issue with terminal evidence", async () => {

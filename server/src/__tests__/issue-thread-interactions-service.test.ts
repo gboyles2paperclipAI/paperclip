@@ -1424,6 +1424,57 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     });
   });
 
+  it("keeps request_checkbox_confirmation pending when an agent-run-authored comment is posted after creation", async () => {
+    const { companyId, issueId } = await seedConfirmationIssue("Checkbox agent run supersede guard");
+    const agentId = randomUUID();
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Code Reviewer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const created = await interactionsSvc.create({
+      id: issueId,
+      companyId,
+    }, {
+      kind: "request_checkbox_confirmation",
+      payload: {
+        version: 1,
+        prompt: "Which files should be deleted?",
+        options: [{ id: "file-a", label: "a.txt" }],
+      },
+    }, {
+      userId: "local-board",
+    });
+
+    const expired = await interactionsSvc.expireRequestConfirmationsSupersededByComment({
+      id: issueId,
+      companyId,
+    }, {
+      id: randomUUID(),
+      createdAt: new Date(new Date(created.createdAt).getTime() + 1_000),
+      authorAgentId: agentId,
+      createdByRunId: randomUUID(),
+    }, {
+      agentId,
+    });
+
+    expect(expired).toHaveLength(0);
+    const rows = await db.select().from(issueThreadInteractions);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: created.id,
+      status: "pending",
+    });
+  });
+
   it("submits request_item_verdicts partially and completes when all items are resolved", async () => {
     const { companyId, issueId } = await seedConfirmationIssue("Item verdict partial submit");
 
@@ -1790,10 +1841,11 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     });
   });
 
-  it("expires request confirmations by default when an agent comments after creation", async () => {
-    const { companyId, issueId } = await seedConfirmationIssue("Agent comment supersede");
+  it("keeps request confirmations pending when an agent-run-authored comment is posted after creation", async () => {
+    const { companyId, issueId } = await seedConfirmationIssue("Agent run comment supersede guard");
     const commentId = randomUUID();
     const agentId = randomUUID();
+    const runId = randomUUID();
 
     await db.insert(agents).values({
       id: agentId,
@@ -1827,20 +1879,18 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       id: commentId,
       createdAt: new Date(new Date(created.createdAt).getTime() + 1_000),
       authorAgentId: agentId,
+      createdByRunId: runId,
     }, {
       agentId,
     });
 
-    expect(expired).toHaveLength(1);
-    expect(expired[0]).toMatchObject({
+    expect(expired).toHaveLength(0);
+    const rows = await db.select().from(issueThreadInteractions);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
       id: created.id,
-      status: "expired",
-      result: {
-        version: 1,
-        outcome: "superseded_by_comment",
-        commentId,
-      },
-      resolvedByAgentId: agentId,
+      status: "pending",
+      resolvedByAgentId: null,
       resolvedByUserId: null,
     });
   });
@@ -2030,6 +2080,76 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       id: issueId,
       companyId,
     })).resolves.toEqual([]);
+  });
+
+  it("does not repair historical request confirmations for comments authored by an agent run", async () => {
+    const { companyId, issueId } = await seedConfirmationIssue("Historical run-authored comment guard");
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const createdAt = new Date("2026-05-18T12:00:00.000Z");
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Code Reviewer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "manual",
+      status: "finished",
+      startedAt: new Date("2026-05-18T12:00:30.000Z"),
+      finishedAt: new Date("2026-05-18T12:01:30.000Z"),
+    });
+
+    const created = await interactionsSvc.create({
+      id: issueId,
+      companyId,
+    }, {
+      kind: "request_confirmation",
+      payload: {
+        version: 1,
+        prompt: "Proceed with the current draft?",
+      },
+    }, {
+      userId: "local-board",
+    });
+    await db
+      .update(issueThreadInteractions)
+      .set({ createdAt, updatedAt: createdAt })
+      .where(eq(issueThreadInteractions.id, created.id));
+
+    await db.insert(issueComments).values({
+      id: randomUUID(),
+      companyId,
+      issueId,
+      authorUserId: "local-board",
+      authorType: "user",
+      createdByRunId: runId,
+      body: "Agent-authored progress note.",
+      createdAt: new Date("2026-05-18T12:01:00.000Z"),
+      updatedAt: new Date("2026-05-18T12:01:00.000Z"),
+    });
+
+    const expired = await interactionsSvc.expireRequestConfirmationsSupersededByHistoricalComments({
+      id: issueId,
+      companyId,
+    });
+
+    expect(expired).toHaveLength(0);
+    const rows = await db.select().from(issueThreadInteractions);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: created.id,
+      status: "pending",
+    });
   });
 
   it("expires request confirmations when the watched issue document revision changes", async () => {

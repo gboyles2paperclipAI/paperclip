@@ -41,6 +41,7 @@ import {
 } from "../services/built-in-agents.ts";
 import { readBuiltInAgentMarker, withBuiltInAgentMarker } from "../services/built-in-agent-metadata.ts";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.ts";
+import { instanceSettingsService } from "../services/instance-settings.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -153,6 +154,10 @@ describeEmbeddedPostgres("built-in agents", () => {
       requireBoardApprovalForNewAgents: options.requireApproval ?? true,
     });
     return companyId;
+  }
+
+  async function enableBuiltInAgents() {
+    await instanceSettingsService(db).updateExperimental({ enableBuiltInAgents: true });
   }
 
   it("validates the static registry and rejects invalid definitions", () => {
@@ -483,7 +488,37 @@ describeEmbeddedPostgres("built-in agents", () => {
     });
   });
 
+  it("skips startup reconciliation when the built-in agents API flag is disabled", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    await agentService(db).create(companyId, {
+      name: "CEO",
+      role: "ceo",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const result = await reconcileBuiltInAgentsOnStartup(db);
+
+    expect(result).toEqual({
+      scanned: 0,
+      reconciled: 0,
+      unknown: 0,
+      duplicates: 0,
+      autoEnsured: 0,
+      pendingApprovals: 0,
+      conflicts: 0,
+      defaultGrantsEnsured: 0,
+    });
+    await expect(builtInAgentService(db).get(companyId, "reflection-coach")).resolves.toMatchObject({
+      status: "not_provisioned",
+    });
+  });
+
   it("auto-provisions a paused Reflection Coach bundle with skill sync and a disabled routine", async () => {
+    await enableBuiltInAgents();
     const companyId = await seedCompany({ requireApproval: false });
     const root = await agentService(db).create(companyId, {
       name: "CEO",
@@ -608,6 +643,7 @@ describeEmbeddedPostgres("built-in agents", () => {
   });
 
   it("preserves new-agent approval gates during automatic Reflection Coach provisioning", async () => {
+    await enableBuiltInAgents();
     const companyId = await seedCompany({ requireApproval: true });
     const root = await agentService(db).create(companyId, {
       name: "CEO",
@@ -701,6 +737,98 @@ describeEmbeddedPostgres("built-in agents", () => {
     expect(approvalRows).toHaveLength(1);
   });
 
+  it("does not rewrite frozen defaults for pending approval built-ins", async () => {
+    const companyId = await seedCompany({ requireApproval: true });
+    const agentId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Old Coach",
+      role: "engineer",
+      title: "Old title",
+      icon: "old-icon",
+      capabilities: "Old purpose",
+      status: "pending_approval",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+      metadata: withBuiltInAgentMarker({}, { key: "reflection-coach", featureKeys: ["reflection-coach"] }),
+    });
+
+    const state = await builtInAgentService(db).reconcileDefinitionDefaults(companyId, "reflection-coach");
+
+    expect(state).toMatchObject({
+      status: "pending_approval",
+      agentId,
+      agent: {
+        name: "Old Coach",
+        role: "engineer",
+        title: "Old title",
+        icon: "old-icon",
+        capabilities: "Old purpose",
+      },
+    });
+  });
+
+  it("surfaces a same-name unmarked agent conflict instead of creating a numbered duplicate", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    const manualId = randomUUID();
+    await db.insert(agents).values({
+      id: manualId,
+      companyId,
+      name: "Reflection Coach",
+      role: "general",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      runtimeConfig: {},
+      permissions: {},
+      metadata: {},
+    });
+
+    await expect(builtInAgentService(db).ensure(companyId, "reflection-coach")).rejects.toMatchObject({
+      status: 409,
+      details: {
+        code: "built_in_agent_name_conflict",
+        key: "reflection-coach",
+        displayName: "Reflection Coach",
+        conflictingAgentId: manualId,
+      },
+    });
+
+    const rows = await db.select().from(agents).where(eq(agents.companyId, companyId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.name).toBe("Reflection Coach");
+  });
+
+  it("counts same-name unmarked agent startup conflicts without creating duplicates", async () => {
+    await enableBuiltInAgents();
+    const companyId = await seedCompany({ requireApproval: false });
+    await db.insert(agents).values({
+      id: randomUUID(),
+      companyId,
+      name: "Reflection Coach",
+      role: "general",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      runtimeConfig: {},
+      permissions: {},
+      metadata: {},
+    });
+
+    const result = await reconcileBuiltInAgentsOnStartup(db);
+
+    expect(result).toMatchObject({
+      autoEnsured: 0,
+      conflicts: 1,
+    });
+    const rows = await db.select().from(agents).where(eq(agents.companyId, companyId));
+    expect(rows).toHaveLength(1);
+    expect(rows.filter((row) => row.name === "Reflection Coach")).toHaveLength(1);
+  });
+
   it("preserves Reflection Coach instruction drift on reconcile and restores it on reset", async () => {
     const companyId = await seedCompany();
     const builtIns = builtInAgentService(db);
@@ -792,6 +920,7 @@ describeEmbeddedPostgres("built-in agents", () => {
   });
 
   it("repairs display/default drift for marked rows during startup reconciliation", async () => {
+    await enableBuiltInAgents();
     const companyId = await seedCompany();
     const agentId = randomUUID();
     await db.insert(agents).values({

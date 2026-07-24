@@ -294,6 +294,9 @@ const MAX_RUN_EVENT_PAYLOAD_DEPTH = 6;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MIN = 1;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 50;
+const GLOBAL_MAX_CONCURRENT_RUNS_DEFAULT = 12;
+const GLOBAL_MAX_CONCURRENT_RUNS_MIN = 1;
+const GLOBAL_MAX_CONCURRENT_RUNS_MAX = 50;
 const PREMIUM_MANAGED_MAX_CONCURRENT_RUNS_DEFAULT = 3;
 const PREMIUM_MANAGED_MAX_CONCURRENT_RUNS_MIN = 1;
 const PREMIUM_MANAGED_MAX_CONCURRENT_RUNS_MAX = 20;
@@ -2031,6 +2034,23 @@ function normalizeMaxConcurrentRuns(value: unknown) {
   const parsed = Math.floor(asNumber(value, HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT));
   if (!Number.isFinite(parsed)) return HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT;
   return Math.max(HEARTBEAT_MAX_CONCURRENT_RUNS_MIN, Math.min(HEARTBEAT_MAX_CONCURRENT_RUNS_MAX, parsed));
+}
+
+export function normalizeGlobalMaxConcurrentRuns(value: unknown = process.env.PAPERCLIP_GLOBAL_MAX_CONCURRENT_RUNS) {
+  if (value === null || value === undefined || value === "") return GLOBAL_MAX_CONCURRENT_RUNS_DEFAULT;
+  const parsedValue = typeof value === "string" ? Number(value.trim()) : Number(value);
+  if (!Number.isFinite(parsedValue)) {
+    throw new Error("Invalid PAPERCLIP_GLOBAL_MAX_CONCURRENT_RUNS: expected a finite number");
+  }
+  const parsed = Math.floor(parsedValue);
+  return Math.max(
+    GLOBAL_MAX_CONCURRENT_RUNS_MIN,
+    Math.min(GLOBAL_MAX_CONCURRENT_RUNS_MAX, parsed),
+  );
+}
+
+function globalMaxConcurrentRuns() {
+  return normalizeGlobalMaxConcurrentRuns();
 }
 
 export function normalizePremiumManagedMaxConcurrentRuns(value: unknown) {
@@ -10264,6 +10284,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(count ?? 0);
   }
 
+  async function countGlobalRunningRuns(client: Pick<Db, "select"> = db) {
+    const [{ count }] = await client
+      .select({ count: sql<number>`count(*)` })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.status, "running"));
+    return Number(count ?? 0);
+  }
+
   async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect, companyAgents?: AgentOrgRow[]) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
@@ -10372,52 +10400,57 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .then((rows) => rows[0] ?? null);
 
     const premiumManaged = isPremiumManagedRun(agent.adapterType, readContextModelProfile(context));
-    const claimed = premiumManaged
-      ? await db.transaction(async (tx) => {
-          // Serialize the global premium count and queued-to-running transition
-          // across agents and service instances. A newly claimed row has a null
-          // process group but still consumes a slot before this transaction
-          // commits, closing the former check-then-claim race.
-          await tx.execute(
-            sql`SELECT pg_advisory_xact_lock(hashtextextended('paperclip:premium-managed-admission', 0))`,
+    const claimed = await db.transaction(async (tx) => {
+      // Serialize instance-wide admission and queued-to-running transition
+      // across agents and service instances. A newly claimed row has a null
+      // process group but still consumes a slot before this transaction
+      // commits, closing the former check-then-claim race.
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtextextended('paperclip:global-run-admission', 0))`,
+      );
+      if (await countGlobalRunningRuns(tx) >= globalMaxConcurrentRuns()) return null;
+
+      if (premiumManaged) {
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtextextended('paperclip:premium-managed-admission', 0))`,
+        );
+        const premiumRunningRuns = await tx
+          .select({
+            id: heartbeatRuns.id,
+            agentId: heartbeatRuns.agentId,
+            processGroupId: heartbeatRuns.processGroupId,
+          })
+          .from(heartbeatRuns)
+          .innerJoin(
+            agents,
+            and(eq(heartbeatRuns.agentId, agents.id), eq(heartbeatRuns.companyId, agents.companyId)),
+          )
+          .where(
+            and(
+              eq(heartbeatRuns.status, "running"),
+              inArray(agents.adapterType, [...PREMIUM_MANAGED_ADAPTER_TYPES]),
+              sql`coalesce(${heartbeatRuns.contextSnapshot} ->> 'modelProfile', '') != 'cheap'`,
+            ),
           );
-          const premiumRunningRuns = await tx
-            .select({
-              id: heartbeatRuns.id,
-              agentId: heartbeatRuns.agentId,
-              processGroupId: heartbeatRuns.processGroupId,
-            })
-            .from(heartbeatRuns)
-            .innerJoin(
-              agents,
-              and(eq(heartbeatRuns.agentId, agents.id), eq(heartbeatRuns.companyId, agents.companyId)),
-            )
-            .where(
-              and(
-                eq(heartbeatRuns.status, "running"),
-                inArray(agents.adapterType, [...PREMIUM_MANAGED_ADAPTER_TYPES]),
-                sql`coalesce(${heartbeatRuns.contextSnapshot} ->> 'modelProfile', '') != 'cheap'`,
-              ),
+        let activePremiumRunningCount = 0;
+        for (const premiumRun of premiumRunningRuns) {
+          if (premiumRun.processGroupId && !isProcessGroupAlive(premiumRun.processGroupId)) {
+            logger.warn(
+              {
+                runId: premiumRun.id,
+                agentId: premiumRun.agentId,
+                processGroupId: premiumRun.processGroupId,
+              },
+              "Detected premium managed run with a dead process group; excluding it from the concurrency cap",
             );
-          let activePremiumRunningCount = 0;
-          for (const premiumRun of premiumRunningRuns) {
-            if (premiumRun.processGroupId && !isProcessGroupAlive(premiumRun.processGroupId)) {
-              logger.warn(
-                {
-                  runId: premiumRun.id,
-                  agentId: premiumRun.agentId,
-                  processGroupId: premiumRun.processGroupId,
-                },
-                "Detected premium managed run with a dead process group; excluding it from the concurrency cap",
-              );
-              continue;
-            }
-            activePremiumRunningCount++;
+            continue;
           }
-          if (activePremiumRunningCount >= premiumManagedMaxConcurrentRuns()) return null;
-          return claimRun(tx);
-        })
-      : await claimRun(db);
+          activePremiumRunningCount++;
+        }
+        if (activePremiumRunningCount >= premiumManagedMaxConcurrentRuns()) return null;
+      }
+      return claimRun(tx);
+    });
     if (!claimed) return null;
 
     publishLiveEvent({
