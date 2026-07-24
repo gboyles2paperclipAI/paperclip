@@ -21,6 +21,7 @@ import {
 import { companySkillService } from "./company-skills.js";
 import { routineService } from "./routines.js";
 import { accessService } from "./access.js";
+import { instanceSettingsService } from "./instance-settings.js";
 
 export type BuiltInAgentStatus = "not_provisioned" | "pending_approval" | "needs_setup" | "ready" | "paused";
 
@@ -1362,6 +1363,36 @@ export function builtInAgentService(db: Db) {
       .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id));
   }
 
+  async function findUnmarkedNameConflict(companyId: string, definition: BuiltInAgentDefinition) {
+    const rows = await db
+      .select({
+        id: agents.id,
+        name: agents.name,
+        metadata: agents.metadata,
+      })
+      .from(agents)
+      .where(and(eq(agents.companyId, companyId), ne(agents.status, "terminated")));
+    return rows.find((row) =>
+      row.name === definition.displayName
+      && !readBuiltInAgentMarker(row.metadata)
+    ) ?? null;
+  }
+
+  async function assertNoUnmarkedNameConflict(companyId: string, definition: BuiltInAgentDefinition) {
+    const conflictRow = await findUnmarkedNameConflict(companyId, definition);
+    if (!conflictRow) return;
+    throw conflict(
+      `Cannot provision built-in agent ${definition.key} because an unmarked agent already uses the name ${definition.displayName}.`,
+      {
+        code: "built_in_agent_name_conflict",
+        key: definition.key,
+        displayName: definition.displayName,
+        conflictingAgentId: conflictRow.id,
+        resolution: "Rename or terminate the unmarked agent before provisioning this built-in agent.",
+      },
+    );
+  }
+
   async function findSingleAgent(companyId: string, definition: BuiltInAgentDefinition) {
     const markedRows = await findMarkedRows(companyId, definition.key);
     if (markedRows.length > 1) {
@@ -1449,6 +1480,8 @@ export function builtInAgentService(db: Db) {
       return state(definition, await agentSvc.getById(existing.id) as Agent, resources);
     }
 
+    await assertNoUnmarkedNameConflict(companyId, definition);
+
     const reportsTo = definition.defaultManager === "single_root_agent"
       ? await findSingleRootManager(companyId)
       : null;
@@ -1524,6 +1557,8 @@ export function builtInAgentService(db: Db) {
       return { state: await state(definition, existing), approval: null };
     }
 
+    await assertNoUnmarkedNameConflict(companyId, definition);
+
     const reportsTo = definition.defaultManager === "single_root_agent"
       ? await findSingleRootManager(companyId)
       : null;
@@ -1579,6 +1614,12 @@ export function builtInAgentService(db: Db) {
     await ensureCompany(companyId);
     const existing = await findSingleAgent(companyId, definition);
     if (!existing) return state(definition, null);
+    if (existing.status === "pending_approval") {
+      console.info(
+        `[paperclip] Skipping built-in agent ${definition.key} default reconciliation while pending approval.`,
+      );
+      return state(definition, existing);
+    }
     const patch = {
       name: definition.displayName,
       role: definition.defaultRole,
@@ -1672,17 +1713,34 @@ export function builtInAgentService(db: Db) {
     const company = await ensureCompany(companyId);
     let autoEnsured = 0;
     let pendingApprovals = 0;
+    let conflicts = 0;
     for (const definition of DEFINITIONS.filter((entry) => entry.bundle)) {
-      if (company.requireBoardApprovalForNewAgents) {
-        const result = await provision(companyId, definition.key);
-        if (result.approval) pendingApprovals += 1;
-      } else {
-        await ensure(companyId, definition.key);
+      try {
+        if (company.requireBoardApprovalForNewAgents) {
+          const result = await provision(companyId, definition.key);
+          if (result.approval) pendingApprovals += 1;
+        } else {
+          await ensure(companyId, definition.key);
+        }
+        autoEnsured += 1;
+      } catch (error) {
+        if (
+          error instanceof HttpError
+          && error.details
+          && typeof error.details === "object"
+          && (error.details as Record<string, unknown>).code === "built_in_agent_name_conflict"
+        ) {
+          conflicts += 1;
+          console.info(
+            `[paperclip] Built-in agent ${definition.key} provisioning skipped because an unmarked same-name agent exists.`,
+          );
+          continue;
+        }
+        throw error;
       }
-      autoEnsured += 1;
     }
     const defaultGrantsEnsured = await ensureCompanyDefaultAgentGrants(companyId);
-    return { autoEnsured, pendingApprovals, defaultGrantsEnsured };
+    return { autoEnsured, pendingApprovals, conflicts, defaultGrantsEnsured };
   }
 
   return {
@@ -1713,17 +1771,32 @@ export function builtInAgentService(db: Db) {
 }
 
 export async function reconcileBuiltInAgentsOnStartup(db: Db) {
+  const experimental = await instanceSettingsService(db).getExperimental();
+  if (experimental.enableBuiltInAgents !== true) {
+    return {
+      scanned: 0,
+      reconciled: 0,
+      unknown: 0,
+      duplicates: 0,
+      autoEnsured: 0,
+      pendingApprovals: 0,
+      conflicts: 0,
+      defaultGrantsEnsured: 0,
+    };
+  }
   const svc = builtInAgentService(db);
   const companyRows = await db
     .select({ id: companies.id })
     .from(companies);
   let autoEnsured = 0;
   let pendingApprovals = 0;
+  let conflicts = 0;
   let defaultGrantsEnsured = 0;
   for (const company of companyRows) {
     const result = await svc.autoProvisionBundledAgents(company.id);
     autoEnsured += result.autoEnsured;
     pendingApprovals += result.pendingApprovals;
+    conflicts += result.conflicts;
     defaultGrantsEnsured += result.defaultGrantsEnsured;
   }
   const rows = await db
@@ -1758,5 +1831,5 @@ export async function reconcileBuiltInAgentsOnStartup(db: Db) {
     reconciled += 1;
   }
 
-  return { scanned, reconciled, unknown, duplicates, autoEnsured, pendingApprovals, defaultGrantsEnsured };
+  return { scanned, reconciled, unknown, duplicates, autoEnsured, pendingApprovals, conflicts, defaultGrantsEnsured };
 }

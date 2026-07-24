@@ -10,7 +10,7 @@ import {
 import type { PermissionKey, PrincipalType } from "@paperclipai/shared";
 import { conflict } from "../errors.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
-import { authorizationService, type AuthorizationActor, type AuthorizationResource } from "./authorization.js";
+import { authorizationService, isAgentInSubtree, type AuthorizationActor, type AuthorizationResource } from "./authorization.js";
 import { ensureHumanRoleDefaultGrants } from "./principal-access-compatibility.js";
 
 type MembershipRow = typeof companyMemberships.$inferSelect;
@@ -58,20 +58,7 @@ export function accessService(db: Db) {
   }
 
   async function isManagerOf(companyId: string, managerAgentId: string, targetAgentId: string): Promise<boolean> {
-    if (managerAgentId === targetAgentId) return true;
-    const rows = await db
-      .select({ id: agents.id, reportsTo: agents.reportsTo })
-      .from(agents)
-      .where(eq(agents.companyId, companyId));
-    const byId = new Map(rows.map((agent) => [agent.id, agent]));
-    const visited = new Set<string>();
-    let current = byId.get(targetAgentId) ?? null;
-    while (current?.reportsTo && !visited.has(current.reportsTo)) {
-      if (current.reportsTo === managerAgentId) return true;
-      visited.add(current.reportsTo);
-      current = byId.get(current.reportsTo) ?? null;
-    }
-    return false;
+    return isAgentInSubtree(db, companyId, managerAgentId, targetAgentId);
   }
 
   async function hasPermission(
