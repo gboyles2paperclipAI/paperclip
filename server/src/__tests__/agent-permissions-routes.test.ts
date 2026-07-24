@@ -13,6 +13,7 @@ vi.mock("acpx/runtime", () => ({
 
 const agentId = "11111111-1111-4111-8111-111111111111";
 const companyId = "22222222-2222-4222-8222-222222222222";
+const boardOperationsAgentId = "33333333-3333-4333-8333-333333333333";
 
 const baseAgent = {
   id: agentId,
@@ -45,6 +46,7 @@ const mockAgentService = vi.hoisted(() => ({
   create: vi.fn(),
   activatePendingApproval: vi.fn(),
   terminate: vi.fn(),
+  pause: vi.fn(),
   update: vi.fn(),
   updatePermissions: vi.fn(),
   getChainOfCommand: vi.fn(),
@@ -83,6 +85,7 @@ const mockHeartbeatService = vi.hoisted(() => ({
   getRun: vi.fn(),
   cancelRun: vi.fn(),
   cancelInvocationsForAgents: vi.fn(),
+  cancelActiveForAgent: vi.fn(),
 }));
 
 const mockIssueApprovalService = vi.hoisted(() => ({
@@ -214,25 +217,34 @@ function registerModuleMocks() {
   }));
 }
 
-function createDbStub(options: { requireBoardApprovalForNewAgents?: boolean } = {}) {
+function createDbStub(options: {
+  requireBoardApprovalForNewAgents?: boolean;
+  queryRows?: unknown[][];
+} = {}) {
+  const queryRows = [...(options.queryRows ?? [])];
   return {
     select: vi.fn().mockReturnValue({
       from: vi.fn().mockReturnValue({
-        where: vi.fn().mockReturnValue({
-          then: vi.fn((resolve) =>
-            Promise.resolve(resolve([{
+        where: vi.fn().mockImplementation(() => {
+          const rows = queryRows.shift() ?? [{
               id: companyId,
               name: "Paperclip",
               requireBoardApprovalForNewAgents: options.requireBoardApprovalForNewAgents ?? false,
-            }])),
-          ),
+            }];
+          return {
+            then: (resolve: (value: unknown[]) => unknown) => Promise.resolve(resolve(rows)),
+            limit: async () => rows,
+          };
         }),
       }),
     }),
   };
 }
 
-async function createApp(actor: Record<string, unknown>, dbOptions: { requireBoardApprovalForNewAgents?: boolean } = {}) {
+async function createApp(actor: Record<string, unknown>, dbOptions: {
+  requireBoardApprovalForNewAgents?: boolean;
+  queryRows?: unknown[][];
+} = {}) {
   const [{ errorHandler }, { agentRoutes }] = await Promise.all([
     import("../middleware/index.js") as Promise<typeof import("../middleware/index.js")>,
     import("../routes/agents.js") as Promise<typeof import("../routes/agents.js")>,
@@ -310,6 +322,7 @@ describe.sequential("agent permission routes", () => {
     mockAgentService.create.mockReset();
     mockAgentService.activatePendingApproval.mockReset();
     mockAgentService.terminate.mockReset();
+    mockAgentService.pause.mockReset();
     mockAgentService.update.mockReset();
     mockAgentService.updatePermissions.mockReset();
     mockAgentService.getChainOfCommand.mockReset();
@@ -333,6 +346,7 @@ describe.sequential("agent permission routes", () => {
     mockHeartbeatService.getRun.mockReset();
     mockHeartbeatService.cancelRun.mockReset();
     mockHeartbeatService.cancelInvocationsForAgents.mockReset();
+    mockHeartbeatService.cancelActiveForAgent.mockReset();
     mockIssueApprovalService.linkManyForApproval.mockReset();
     mockIssueService.list.mockReset();
     mockSecretService.normalizeAdapterConfigForPersistence.mockReset();
@@ -360,6 +374,11 @@ describe.sequential("agent permission routes", () => {
     });
     mockAgentService.update.mockResolvedValue(baseAgent);
     mockAgentService.updatePermissions.mockResolvedValue(baseAgent);
+    mockAgentService.pause.mockResolvedValue({
+      ...baseAgent,
+      status: "paused",
+      pauseReason: "manual",
+    });
     mockBuiltInAgentService.ensureCompanyDefaultAgentGrants.mockResolvedValue(0);
     mockAccessService.canUser.mockResolvedValue(true);
     mockAccessService.decide.mockImplementation(async (input: { action?: string }) => {
@@ -520,6 +539,197 @@ describe.sequential("agent permission routes", () => {
       .send({ title: "Compromised" }));
 
     expect(res.status).toBe(403);
+  });
+
+  it("allows board-operations authority to reparent a peer without general configuration access", async () => {
+    mockAccessService.canUser.mockResolvedValue(false);
+    mockAgentService.getById.mockImplementation(async (id: string) => id === boardOperationsAgentId
+      ? {
+          ...baseAgent,
+          id: boardOperationsAgentId,
+          permissions: { canCreateAgents: false, boardOperationsAuthority: true },
+        }
+      : baseAgent);
+    mockAgentService.update.mockResolvedValue({ ...baseAgent, reportsTo: boardOperationsAgentId });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: boardOperationsAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-board-operations",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ reportsTo: boardOperationsAgentId }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalledWith(
+      agentId,
+      { reportsTo: boardOperationsAgentId },
+      expect.anything(),
+    );
+  });
+
+  it("does not extend board-operations reparenting authority to other profile changes", async () => {
+    mockAccessService.canUser.mockResolvedValue(false);
+    mockAgentService.getById.mockImplementation(async (id: string) => id === boardOperationsAgentId
+      ? {
+          ...baseAgent,
+          id: boardOperationsAgentId,
+          permissions: { canCreateAgents: false, boardOperationsAuthority: true },
+        }
+      : baseAgent);
+
+    const app = await createApp({
+      type: "agent",
+      agentId: boardOperationsAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-board-operations",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ reportsTo: boardOperationsAgentId, title: "Unauthorized profile change" }));
+
+    expect(res.status).toBe(403);
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("does not allow board-operations authority to reparent itself", async () => {
+    mockAgentService.getById.mockResolvedValue({
+      ...baseAgent,
+      id: boardOperationsAgentId,
+      permissions: { canCreateAgents: false, boardOperationsAuthority: true },
+    });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: boardOperationsAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-board-operations",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${boardOperationsAgentId}`)
+      .send({ reportsTo: null }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("cannot reparent its own");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("allows board-operations authority to pause a peer only after zero-work checks", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => id === boardOperationsAgentId
+      ? {
+          ...baseAgent,
+          id: boardOperationsAgentId,
+          permissions: { canCreateAgents: false, boardOperationsAuthority: true },
+        }
+      : baseAgent);
+
+    const app = await createApp({
+      type: "agent",
+      agentId: boardOperationsAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-board-operations",
+    }, { queryRows: [[], []] });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agents/${agentId}/pause`)
+      .send({}));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.pause).toHaveBeenCalledWith(agentId);
+    expect(mockHeartbeatService.cancelActiveForAgent).toHaveBeenCalledWith(agentId);
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      actorType: "agent",
+      actorId: boardOperationsAgentId,
+      agentId: boardOperationsAgentId,
+      action: "agent.paused",
+    }));
+  });
+
+  it("refuses a board-operations pause while the target has open assigned work", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => id === boardOperationsAgentId
+      ? {
+          ...baseAgent,
+          id: boardOperationsAgentId,
+          permissions: { canCreateAgents: false, boardOperationsAuthority: true },
+        }
+      : baseAgent);
+
+    const app = await createApp({
+      type: "agent",
+      agentId: boardOperationsAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-board-operations",
+    }, { queryRows: [[{ id: "open-issue" }]] });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agents/${agentId}/pause`)
+      .send({}));
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("open assigned issues");
+    expect(mockAgentService.pause).not.toHaveBeenCalled();
+  });
+
+  it("refuses a board-operations pause while the target has an active execution", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => id === boardOperationsAgentId
+      ? {
+          ...baseAgent,
+          id: boardOperationsAgentId,
+          permissions: { canCreateAgents: false, boardOperationsAuthority: true },
+        }
+      : baseAgent);
+
+    const app = await createApp({
+      type: "agent",
+      agentId: boardOperationsAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-board-operations",
+    }, { queryRows: [[], [{ id: "active-run" }]] });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agents/${agentId}/pause`)
+      .send({}));
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("queued or running execution");
+    expect(mockAgentService.pause).not.toHaveBeenCalled();
+  });
+
+  it("refuses peer pause requests from agents without board-operations authority", async () => {
+    mockAgentService.getById.mockImplementation(async (id: string) => id === boardOperationsAgentId
+      ? {
+          ...baseAgent,
+          id: boardOperationsAgentId,
+          permissions: { canCreateAgents: false, boardOperationsAuthority: false },
+        }
+      : baseAgent);
+
+    const app = await createApp({
+      type: "agent",
+      agentId: boardOperationsAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-board-operations",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agents/${agentId}/pause`)
+      .send({}));
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("does not have board-operations authority");
+    expect(mockAgentService.pause).not.toHaveBeenCalled();
   });
 
   it("blocks api key creation for authenticated company members without agent admin permission", async () => {
@@ -1769,6 +1979,34 @@ describe.sequential("agent permission routes", () => {
       canAssignTasks: true,
     });
     expect(res.body.permissions.canCreateSkills).toBe(false);
+  });
+
+  it("persists and audits explicit board-operations authority grants", async () => {
+    mockAgentService.updatePermissions.mockResolvedValue({
+      ...baseAgent,
+      permissions: { canCreateAgents: false, boardOperationsAuthority: true },
+    });
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}/permissions`)
+      .send({ boardOperationsAuthority: true }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.updatePermissions).toHaveBeenCalledWith(agentId, {
+      boardOperationsAuthority: true,
+    });
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "agent.permissions_updated",
+      details: expect.objectContaining({ boardOperationsAuthority: true }),
+    }));
   });
 
   it("rejects CEO permission updates outside the caller company scope", async () => {
