@@ -14,6 +14,8 @@ vi.mock("acpx/runtime", () => ({
 const agentId = "11111111-1111-4111-8111-111111111111";
 const companyId = "22222222-2222-4222-8222-222222222222";
 const boardOperationsAgentId = "33333333-3333-4333-8333-333333333333";
+const peerGroupManagerId = "44444444-4444-4444-8444-444444444444";
+const outsidePeerManagerId = "55555555-5555-4555-8555-555555555555";
 
 const baseAgent = {
   id: agentId,
@@ -547,10 +549,42 @@ describe.sequential("agent permission routes", () => {
       ? {
           ...baseAgent,
           id: boardOperationsAgentId,
+          reportsTo: peerGroupManagerId,
           permissions: { canCreateAgents: false, boardOperationsAuthority: true },
         }
-      : baseAgent);
+      : { ...baseAgent, reportsTo: peerGroupManagerId });
     mockAgentService.update.mockResolvedValue({ ...baseAgent, reportsTo: boardOperationsAgentId });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: boardOperationsAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-board-operations",
+    }, { queryRows: [[], []] });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ reportsTo: boardOperationsAgentId }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalledWith(
+      agentId,
+      { reportsTo: boardOperationsAgentId },
+      expect.anything(),
+    );
+  });
+
+  it("refuses to reparent a manager or other agent outside the actor's peer group", async () => {
+    mockAccessService.canUser.mockResolvedValue(false);
+    mockAgentService.getById.mockImplementation(async (id: string) => id === boardOperationsAgentId
+      ? {
+          ...baseAgent,
+          id: boardOperationsAgentId,
+          reportsTo: peerGroupManagerId,
+          permissions: { canCreateAgents: false, boardOperationsAuthority: true },
+        }
+      : { ...baseAgent, reportsTo: null });
 
     const app = await createApp({
       type: "agent",
@@ -564,12 +598,127 @@ describe.sequential("agent permission routes", () => {
       .patch(`/api/agents/${agentId}`)
       .send({ reportsTo: boardOperationsAgentId }));
 
-    expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(mockAgentService.update).toHaveBeenCalledWith(
-      agentId,
-      { reportsTo: boardOperationsAgentId },
-      expect.anything(),
-    );
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("same manager");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses to reparent a peer under a manager outside the peer group", async () => {
+    mockAccessService.canUser.mockResolvedValue(false);
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === boardOperationsAgentId) {
+        return {
+          ...baseAgent,
+          id: boardOperationsAgentId,
+          reportsTo: peerGroupManagerId,
+          permissions: { canCreateAgents: false, boardOperationsAuthority: true },
+        };
+      }
+      if (id === outsidePeerManagerId) {
+        return { ...baseAgent, id: outsidePeerManagerId, reportsTo: null };
+      }
+      return { ...baseAgent, reportsTo: peerGroupManagerId };
+    });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: boardOperationsAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-board-operations",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ reportsTo: outsidePeerManagerId }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("same peer group");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses to clear a peer's manager", async () => {
+    mockAccessService.canUser.mockResolvedValue(false);
+    mockAgentService.getById.mockImplementation(async (id: string) => id === boardOperationsAgentId
+      ? {
+          ...baseAgent,
+          id: boardOperationsAgentId,
+          reportsTo: peerGroupManagerId,
+          permissions: { canCreateAgents: false, boardOperationsAuthority: true },
+        }
+      : { ...baseAgent, reportsTo: peerGroupManagerId });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: boardOperationsAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-board-operations",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ reportsTo: null }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("cannot clear");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses a peer reparent while the target has open assigned work", async () => {
+    mockAccessService.canUser.mockResolvedValue(false);
+    mockAgentService.getById.mockImplementation(async (id: string) => id === boardOperationsAgentId
+      ? {
+          ...baseAgent,
+          id: boardOperationsAgentId,
+          reportsTo: peerGroupManagerId,
+          permissions: { canCreateAgents: false, boardOperationsAuthority: true },
+        }
+      : { ...baseAgent, reportsTo: peerGroupManagerId });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: boardOperationsAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-board-operations",
+    }, { queryRows: [[{ id: "open-issue" }]] });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ reportsTo: boardOperationsAgentId }));
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("Cannot reparent an agent with open assigned issues");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses a peer reparent while the target has an active execution", async () => {
+    mockAccessService.canUser.mockResolvedValue(false);
+    mockAgentService.getById.mockImplementation(async (id: string) => id === boardOperationsAgentId
+      ? {
+          ...baseAgent,
+          id: boardOperationsAgentId,
+          reportsTo: peerGroupManagerId,
+          permissions: { canCreateAgents: false, boardOperationsAuthority: true },
+        }
+      : { ...baseAgent, reportsTo: peerGroupManagerId });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: boardOperationsAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-board-operations",
+    }, { queryRows: [[], [{ id: "active-run" }]] });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ reportsTo: boardOperationsAgentId }));
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("Cannot reparent an agent with a queued or running execution");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
   });
 
   it("does not extend board-operations reparenting authority to other profile changes", async () => {

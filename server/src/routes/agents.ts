@@ -928,7 +928,7 @@ export function agentRoutes(
 
   async function canApplyScopedBoardOperationsReparent(
     req: Request,
-    targetAgent: { id: string; companyId: string },
+    targetAgent: { id: string; companyId: string; reportsTo: string | null },
     patchData: Record<string, unknown>,
   ) {
     const patchKeys = Object.keys(patchData);
@@ -938,7 +938,55 @@ export function agentRoutes(
     if (actorAgent.id === targetAgent.id) {
       throw forbidden("Board-operations authority cannot reparent its own agent record");
     }
+    if (!actorAgent.reportsTo || targetAgent.reportsTo !== actorAgent.reportsTo) {
+      throw forbidden("Board-operations authority can only reparent a peer with the same manager");
+    }
+
+    const proposedManagerId = patchData.reportsTo;
+    if (typeof proposedManagerId !== "string") {
+      throw forbidden("Board-operations authority cannot clear a peer's manager");
+    }
+    const proposedManager = await svc.getById(proposedManagerId);
+    if (
+      !proposedManager
+      || proposedManager.companyId !== targetAgent.companyId
+      || proposedManager.reportsTo !== actorAgent.reportsTo
+    ) {
+      throw forbidden("Board-operations authority can only select a manager from the same peer group");
+    }
+    await assertBoardOperationsTargetHasNoWork(targetAgent, "reparent");
     return true;
+  }
+
+  async function assertBoardOperationsTargetHasNoWork(
+    targetAgent: { id: string; companyId: string },
+    operation: "pause" | "reparent",
+  ) {
+    const [openIssue] = await db
+      .select({ id: issuesTable.id })
+      .from(issuesTable)
+      .where(and(
+        eq(issuesTable.companyId, targetAgent.companyId),
+        eq(issuesTable.assigneeAgentId, targetAgent.id),
+        notInArray(issuesTable.status, ["done", "cancelled"]),
+      ))
+      .limit(1);
+    if (openIssue) {
+      throw conflict(`Cannot ${operation} an agent with open assigned issues`);
+    }
+
+    const [activeRun] = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.companyId, targetAgent.companyId),
+        eq(heartbeatRuns.agentId, targetAgent.id),
+        inArray(heartbeatRuns.status, ["queued", "running"]),
+      ))
+      .limit(1);
+    if (activeRun) {
+      throw conflict(`Cannot ${operation} an agent with a queued or running execution`);
+    }
   }
 
   async function assertBoardOperationsPauseIsSafe(
@@ -955,32 +1003,7 @@ export function agentRoutes(
     if (!["active", "idle", "error", "paused"].includes(targetAgent.status)) {
       throw conflict(`Cannot pause an agent while its status is ${targetAgent.status}`);
     }
-
-    const [openIssue] = await db
-      .select({ id: issuesTable.id })
-      .from(issuesTable)
-      .where(and(
-        eq(issuesTable.companyId, targetAgent.companyId),
-        eq(issuesTable.assigneeAgentId, targetAgent.id),
-        notInArray(issuesTable.status, ["done", "cancelled"]),
-      ))
-      .limit(1);
-    if (openIssue) {
-      throw conflict("Cannot pause an agent with open assigned issues");
-    }
-
-    const [activeRun] = await db
-      .select({ id: heartbeatRuns.id })
-      .from(heartbeatRuns)
-      .where(and(
-        eq(heartbeatRuns.companyId, targetAgent.companyId),
-        eq(heartbeatRuns.agentId, targetAgent.id),
-        inArray(heartbeatRuns.status, ["queued", "running"]),
-      ))
-      .limit(1);
-    if (activeRun) {
-      throw conflict("Cannot pause an agent with a queued or running execution");
-    }
+    await assertBoardOperationsTargetHasNoWork(targetAgent, "pause");
   }
 
   async function assertCanReadAgent(req: Request, targetAgent: { id: string; companyId: string }) {
