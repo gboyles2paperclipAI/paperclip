@@ -928,7 +928,7 @@ export function agentRoutes(
 
   async function canApplyScopedBoardOperationsReparent(
     req: Request,
-    targetAgent: { id: string; companyId: string; reportsTo: string | null },
+    targetAgent: { id: string; companyId: string; reportsTo: string | null; status: string },
     patchData: Record<string, unknown>,
   ) {
     const patchKeys = Object.keys(patchData);
@@ -941,6 +941,9 @@ export function agentRoutes(
     if (!actorAgent.reportsTo || targetAgent.reportsTo !== actorAgent.reportsTo) {
       throw forbidden("Board-operations authority can only reparent a peer with the same manager");
     }
+    if (!["active", "idle", "error", "paused"].includes(targetAgent.status)) {
+      throw conflict(`Cannot reparent an agent while its status is ${targetAgent.status}`);
+    }
 
     const proposedManagerId = patchData.reportsTo;
     if (typeof proposedManagerId !== "string") {
@@ -951,8 +954,9 @@ export function agentRoutes(
       !proposedManager
       || proposedManager.companyId !== targetAgent.companyId
       || proposedManager.reportsTo !== actorAgent.reportsTo
+      || !["active", "idle", "error", "paused"].includes(proposedManager.status)
     ) {
-      throw forbidden("Board-operations authority can only select a manager from the same peer group");
+      throw forbidden("Board-operations authority can only select an operational manager from the same peer group");
     }
     await assertBoardOperationsTargetHasNoWork(targetAgent, "reparent");
     return true;

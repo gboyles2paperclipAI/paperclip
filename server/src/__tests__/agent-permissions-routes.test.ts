@@ -637,6 +637,73 @@ describe.sequential("agent permission routes", () => {
     expect(mockAgentService.update).not.toHaveBeenCalled();
   });
 
+  it("refuses to reparent a peer under a non-operational manager", async () => {
+    mockAccessService.canUser.mockResolvedValue(false);
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === boardOperationsAgentId) {
+        return {
+          ...baseAgent,
+          id: boardOperationsAgentId,
+          reportsTo: peerGroupManagerId,
+          permissions: { canCreateAgents: false, boardOperationsAuthority: true },
+        };
+      }
+      if (id === outsidePeerManagerId) {
+        return {
+          ...baseAgent,
+          id: outsidePeerManagerId,
+          reportsTo: peerGroupManagerId,
+          status: "terminated",
+        };
+      }
+      return { ...baseAgent, reportsTo: peerGroupManagerId };
+    });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: boardOperationsAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-board-operations",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ reportsTo: outsidePeerManagerId }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("operational manager");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses to reparent a peer in a non-operational state", async () => {
+    mockAccessService.canUser.mockResolvedValue(false);
+    mockAgentService.getById.mockImplementation(async (id: string) => id === boardOperationsAgentId
+      ? {
+          ...baseAgent,
+          id: boardOperationsAgentId,
+          reportsTo: peerGroupManagerId,
+          permissions: { canCreateAgents: false, boardOperationsAuthority: true },
+        }
+      : { ...baseAgent, reportsTo: peerGroupManagerId, status: "terminated" });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: boardOperationsAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-board-operations",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ reportsTo: boardOperationsAgentId }));
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("status is terminated");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
   it("refuses to clear a peer's manager", async () => {
     mockAccessService.canUser.mockResolvedValue(false);
     mockAgentService.getById.mockImplementation(async (id: string) => id === boardOperationsAgentId
