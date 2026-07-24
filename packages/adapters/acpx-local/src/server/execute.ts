@@ -1587,11 +1587,17 @@ export function createAcpxLocalExecutor(deps: ExecuteDeps = {}) {
       cancelActiveTurn = async (reason: string) => {
         await turn.cancel({ reason });
       };
-      for await (const event of turn.events) {
-        if (event.type === "text_delta") textParts.push(event.text);
-        await emitRuntimeEvent(ctx, event);
+      let eventStreamError: unknown = null;
+      try {
+        for await (const event of turn.events) {
+          if (event.type === "text_delta") textParts.push(event.text);
+          await emitRuntimeEvent(ctx, event);
+        }
+      } catch (err) {
+        eventStreamError = err;
       }
       const terminal = await turn.result;
+      if (eventStreamError && terminal.status !== "completed") throw eventStreamError;
       if (timeout) clearTimeout(timeout);
       if (terminal.status === "failed" || terminal.status === "cancelled" || timedOut) {
         const existing = warmHandles.get(prepared.sessionKey);

@@ -253,6 +253,89 @@ describe("shared ACPX engine runtime behavior", () => {
     });
   });
 
+  it("treats completed turns as success when the ACP event stream disconnects after final output", async () => {
+    const root = await makeTempRoot();
+    const cases = [
+      {
+        name: "cheap-codex",
+        config: {
+          agent: "codex",
+          stateDir: path.join(root, "state-cheap-codex"),
+          model: "gpt-5.4-mini",
+          modelReasoningEffort: "low",
+          fastMode: true,
+        },
+      },
+      {
+        name: "default-custom",
+        config: {
+          agent: "custom",
+          agentCommand: "node ./fake-acp.js",
+          stateDir: path.join(root, "state-default-custom"),
+        },
+      },
+    ];
+
+    class CleanExitDisconnectError extends Error {
+      readonly code = "ACP_TURN_FAILED";
+      readonly retryable = false;
+      constructor() {
+        super("ACP disconnected after child process exited cleanly");
+        this.name = "AcpRuntimeError";
+      }
+    }
+
+    for (const testCase of cases) {
+      const logs: Array<{ stream: string; text: string }> = [];
+      const execute = createAcpxEngineExecutor({
+        createRuntime: () => ({
+          ensureSession: async () => ({
+            backendSessionId: `backend-session-${testCase.name}`,
+            agentSessionId: `agent-session-${testCase.name}`,
+            runtimeSessionName: `runtime-session-${testCase.name}`,
+          }),
+          setConfigOption: async () => {},
+          startTurn: () => ({
+            events: (async function* () {
+              yield {
+                type: "text_delta",
+                text: `final output from ${testCase.name}`,
+                stream: "output",
+                tag: "agent_message_chunk",
+              };
+              yield { type: "done", stopReason: "end_turn" };
+              throw new CleanExitDisconnectError();
+            })(),
+            result: Promise.resolve({ status: "completed", stopReason: "end_turn" }),
+            cancel: async () => {},
+          }),
+          close: async () => {},
+        }) as never,
+      });
+
+      const result = await execute({
+        runId: `run-${testCase.name}`,
+        agent: {
+          id: `agent-${testCase.name}`,
+          companyId: "company-1",
+        },
+        runtime: {},
+        config: testCase.config,
+        context: {},
+        onLog: async (stream: "stdout" | "stderr", text: string) => {
+          logs.push({ stream, text });
+        },
+        onMeta: async () => {},
+      } as never);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.errorCode).toBeNull();
+      expect(result.timedOut).toBe(false);
+      expect(result.summary).toBe(`final output from ${testCase.name}`);
+      expect(logs.some((entry) => entry.text.includes("\"type\":\"acpx.error\""))).toBe(false);
+    }
+  });
+
   it("captures per-run usage, cost deltas, and billing identity from the ACP runtime", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
