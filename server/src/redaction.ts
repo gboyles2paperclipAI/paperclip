@@ -38,10 +38,30 @@ const SECRET_TEXT_HINTS = [
   "ghr_",
 ] as const;
 export const REDACTED_EVENT_VALUE = "***REDACTED***";
+export const GITHUB_AUTH_OUTPUT_DENY_VALUE = "[REDACTED:github_auth_output]";
 
 function maybeContainsSecretText(input: string) {
   const lower = input.toLowerCase();
   return SECRET_TEXT_HINTS.some((hint) => lower.includes(hint)) || input.includes(".");
+}
+
+function redactGitHubAuthStatusOutput(input: string): string {
+  if (!/\bgithub\.com\b/i.test(input) && !/\btoken\s*(?:scopes?)?\s*:/i.test(input)) return input;
+
+  return input
+    .split(/(\r?\n)/)
+    .map((part) => {
+      if (part === "\n" || part === "\r\n") return part;
+      if (/^\s*(?:(?:x|X|\u2713)\s*)?Logged in to github\.com account\b/i.test(part)) {
+        return GITHUB_AUTH_OUTPUT_DENY_VALUE;
+      }
+      if (/^\s*-\s*(?:Active account|Git operations protocol|Token|Token scopes|OAuth app)\s*:/i.test(part)) {
+        return GITHUB_AUTH_OUTPUT_DENY_VALUE;
+      }
+      if (/\bgh[pousr]_[A-Za-z0-9_*.-]{4,}\b/.test(part)) return GITHUB_AUTH_OUTPUT_DENY_VALUE;
+      return part;
+    })
+    .join("");
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -134,9 +154,10 @@ export function redactEventPayload(payload: Record<string, unknown> | null): Rec
 }
 
 export function redactSensitiveText(input: string): string {
-  if (!maybeContainsSecretText(input)) return input;
+  const githubAuthRedacted = redactGitHubAuthStatusOutput(input);
+  if (!maybeContainsSecretText(githubAuthRedacted)) return githubAuthRedacted;
   return redactCommandText(
-    input
+    githubAuthRedacted
       .replace(JSON_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}$2`)
       .replace(ESCAPED_JSON_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}$2`),
     REDACTED_EVENT_VALUE,

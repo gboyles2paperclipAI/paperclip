@@ -1895,6 +1895,44 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     });
   });
 
+  it("keeps request confirmations pending when a user-looking comment carries run provenance", async () => {
+    const { companyId, issueId } = await seedConfirmationIssue("Run-stamped board-looking comment supersede guard");
+    const created = await interactionsSvc.create({
+      id: issueId,
+      companyId,
+    }, {
+      kind: "request_confirmation",
+      payload: {
+        version: 1,
+        prompt: "Proceed with the current draft?",
+      },
+    }, {
+      userId: "local-board",
+    });
+
+    const expired = await interactionsSvc.expireRequestConfirmationsSupersededByComment({
+      id: issueId,
+      companyId,
+    }, {
+      id: randomUUID(),
+      createdAt: new Date(new Date(created.createdAt).getTime() + 1_000),
+      authorUserId: "local-board",
+      createdByRunId: randomUUID(),
+    }, {
+      userId: "local-board",
+    });
+
+    expect(expired).toHaveLength(0);
+    const rows = await db.select().from(issueThreadInteractions);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: created.id,
+      status: "pending",
+      resolvedByAgentId: null,
+      resolvedByUserId: null,
+    });
+  });
+
   it("keeps request confirmations pending when user-comment supersede is explicitly disabled", async () => {
     const { companyId, issueId } = await seedConfirmationIssue("Comment supersede opt-out");
 
