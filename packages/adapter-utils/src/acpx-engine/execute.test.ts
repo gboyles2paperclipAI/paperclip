@@ -901,6 +901,80 @@ describe("shared ACPX engine runtime behavior", () => {
     });
   });
 
+  it("classifies clean ACP stream disconnects after final turn output as completed", async () => {
+    const cases = [
+      {
+        label: "codex cheap profile",
+        config: {
+          agent: "codex",
+          agentCommand: "node ./fake-acp.js",
+          model: "gpt-5.4-mini",
+          fastMode: true,
+        },
+        expectedModel: "gpt-5.4-mini",
+      },
+      {
+        label: "claude default profile",
+        config: {
+          agent: "claude",
+        },
+        expectedModel: null,
+      },
+    ];
+
+    for (const candidate of cases) {
+      const root = await makeTempRoot();
+      const logs: Array<{ stream: string; text: string }> = [];
+      const execute = createAcpxEngineExecutor({
+        requireCodexProcessMetadata: false,
+        createRuntime: () => ({
+          ensureSession: async () => ({
+            backendSessionId: "backend-session",
+            agentSessionId: "agent-session",
+            runtimeSessionName: "runtime-session",
+          }),
+          startTurn: () => ({
+            events: (async function* () {
+              yield { type: "text_delta", text: `${candidate.label} final output` };
+              yield { type: "done", stopReason: "end_turn" };
+              throw new Error("ACP disconnected");
+            })(),
+            result: new Promise(() => {}),
+            cancel: async () => {},
+          }),
+          setConfigOption: async () => {},
+          close: async () => {},
+        }) as never,
+      });
+
+      const result = await execute({
+        runId: `run-${candidate.label.replaceAll(" ", "-")}`,
+        agent: { id: "agent-1", companyId: "company-1" },
+        runtime: {},
+        config: {
+          ...candidate.config,
+          stateDir: path.join(root, "state"),
+        },
+        context: {},
+        onLog: async (stream: "stdout" | "stderr", text: string) => {
+          logs.push({ stream, text });
+        },
+        onMeta: async () => {},
+      } as never);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.errorCode).toBeNull();
+      expect(result.timedOut).toBe(false);
+      expect(result.summary).toBe(`${candidate.label} final output`);
+      expect(result.model).toBe(candidate.expectedModel);
+      expect(result.resultJson).toMatchObject({
+        status: "completed",
+        stopReason: "end_turn",
+      });
+      expect(logs.some((entry) => entry.text.includes("ACP disconnected"))).toBe(false);
+    }
+  });
+
   it.skipIf(process.platform !== "linux")(
     "terminates the verified Codex ACP group before closing the direct runtime handle",
     async () => {
