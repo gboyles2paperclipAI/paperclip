@@ -2264,15 +2264,30 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       cancelActiveTurn = async (reason: string) => {
         await turn.cancel({ reason });
       };
-      for await (const event of turn.events) {
-        if (event.type === "text_delta") textParts.push(event.text);
-        if (event.type === "status" && event.tag === "usage_update") {
-          eventBreakdown = event.breakdown ?? eventBreakdown;
-          eventCostUsd = usdCostAmount(event.cost) ?? eventCostUsd;
+      let sawFinalTurnEvent = false;
+      let finalTurnStopReason: string | undefined;
+      let streamDisconnectedAfterFinalEvent = false;
+      try {
+        for await (const event of turn.events) {
+          if (event.type === "text_delta") textParts.push(event.text);
+          if (event.type === "status" && event.tag === "usage_update") {
+            eventBreakdown = event.breakdown ?? eventBreakdown;
+            eventCostUsd = usdCostAmount(event.cost) ?? eventCostUsd;
+          }
+          if (event.type === "done") {
+            sawFinalTurnEvent = true;
+            finalTurnStopReason = event.stopReason;
+          }
+          await emitRuntimeEvent(ctx, event);
         }
-        await emitRuntimeEvent(ctx, event);
+      } catch (err) {
+        if (!sawFinalTurnEvent) throw err;
+        streamDisconnectedAfterFinalEvent = true;
+        void turn.result.catch(() => {});
       }
-      const terminal = await turn.result;
+      const terminal: AcpRuntimeTurnResult = streamDisconnectedAfterFinalEvent
+        ? ({ status: "completed", stopReason: finalTurnStopReason ?? "end_turn" } as AcpRuntimeTurnResult)
+        : await turn.result;
       if (timeout) clearTimeout(timeout);
       // Read usage before the close/warm-handle paths below can discard state.
       const postTurnStatus = await readRuntimeStatus(runtime, sessionHandle);
