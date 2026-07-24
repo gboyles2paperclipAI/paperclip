@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -792,6 +792,178 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
         .then((rows) => rows.map((row) => row.status).sort());
       expect(competingStatuses).toEqual(["queued", "running"]);
       expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    } finally {
+      if (originalPremiumCap === undefined) {
+        delete process.env.PAPERCLIP_PREMIUM_MAX_CONCURRENT_RUNS;
+      } else {
+        process.env.PAPERCLIP_PREMIUM_MAX_CONCURRENT_RUNS = originalPremiumCap;
+      }
+      finishFirstRun();
+    }
+  }, 40_000);
+
+  it("admits a critical ready run at the next freed premium slot across agents", async () => {
+    const originalPremiumCap = process.env.PAPERCLIP_PREMIUM_MAX_CONCURRENT_RUNS;
+    process.env.PAPERCLIP_PREMIUM_MAX_CONCURRENT_RUNS = "1";
+    const companyId = randomUUID();
+    const lowAgentId = randomUUID();
+    const criticalAgentId = randomUUID();
+    const firstLowIssueId = randomUUID();
+    const queuedLowIssueIds = [randomUUID(), randomUUID()];
+    const criticalIssueId = randomUUID();
+    let finishFirstRun!: () => void;
+    const firstRunFinished = new Promise<void>((resolve) => {
+      finishFirstRun = resolve;
+    });
+    let firstInvocation = true;
+    const startedRunIds: string[] = [];
+
+    mockAdapterExecute.mockImplementation(async (context: { runId: string }) => {
+      startedRunIds.push(context.runId);
+      if (firstInvocation) {
+        firstInvocation = false;
+        await firstRunFinished;
+      }
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        errorMessage: null,
+        summary: "Priority-aware premium run completed.",
+        provider: "test",
+        model: "test-model",
+      };
+    });
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(agents).values([
+      {
+        id: lowAgentId,
+        companyId,
+        name: "LowerPriorityAgent",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 3 } },
+        permissions: {},
+      },
+      {
+        id: criticalAgentId,
+        companyId,
+        name: "SecurityAgent",
+        role: "security",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+        permissions: {},
+      },
+    ]);
+    await db.insert(issues).values([
+      {
+        id: firstLowIssueId,
+        companyId,
+        title: "Lower priority active work",
+        status: "todo",
+        priority: "low",
+        assigneeAgentId: lowAgentId,
+        responsibleUserId: "responsible-user",
+      },
+      ...queuedLowIssueIds.map((issueId, index) => ({
+        id: issueId,
+        companyId,
+        title: `Lower priority queued work ${index + 1}`,
+        status: "todo",
+        priority: "low",
+        assigneeAgentId: lowAgentId,
+        responsibleUserId: "responsible-user",
+      })),
+      {
+        id: criticalIssueId,
+        companyId,
+        title: "Critical security wake",
+        status: "todo",
+        priority: "critical",
+        assigneeAgentId: criticalAgentId,
+        responsibleUserId: "responsible-user",
+      },
+    ]);
+
+    try {
+      const firstLowWake = await heartbeat.wakeup(lowAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "issue_assigned",
+        payload: { issueId: firstLowIssueId },
+        contextSnapshot: { issueId: firstLowIssueId, wakeReason: "issue_assigned" },
+      });
+      expect(firstLowWake).not.toBeNull();
+      await db.insert(issueComments).values({
+        companyId,
+        issueId: firstLowIssueId,
+        authorAgentId: lowAgentId,
+        authorType: "agent",
+        createdByRunId: firstLowWake!.id,
+        body: "Lower priority active run completed.",
+      });
+      expect(await waitForCondition(async () => startedRunIds.length === 1, 30_000)).toBe(true);
+
+      const queuedLowWakeIds: string[] = [];
+      for (const issueId of queuedLowIssueIds) {
+        const wake = await heartbeat.wakeup(lowAgentId, {
+          source: "assignment",
+          triggerDetail: "system",
+          reason: "issue_assigned",
+          payload: { issueId },
+          contextSnapshot: { issueId, wakeReason: "issue_assigned" },
+        });
+        expect(wake).not.toBeNull();
+        queuedLowWakeIds.push(wake!.id);
+        await db.insert(issueComments).values({
+          companyId,
+          issueId,
+          authorAgentId: lowAgentId,
+          authorType: "agent",
+          createdByRunId: wake!.id,
+          body: "Lower priority queued run completed.",
+        });
+      }
+
+      const criticalWake = await heartbeat.wakeup(criticalAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "issue_assigned",
+        payload: { issueId: criticalIssueId },
+        contextSnapshot: { issueId: criticalIssueId, wakeReason: "issue_assigned" },
+      });
+      expect(criticalWake).not.toBeNull();
+      await db.insert(issueComments).values({
+        companyId,
+        issueId: criticalIssueId,
+        authorAgentId: criticalAgentId,
+        authorType: "agent",
+        createdByRunId: criticalWake!.id,
+        body: "Critical queued run completed.",
+      });
+
+      const queuedStatuses = await db
+        .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(inArray(heartbeatRuns.id, [...queuedLowWakeIds, criticalWake!.id]));
+      expect(queuedStatuses.every((row) => row.status === "queued")).toBe(true);
+
+      finishFirstRun();
+
+      expect(await waitForCondition(async () => startedRunIds.includes(criticalWake!.id), 30_000)).toBe(true);
+      expect(startedRunIds[0]).toBe(firstLowWake!.id);
+      expect(startedRunIds[1]).toBe(criticalWake!.id);
     } finally {
       if (originalPremiumCap === undefined) {
         delete process.env.PAPERCLIP_PREMIUM_MAX_CONCURRENT_RUNS;
