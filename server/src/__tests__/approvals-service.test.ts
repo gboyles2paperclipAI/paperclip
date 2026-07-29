@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { approvalService, normalizeApprovalListStatusFilter } from "../services/approvals.ts";
+import {
+  approvalService,
+  extractSupersededApprovalIds,
+  normalizeApprovalListStatusFilter,
+} from "../services/approvals.ts";
 
 const mockAgentService = vi.hoisted(() => ({
   activatePendingApproval: vi.fn(),
@@ -37,13 +41,16 @@ function createApproval(status: string): ApprovalRecord {
   };
 }
 
-function createDbStub(selectResults: ApprovalRecord[][], updateResults: ApprovalRecord[]) {
+function createDbStub(selectResults: ApprovalRecord[][], updateResults: ApprovalRecord[] | ApprovalRecord[][]) {
   const pendingSelectResults = [...selectResults];
+  const pendingUpdateResults = Array.isArray(updateResults[0])
+    ? [...(updateResults as ApprovalRecord[][])]
+    : [updateResults as ApprovalRecord[]];
   const selectWhere = vi.fn(async () => pendingSelectResults.shift() ?? []);
   const from = vi.fn(() => ({ where: selectWhere }));
   const select = vi.fn(() => ({ from }));
 
-  const returning = vi.fn(async () => updateResults);
+  const returning = vi.fn(async () => pendingUpdateResults.shift() ?? []);
   const updateWhere = vi.fn(() => ({ returning }));
   const set = vi.fn(() => ({ where: updateWhere }));
   const update = vi.fn(() => ({ set }));
@@ -51,6 +58,7 @@ function createDbStub(selectResults: ApprovalRecord[][], updateResults: Approval
   return {
     db: { select, update },
     selectWhere,
+    set,
     returning,
   };
 }
@@ -91,6 +99,38 @@ describe("approvalService resolution idempotency", () => {
     expect(result.applied).toBe(false);
     expect(result.approval.status).toBe("rejected");
     expect(mockAgentService.terminate).not.toHaveBeenCalled();
+  });
+
+  it("reopens revision requested parent approvals when a superseding approval is rejected", async () => {
+    const rejectedSuccessor = {
+      ...createApproval("rejected"),
+      id: "successor-approval",
+      type: "request_board_approval",
+      payload: { supersedesApprovalIds: ["parent-approval"] },
+    };
+    const reopenedParent = {
+      ...createApproval("pending"),
+      id: "parent-approval",
+      type: "request_board_approval",
+    };
+    const dbStub = createDbStub(
+      [[{ ...rejectedSuccessor, status: "pending" }]],
+      [[rejectedSuccessor], [reopenedParent]],
+    );
+
+    const svc = approvalService(dbStub.db as any);
+    const result = await svc.reject("successor-approval", "board", "Successor cancelled");
+
+    expect(result.applied).toBe(true);
+    expect(result.approval.id).toBe("successor-approval");
+    expect(dbStub.set).toHaveBeenCalledTimes(2);
+    expect(dbStub.set).toHaveBeenLastCalledWith(expect.objectContaining({
+      status: "pending",
+      decisionNote: expect.stringContaining("successor-approval"),
+      decidedByUserId: "board",
+      decidedAt: expect.any(Date),
+      updatedAt: expect.any(Date),
+    }));
   });
 
   it("still performs side effects when the resolution update is newly applied", async () => {
@@ -143,6 +183,16 @@ describe("approvalService list status filtering", () => {
 
   it("keeps exact revision requested filtering reachable", () => {
     expect(normalizeApprovalListStatusFilter("revision_requested")).toEqual(["revision_requested"]);
+  });
+});
+
+describe("extractSupersededApprovalIds", () => {
+  it("extracts unique superseded approval ids from scalar, array, and object payload shapes", () => {
+    expect(extractSupersededApprovalIds({
+      supersededApprovalId: "approval-1",
+      supersedesApprovalIds: ["approval-2", "approval-1"],
+      supersededApprovals: [{ id: "approval-3" }, { id: 42 }, null],
+    })).toEqual(["approval-1", "approval-2", "approval-3"]);
   });
 });
 

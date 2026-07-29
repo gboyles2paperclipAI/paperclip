@@ -13,6 +13,29 @@ export function normalizeApprovalListStatusFilter(status?: string): string[] {
   return status === "pending" ? ["pending", "revision_requested"] : [status];
 }
 
+export function extractSupersededApprovalIds(payload: Record<string, unknown>): string[] {
+  const values = [
+    payload.supersededApprovalId,
+    payload.supersedesApprovalId,
+    payload.supersededApprovalIds,
+    payload.supersedesApprovalIds,
+    payload.supersededApprovals,
+    payload.supersedesApprovals,
+  ];
+  const ids = values.flatMap((value) => {
+    if (typeof value === "string") return [value];
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((item) => {
+      if (typeof item === "string") return [item];
+      if (item && typeof item === "object" && typeof (item as { id?: unknown }).id === "string") {
+        return [(item as { id: string }).id];
+      }
+      return [];
+    });
+  });
+  return Array.from(new Set(ids));
+}
+
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
   const budgets = budgetService(db);
@@ -88,6 +111,34 @@ export function approvalService(db: Db) {
     throw unprocessable(
       `Only pending or revision requested approvals can be ${targetStatus === "approved" ? "approved" : "rejected"}`,
     );
+  }
+
+  async function reopenSupersededParentsOnSuccessorCancellation(
+    successor: ApprovalRecord,
+    decidedByUserId: string,
+    now: Date,
+  ) {
+    const payload = successor.payload as Record<string, unknown>;
+    const supersededApprovalIds = extractSupersededApprovalIds(payload);
+    if (supersededApprovalIds.length === 0) return [];
+
+    return db
+      .update(approvals)
+      .set({
+        status: "pending",
+        decisionNote: `Re-opened because superseding approval ${successor.id} was cancelled before a final decision was recorded.`,
+        decidedByUserId,
+        decidedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(approvals.companyId, successor.companyId),
+          inArray(approvals.id, supersededApprovalIds),
+          eq(approvals.status, "revision_requested"),
+        ),
+      )
+      .returning();
   }
 
   return {
@@ -212,6 +263,10 @@ export function approvalService(db: Db) {
         if (payloadAgentId) {
           await agentsSvc.terminate(payloadAgentId);
         }
+      }
+
+      if (applied) {
+        await reopenSupersededParentsOnSuccessorCancellation(updated, decidedByUserId, new Date());
       }
 
       return { approval: updated, applied };
