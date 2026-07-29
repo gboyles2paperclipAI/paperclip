@@ -8236,6 +8236,21 @@ export function issueRoutes(
         });
         return;
       }
+      const linkedApprovals = await issueApprovalsSvc.listApprovalsForIssue(existing.id);
+      const pendingApproval = linkedApprovals.find((approval) =>
+        approval.status === "pending" || approval.status === "revision_requested");
+      if (pendingApproval) {
+        res.status(422).json({
+          error: "Cannot mark issue done while a linked approval is pending",
+          details: {
+            code: "pending_linked_approval",
+            approvalId: pendingApproval.id,
+            approvalStatus: pendingApproval.status,
+            fix: "Resolve, reject, cancel, or resubmit the linked approval before closing the issue.",
+          },
+        });
+        return;
+      }
     }
 
     const nextAssigneeAgentId =

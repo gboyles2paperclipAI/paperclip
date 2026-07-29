@@ -332,6 +332,40 @@ describe("issue execution policy routes", () => {
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
+  it("rejects marking an issue done while a linked approval is pending", async () => {
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: "in_progress",
+      assigneeAgentId: "33333333-3333-4333-8333-333333333333",
+      assigneeUserId: null,
+      createdByUserId: "local-board",
+      identifier: "PAP-1004",
+      title: "Pending approval close",
+      executionPolicy: null,
+      executionState: null,
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([
+      { id: "approval-1", status: "revision_requested" },
+    ]);
+
+    const res = await request(await createApp())
+      .patch("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+      .send({ status: "done" });
+
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({
+      error: "Cannot mark issue done while a linked approval is pending",
+      details: {
+        code: "pending_linked_approval",
+        approvalId: "approval-1",
+        approvalStatus: "revision_requested",
+      },
+    });
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
   it("allows an agent-authored in_review transition with a typed execution participant", async () => {
     const issue = {
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",

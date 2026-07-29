@@ -8,6 +8,11 @@ import { budgetService } from "./budgets.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
 
+export function normalizeApprovalListStatusFilter(status?: string): string[] {
+  if (!status) return [];
+  return status === "pending" ? ["pending", "revision_requested"] : [status];
+}
+
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
   const budgets = budgetService(db);
@@ -88,7 +93,9 @@ export function approvalService(db: Db) {
   return {
     list: (companyId: string, status?: string) => {
       const conditions = [eq(approvals.companyId, companyId)];
-      if (status) conditions.push(eq(approvals.status, status));
+      const statusFilter = normalizeApprovalListStatusFilter(status);
+      if (statusFilter.length === 1) conditions.push(eq(approvals.status, statusFilter[0]!));
+      if (statusFilter.length > 1) conditions.push(inArray(approvals.status, statusFilter));
       return db.select().from(approvals).where(and(...conditions));
     },
 

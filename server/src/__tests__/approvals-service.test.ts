@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { approvalService } from "../services/approvals.ts";
+import { approvalService, normalizeApprovalListStatusFilter } from "../services/approvals.ts";
 
 const mockAgentService = vi.hoisted(() => ({
   activatePendingApproval: vi.fn(),
@@ -133,6 +133,16 @@ describe("approvalService resolution idempotency", () => {
         adapterConfig: approved.payload.adapterConfig,
       }),
     );
+  });
+});
+
+describe("approvalService list status filtering", () => {
+  it("folds revision requested approvals into the pending list filter", () => {
+    expect(normalizeApprovalListStatusFilter("pending")).toEqual(["pending", "revision_requested"]);
+  });
+
+  it("keeps exact revision requested filtering reachable", () => {
+    expect(normalizeApprovalListStatusFilter("revision_requested")).toEqual(["revision_requested"]);
   });
 });
 
