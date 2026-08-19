@@ -823,6 +823,39 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
+  it("passes persisted run provenance to comment supersession checks for user-looking comments", async () => {
+    mockIssueService.addComment.mockResolvedValueOnce({
+      id: "77777777-7777-4777-8777-777777777777",
+      issueId,
+      companyId,
+      authorType: "user",
+      authorUserId: "board-user",
+      authorAgentId: null,
+      createdByRunId: ownerRunId,
+      body: "A run-stamped board-looking comment.",
+      presentation: null,
+      metadata: null,
+      sourceTrust: null,
+      createdAt: new Date("2026-07-18T12:00:00.000Z"),
+      updatedAt: new Date("2026-07-18T12:00:00.000Z"),
+    });
+
+    const res = await request(await createApp(ownerActor()))
+      .post(`/api/issues/${issueId}/comments`)
+      .send({ body: "A run-stamped board-looking comment." });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockIssueThreadInteractionService.expireRequestConfirmationsSupersededByComment).toHaveBeenCalledWith(
+      expect.objectContaining({ id: issueId }),
+      expect.objectContaining({
+        id: "77777777-7777-4777-8777-777777777777",
+        authorUserId: "board-user",
+        createdByRunId: ownerRunId,
+      }),
+      expect.objectContaining({ agentId: ownerAgentId }),
+    );
+  });
+
   it("rejects non-mentioned peer agents from posting comments", async () => {
     mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
       allowed: input.action === "issue:read",
