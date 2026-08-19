@@ -10327,7 +10327,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         issues,
         and(
           eq(issues.companyId, heartbeatRuns.companyId),
-          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issues.id}`,
+          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issues.id}::text`,
         ),
       )
       .where(and(
