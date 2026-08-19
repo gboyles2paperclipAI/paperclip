@@ -127,6 +127,16 @@ async function runGit(cwd: string, args: string[]) {
   await execFile("git", args, { cwd });
 }
 
+async function gitOutput(cwd: string, args: string[]) {
+  const result = await execFile("git", args, { cwd });
+  return result.stdout.trim();
+}
+
+async function configureGitIdentity(cwd: string) {
+  await runGit(cwd, ["config", "user.name", "Paperclip Test"]);
+  await runGit(cwd, ["config", "user.email", "test@paperclip.dev"]);
+}
+
 async function createGitCheckout(options: { withRemote: boolean }) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-push-preflight-"));
   await runGit(root, ["init"]);
@@ -134,6 +144,56 @@ async function createGitCheckout(options: { withRemote: boolean }) {
     await runGit(root, ["remote", "add", "origin", "https://github.com/example/repo.git"]);
   }
   return root;
+}
+
+async function createGithubPrReviewCheckout(options: {
+  remoteName?: string;
+  includeOriginWithoutPr?: boolean;
+  stale?: boolean;
+} = {}) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pr-head-preflight-"));
+  const remoteName = options.remoteName ?? "origin";
+  const prRemote = path.join(root, `${remoteName}.git`);
+  const source = path.join(root, "source");
+  const review = path.join(root, "review");
+  await runGit(root, ["init", "--bare", prRemote]);
+  await fs.mkdir(source);
+  await runGit(source, ["init"]);
+  await configureGitIdentity(source);
+  await fs.writeFile(path.join(source, "tracked.txt"), "old\n");
+  await runGit(source, ["add", "tracked.txt"]);
+  await runGit(source, ["commit", "-m", "old pr head"]);
+  await runGit(source, ["remote", "add", remoteName, prRemote]);
+  await runGit(source, ["push", remoteName, "HEAD:refs/pull/713/head"]);
+
+  await fs.mkdir(review);
+  await runGit(review, ["init"]);
+  if (options.includeOriginWithoutPr && remoteName !== "origin") {
+    const origin = path.join(root, "origin.git");
+    await runGit(root, ["init", "--bare", origin]);
+    await runGit(review, ["remote", "add", "origin", origin]);
+  }
+  await runGit(review, ["remote", "add", remoteName, prRemote]);
+  await runGit(review, ["config", "remote.pushDefault", remoteName]);
+  await runGit(review, ["fetch", remoteName, `refs/pull/713/head:refs/remotes/${remoteName}/pull/713/head`]);
+  await runGit(review, ["checkout", "--detach", `refs/remotes/${remoteName}/pull/713/head`]);
+  const reviewedSha = await gitOutput(review, ["rev-parse", "HEAD"]);
+
+  if (options.stale !== false) {
+    await fs.writeFile(path.join(source, "tracked.txt"), "new\n");
+    await runGit(source, ["add", "tracked.txt"]);
+    await runGit(source, ["commit", "-m", "new pr head"]);
+    await runGit(source, ["push", "--force", remoteName, "HEAD:refs/pull/713/head"]);
+  }
+  const livePrHeadSha = await gitOutput(source, ["rev-parse", "HEAD"]);
+
+  return {
+    root,
+    review,
+    remoteName,
+    reviewedSha,
+    livePrHeadSha,
+  };
 }
 
 async function expectWorkspaceValidationFailure(
@@ -695,31 +755,181 @@ describe("assertPushCapabilityCheckoutValid", () => {
           identifier: "PAP-1",
         },
         cwd,
-      })).resolves.toBeUndefined();
+      })).resolves.toBeNull();
     } finally {
       await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("fetches the PR head from a configured non-origin push remote", async () => {
+    const fixture = await createGithubPrReviewCheckout({
+      remoteName: "fork",
+      includeOriginWithoutPr: true,
+      stale: false,
+    });
+    try {
+      await expect(assertPushCapabilityCheckoutValid({
+        enabled: true,
+        issue: {
+          id: "issue-1",
+          identifier: "PAP-1",
+          title: "Review PR #713",
+          description: "Review https://github.com/example/repo/pull/713 before approval.",
+        },
+        cwd: fixture.review,
+      })).resolves.toMatchObject({
+        prNumber: 713,
+        remoteName: "fork",
+        refreshedRef: "refs/remotes/fork/pull/713/head",
+        livePrHeadSha: fixture.livePrHeadSha,
+        reviewedSha: fixture.reviewedSha,
+      });
+    } finally {
+      await fs.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("redacts credential-bearing remote URLs from persisted fetch failures", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pr-fetch-redaction-"));
+    const review = path.join(root, "review");
+    const helperPath = path.join(root, "git-remote-credential-test");
+    const syntheticCredential = "synthetic-fetch-token";
+    const previousPath = process.env.PATH;
+    try {
+      await fs.mkdir(review);
+      await runGit(review, ["init"]);
+      await fs.writeFile(helperPath, "#!/bin/sh\nprintf '%s\\n' \"$2\" >&2\nexit 1\n", { mode: 0o755 });
+      process.env.PATH = `${root}${path.delimiter}${previousPath ?? ""}`;
+      await runGit(review, [
+        "remote",
+        "add",
+        "fork",
+        `credential-test::https://user:${syntheticCredential}@github.com/example/repo.git`,
+      ]);
+      await runGit(review, ["config", "remote.pushDefault", "fork"]);
+
+      const failure = await assertPushCapabilityCheckoutValid({
+        enabled: true,
+        issue: {
+          id: "issue-1",
+          identifier: "PAP-1",
+          title: "Review PR #713",
+          description: "Review https://github.com/example/repo/pull/713 before approval.",
+        },
+        cwd: review,
+      }).then(
+        () => null,
+        (error: unknown) => error as {
+          code?: string;
+          resultJson?: { workspaceValidation?: Record<string, unknown> };
+        },
+      );
+
+      expect(failure).toMatchObject({
+        code: "workspace_validation_failed",
+        resultJson: {
+          workspaceValidation: expect.objectContaining({
+            reason: "pr_head_fetch_failed",
+            fetchRemote: "fork",
+          }),
+        },
+      });
+      const storedMessage = failure?.resultJson?.workspaceValidation?.errorMessage;
+      expect(storedMessage).toEqual(expect.any(String));
+      expect(storedMessage).toContain("***REDACTED***");
+      expect(storedMessage).not.toContain(syntheticCredential);
+      expect(storedMessage).not.toContain(`user:${syntheticCredential}`);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    "execution_review_requested",
+    "execution_approval_requested",
+  ])("fails closed on a stale PR head for %s wakes", async (wakeReason) => {
+    const fixture = await createGithubPrReviewCheckout();
+    try {
+      const enabled = requiresPushCapabilityPreflight({
+        adapterType: "codex_local",
+        issueId: "issue-1",
+        explicitRunScopedSkillKeys: ["paperclipai/bundled/software-development/github-pr-workflow"],
+        wakeReason,
+      });
+      await expect(assertPushCapabilityCheckoutValid({
+        enabled,
+        issue: {
+          id: "issue-1",
+          identifier: "PAP-1",
+          title: "Review PR #713",
+          description: "Review https://github.com/example/repo/pull/713 before approval.",
+        },
+        cwd: fixture.review,
+      })).rejects.toMatchObject({
+        code: "workspace_validation_failed",
+        message: expect.stringContaining("Refusing to dispatch stale review findings"),
+        resultJson: {
+          workspaceValidation: expect.objectContaining({
+            reason: "stale_pr_head_checkout",
+            issueId: "issue-1",
+            prNumber: 713,
+            refreshedRef: "refs/remotes/origin/pull/713/head",
+            livePrHeadSha: fixture.livePrHeadSha,
+            reviewedSha: fixture.reviewedSha,
+          }),
+        },
+      });
+    } finally {
+      await fs.rm(fixture.root, { recursive: true, force: true });
     }
   });
 });
 
 describe("requiresPushCapabilityPreflight", () => {
-  it("only enables the guard when the issue explicitly mentions the GitHub PR workflow skill", () => {
+  it("enables the guard for review and approval wakes with the GitHub PR workflow skill", () => {
     expect(requiresPushCapabilityPreflight({
       adapterType: "codex_local",
       issueId: "issue-1",
       explicitRunScopedSkillKeys: ["paperclipai/bundled/software-development/github-pr-workflow"],
+      wakeReason: "execution_review_requested",
     })).toBe(true);
 
     expect(requiresPushCapabilityPreflight({
       adapterType: "codex_local",
       issueId: "issue-1",
+      explicitRunScopedSkillKeys: ["paperclipai/bundled/software-development/github-pr-workflow"],
+      wakeReason: "execution_approval_requested",
+    })).toBe(true);
+  });
+
+  it.each([
+    null,
+    "issue_assigned",
+    "execution_changes_requested",
+  ])("does not block non-review PR-workflow tasks with wake reason %s", (wakeReason) => {
+    expect(requiresPushCapabilityPreflight({
+      adapterType: "codex_local",
+      issueId: "issue-1",
+      explicitRunScopedSkillKeys: ["paperclipai/bundled/software-development/github-pr-workflow"],
+      wakeReason,
+    })).toBe(false);
+  });
+
+  it("still requires an issue, supported adapter, and explicit PR-workflow skill", () => {
+    expect(requiresPushCapabilityPreflight({
+      adapterType: "codex_local",
+      issueId: "issue-1",
       explicitRunScopedSkillKeys: [],
+      wakeReason: "execution_review_requested",
     })).toBe(false);
 
     expect(requiresPushCapabilityPreflight({
       adapterType: "cursor-cloud",
       issueId: "issue-1",
       explicitRunScopedSkillKeys: ["paperclipai/bundled/software-development/github-pr-workflow"],
+      wakeReason: "execution_review_requested",
     })).toBe(false);
   });
 });
