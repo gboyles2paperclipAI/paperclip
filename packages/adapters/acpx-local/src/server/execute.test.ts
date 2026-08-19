@@ -62,15 +62,16 @@ async function runExecutor(
   options: {
     context?: Record<string, unknown>;
     executionTransport?: Record<string, unknown>;
+    runtime?: Record<string, unknown>;
   } = {},
 ) {
   const runtimeOptions: Record<string, unknown>[] = [];
   const meta: Record<string, unknown>[] = [];
   const logs: Array<{ stream: string; text: string }> = [];
   const execute = createAcpxLocalExecutor({
-    createRuntime: (options) => {
-      runtimeOptions.push(options as unknown as Record<string, unknown>);
-      return buildRuntime() as never;
+    createRuntime: (runtimeConfig) => {
+      runtimeOptions.push(runtimeConfig as unknown as Record<string, unknown>);
+      return (options.runtime ?? buildRuntime()) as never;
     },
   });
 
@@ -97,6 +98,47 @@ async function runExecutor(
 }
 
 describe("acpx_local runtime skill isolation", () => {
+  it("uses the post-model session schema before applying Codex reasoning effort", async () => {
+    const setConfigInputs: Array<{ key: string; value: string }> = [];
+    let configOptions = [
+      { id: "mode", category: "mode" },
+      { id: "model", category: "model" },
+      { id: "reasoning_effort", category: "thought_level" },
+    ];
+    const runtime = {
+      ...buildRuntime(),
+      getStatus: async () => ({ details: { configOptions } }),
+      setConfigOption: async (input: { key: string; value: string }) => {
+        if (!configOptions.some((option) => option.id === input.key)) {
+          throw new Error(`Unsupported config option: ${input.key}`);
+        }
+        setConfigInputs.push(input);
+        if (input.key === "model") {
+          configOptions = [
+            { id: "mode", category: "mode" },
+            { id: "model", category: "model" },
+          ];
+        }
+      },
+    };
+
+    const { logs } = await runExecutor(
+      {
+        agent: "codex",
+        model: "gpt-5.5",
+        modelReasoningEffort: "high",
+      },
+      { runtime },
+    );
+
+    expect(setConfigInputs.map(({ key, value }) => ({ key, value }))).toEqual([
+      { key: "model", value: "gpt-5.5" },
+    ]);
+    expect(logs.map((entry) => entry.text).join("\n")).toContain(
+      "does not advertise a thought-level config option",
+    );
+  });
+
   it.skipIf(process.platform === "win32")("materializes ACPX Claude skills without symlinked descendants", async () => {
     const root = await makeTempRoot();
     const skillRoot = path.join(root, "skills");

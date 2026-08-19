@@ -143,6 +143,35 @@ class FakeRuntime {
   }
 }
 
+class ModelDependentConfigRuntime extends FakeRuntime {
+  private configOptions = [
+    { id: "mode", category: "mode" },
+    { id: "model", category: "model" },
+    { id: "reasoning_effort", category: "thought_level" },
+  ];
+
+  override getStatus() {
+    return Promise.resolve({ details: { configOptions: this.configOptions } });
+  }
+
+  override async setConfigOption(input: {
+    handle: FakeRuntimeHandle;
+    key: string;
+    value: string;
+  }) {
+    if (!this.configOptions.some((option) => option.id === input.key)) {
+      throw new Error(`Unsupported config option: ${input.key}`);
+    }
+    this.setConfigInputs.push(input);
+    if (input.key === "model") {
+      this.configOptions = [
+        { id: "mode", category: "mode" },
+        { id: "model", category: "model" },
+      ];
+    }
+  }
+}
+
 async function makeTempRoot(prefix: string) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
   tempRoots.push(root);
@@ -487,6 +516,42 @@ describe("codex_local ACP lane", () => {
     ]);
     expect(meta[0]?.commandNotes?.join("\n")).toContain("Prepared ACPX Codex skill home");
     expect(meta[0]?.env?.CODEX_HOME).toBe(path.join(root, "codex-home"));
+  });
+
+  it("uses the post-model session schema before applying Codex reasoning effort", async () => {
+    const root = await makeTempRoot("paperclip-codex-acp-config-schema-");
+    const logs: string[] = [];
+    const runtimes: ModelDependentConfigRuntime[] = [];
+    const execute = createCodexAcpExecutor({
+      requireCodexProcessMetadata: false,
+      createRuntime: (options: FakeRuntimeOptions) => {
+        const runtime = new ModelDependentConfigRuntime(options);
+        runtimes.push(runtime);
+        return runtime as never;
+      },
+    });
+
+    const result = await execute(buildContext(root, {
+      config: {
+        engine: "acp",
+        cwd: root,
+        stateDir: path.join(root, "state"),
+        model: "gpt-5.5",
+        modelReasoningEffort: "high",
+        promptTemplate: "Do the assigned work.",
+      },
+      onLog: async (_stream, text) => {
+        logs.push(text);
+      },
+    }));
+
+    expect(result.exitCode).toBe(0);
+    expect(runtimes[0]?.setConfigInputs.map((input) => [input.key, input.value])).toEqual([
+      ["model", "gpt-5.5"],
+    ]);
+    expect(logs.join("\n")).toContain(
+      "does not advertise a thought-level config option",
+    );
   });
 
   it("resumes compatible ACP sessions on later Codex ACP runs", async () => {
