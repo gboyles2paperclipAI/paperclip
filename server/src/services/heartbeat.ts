@@ -10291,6 +10291,108 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(count ?? 0);
   }
 
+  async function hasHigherPriorityReadyQueuedPremiumRun(
+    client: Pick<Db, "select">,
+    run: typeof heartbeatRuns.$inferSelect,
+    companyAgentsByCompanyId: Map<string, AgentOrgRow[]> = new Map(),
+  ) {
+    const currentIssueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
+    if (!currentIssueId) return false;
+    const [currentIssue] = await client
+      .select({ id: issues.id, status: issues.status, priority: issues.priority })
+      .from(issues)
+      .where(and(eq(issues.companyId, run.companyId), eq(issues.id, currentIssueId)))
+      .limit(1);
+    if (!currentIssue) return false;
+
+    const currentReadyRank = currentIssue.status === "in_progress" ? 0 : 1;
+    const currentPriorityRank = issueRunPriorityRank(currentIssue.priority);
+    const cutoff = await getWorktreeExecutionCutoff();
+    const candidateRows = await client
+      .select({
+        id: heartbeatRuns.id,
+        agentId: heartbeatRuns.agentId,
+        companyId: heartbeatRuns.companyId,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
+        createdAt: heartbeatRuns.createdAt,
+        issueId: issues.id,
+        issueStatus: issues.status,
+        issuePriority: issues.priority,
+        agent: agents,
+      })
+      .from(heartbeatRuns)
+      .innerJoin(companies, eq(companies.id, heartbeatRuns.companyId))
+      .innerJoin(agents, and(eq(agents.id, heartbeatRuns.agentId), eq(agents.companyId, heartbeatRuns.companyId)))
+      .innerJoin(
+        issues,
+        and(
+          eq(issues.companyId, heartbeatRuns.companyId),
+          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issues.id}::text`,
+        ),
+      )
+      .where(and(
+        eq(heartbeatRuns.status, "queued"),
+        eq(companies.status, "active"),
+        inArray(agents.adapterType, [...PREMIUM_MANAGED_ADAPTER_TYPES]),
+        sql`coalesce(${heartbeatRuns.contextSnapshot} ->> 'modelProfile', '') != 'cheap'`,
+        cutoff ? gte(heartbeatRuns.createdAt, cutoff) : undefined,
+        sql`${heartbeatRuns.id} != ${run.id}`,
+      ));
+    if (candidateRows.length === 0) return false;
+
+    const candidatesByCompanyId = new Map<string, Array<typeof candidateRows[number]>>();
+    for (const candidate of candidateRows) {
+      const rows = candidatesByCompanyId.get(candidate.companyId) ?? [];
+      rows.push(candidate);
+      candidatesByCompanyId.set(candidate.companyId, rows);
+    }
+
+    const readinessByIssueId = new Map<string, Awaited<ReturnType<typeof issuesSvc.getDependencyReadiness>>>();
+    for (const [companyId, candidates] of candidatesByCompanyId) {
+      const readiness = await issuesSvc.listDependencyReadiness(
+        companyId,
+        candidates.map((candidate) => candidate.issueId),
+      );
+      for (const [issueId, value] of readiness) {
+        readinessByIssueId.set(issueId, value);
+      }
+    }
+
+    const runningCounts = await client
+      .select({
+        agentId: heartbeatRuns.agentId,
+        count: sql<number>`count(*)`,
+      })
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.status, "running"),
+        inArray(heartbeatRuns.agentId, [...new Set(candidateRows.map((candidate) => candidate.agentId))]),
+      ))
+      .groupBy(heartbeatRuns.agentId);
+    const runningCountByAgentId = new Map(runningCounts.map((row) => [row.agentId, Number(row.count ?? 0)]));
+
+    for (const candidate of candidateRows) {
+      const readiness = readinessByIssueId.get(candidate.issueId);
+      if (!(readiness?.isDependencyReady ?? true)) continue;
+      const companyAgents = companyAgentsByCompanyId.get(candidate.companyId) ?? await listCompanyAgentOrgRows(candidate.companyId);
+      companyAgentsByCompanyId.set(candidate.companyId, companyAgents);
+      const invokability = evaluateAgentInvokability(toAgentOrgRow(candidate.agent), companyAgents);
+      if (!invokability.invokable) continue;
+      const policy = parseHeartbeatPolicy(candidate.agent);
+      const runningCount = runningCountByAgentId.get(candidate.agentId) ?? 0;
+      if (runningCount >= policy.maxConcurrentRuns) continue;
+
+      const candidateReadyRank = candidate.issueStatus === "in_progress" ? 0 : 1;
+      if (candidateReadyRank < currentReadyRank) return true;
+      if (candidateReadyRank > currentReadyRank) continue;
+      const candidatePriorityRank = issueRunPriorityRank(candidate.issuePriority);
+      if (candidatePriorityRank < currentPriorityRank) return true;
+      if (candidatePriorityRank > currentPriorityRank) continue;
+      if (candidate.createdAt.getTime() < run.createdAt.getTime()) return true;
+    }
+    return false;
+  }
+
   async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect, companyAgents?: AgentOrgRow[]) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
@@ -10453,6 +10555,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           activePremiumRunningCount++;
         }
         if (activePremiumRunningCount >= premiumManagedMaxConcurrentRuns()) return null;
+        if (await hasHigherPriorityReadyQueuedPremiumRun(
+          tx,
+          run,
+          companyAgents ? new Map([[run.companyId, companyAgents]]) : undefined,
+        )) return null;
       }
       return claimRun(tx);
     });

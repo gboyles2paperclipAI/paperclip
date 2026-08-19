@@ -30,6 +30,10 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import {
+  resolveAdvertisedSessionConfigOption,
+  type AcpxSessionConfigRequest,
+} from "@paperclipai/adapter-utils/acpx-engine/session-config";
+import {
   createAcpRuntime,
   createAgentRegistry,
   createRuntimeStore,
@@ -39,6 +43,7 @@ import {
   type AcpRuntimeEvent,
   type AcpRuntimeHandle,
   type AcpRuntimeOptions,
+  type AcpRuntimeStatus,
   type AcpRuntimeTurn,
   type AcpRuntimeTurnResult,
 } from "acpx/runtime";
@@ -955,8 +960,8 @@ async function buildRuntime(input: {
   };
 }
 
-function sessionConfigOptions(prepared: AcpxPreparedRuntime): Array<{ key: string; value: string }> {
-  const options: Array<{ key: string; value: string }> = [];
+function sessionConfigOptions(prepared: AcpxPreparedRuntime): AcpxSessionConfigRequest[] {
+  const options: AcpxSessionConfigRequest[] = [];
   // Model for the claude agent is pre-set via ANTHROPIC_MODEL env var at
   // startup; skip set_config_option to avoid ACP-server model-name validation
   // that rejects bare IDs like "claude-opus-4-7" in some runtime versions.
@@ -967,6 +972,7 @@ function sessionConfigOptions(prepared: AcpxPreparedRuntime): Array<{ key: strin
     options.push({
       key: prepared.acpxAgent === "codex" ? "reasoning_effort" : "effort",
       value: prepared.requestedThinkingEffort,
+      category: "thought_level",
     });
   }
   if (prepared.fastMode) {
@@ -976,6 +982,18 @@ function sessionConfigOptions(prepared: AcpxPreparedRuntime): Array<{ key: strin
     );
   }
   return options;
+}
+
+async function readRuntimeStatus(
+  runtime: AcpRuntime,
+  handle: AcpRuntimeHandle,
+): Promise<AcpRuntimeStatus | null> {
+  if (!runtime.getStatus) return null;
+  try {
+    return (await runtime.getStatus({ handle })) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 async function applySessionConfigOptions(input: {
@@ -993,14 +1011,27 @@ async function applySessionConfigOptions(input: {
     throw new Error(message);
   }
   for (const option of options) {
+    const resolvedOption = option.category
+      ? resolveAdvertisedSessionConfigOption(
+          await readRuntimeStatus(input.runtime, input.handle),
+          option,
+        )
+      : option;
+    if (!resolvedOption) {
+      await input.onLog(
+        "stderr",
+        `[paperclip] ACPX ${input.prepared.acpxAgent} session does not advertise a ${option.category?.replaceAll("_", "-")} config option; continuing with the session default instead of applying ${option.key}=${option.value}.\n`,
+      );
+      continue;
+    }
     await input.runtime.setConfigOption({
       handle: input.handle,
-      key: option.key,
-      value: option.value,
+      key: resolvedOption.key,
+      value: resolvedOption.value,
     });
     await input.onLog(
       "stdout",
-      `[paperclip] Applied ACPX ${input.prepared.acpxAgent} config ${option.key}=${option.value}\n`,
+      `[paperclip] Applied ACPX ${input.prepared.acpxAgent} config ${resolvedOption.key}=${resolvedOption.value}\n`,
     );
   }
 }
