@@ -225,7 +225,7 @@ import {
   redactCurrentUserValue,
   type CurrentUserRedactionOptions,
 } from "../log-redaction.js";
-import { redactEventPayload, redactSensitiveText } from "../redaction.js";
+import { REDACTED_EVENT_VALUE, redactEventPayload, redactSensitiveText } from "../redaction.js";
 import {
   hasSessionCompactionThresholds,
   resolveSessionCompactionPolicy,
@@ -360,6 +360,11 @@ const EXECUTION_REVIEW_PARTICIPANT_RECOVERY_WAKE_REASON = "execution_review_part
 const EXECUTION_REVIEW_PARTICIPANT_RECOVERY_CAUSE = "execution_review_participant_recovery";
 const GITHUB_PR_WORKFLOW_SKILL_KEY = "paperclipai/bundled/software-development/github-pr-workflow";
 const GITHUB_PR_WORKFLOW_SKILL_SLUG = "github-pr-workflow";
+const GITHUB_PR_REVIEW_PREFLIGHT_WAKE_REASONS = new Set([
+  "execution_review_requested",
+  "execution_approval_requested",
+  EXECUTION_REVIEW_PARTICIPANT_RECOVERY_WAKE_REASON,
+]);
 const PUSH_CAPABILITY_ENV_KEYS = ["GH_TOKEN", "GITHUB_TOKEN"] as const;
 // Keep this in sync with local adapters that require a git workspace before launch.
 const GIT_SENSITIVE_LOCAL_ADAPTER_TYPES = new Set([
@@ -610,10 +615,12 @@ export function requiresPushCapabilityPreflight(input: {
   adapterType: string;
   issueId: string | null | undefined;
   explicitRunScopedSkillKeys: string[];
+  wakeReason: string | null | undefined;
 }) {
   return Boolean(input.issueId)
     && GIT_SENSITIVE_LOCAL_ADAPTER_TYPES.has(input.adapterType)
-    && hasGithubPrWorkflowSkill(input.explicitRunScopedSkillKeys);
+    && hasGithubPrWorkflowSkill(input.explicitRunScopedSkillKeys)
+    && Boolean(input.wakeReason && GITHUB_PR_REVIEW_PREFLIGHT_WAKE_REASONS.has(input.wakeReason));
 }
 
 const LOW_TRUST_SENSITIVE_ENV_KEY_RE =
@@ -1472,9 +1479,14 @@ function sameResolvedPath(left: string | null | undefined, right: string | null 
   return path.resolve(leftPath) === path.resolve(rightPath);
 }
 
-async function hasGitPushRemote(cwd: string | null | undefined) {
+type GitPushRemote = {
+  name: string;
+  pushUrl: string;
+};
+
+async function listGitPushRemotes(cwd: string | null | undefined): Promise<GitPushRemote[]> {
   const normalized = readNonEmptyString(cwd);
-  if (!normalized) return false;
+  if (!normalized) return [];
   const remoteNames = await execFile("git", ["remote"], { cwd: normalized })
     .then((result) =>
       result.stdout
@@ -1484,13 +1496,14 @@ async function hasGitPushRemote(cwd: string | null | undefined) {
     )
     .catch(() => []);
 
+  const remotes: GitPushRemote[] = [];
   for (const remoteName of remoteNames) {
     const pushUrl = await execFile("git", ["remote", "get-url", "--push", remoteName], { cwd: normalized })
       .then((result) => readNonEmptyString(result.stdout))
       .catch(() => null);
-    if (pushUrl) return true;
+    if (pushUrl) remotes.push({ name: remoteName, pushUrl });
   }
-  return false;
+  return remotes;
 }
 
 type GithubPrHeadReviewPreflight = {
@@ -1498,23 +1511,104 @@ type GithubPrHeadReviewPreflight = {
   livePrHeadSha: string;
   reviewedSha: string;
   refreshedRef: string;
+  remoteName: string;
 };
 
-const GITHUB_PULL_URL_RE = /\bgithub\.com\/[^\s/]+\/[^\s/]+\/pull\/(\d+)\b/i;
+type GithubPullRequestReference = {
+  prNumber: number;
+  repositoryKey: string | null;
+};
+
+const GITHUB_PULL_URL_RE = /\bgithub\.com\/([^\s/]+)\/([^\s/]+)\/pull\/(\d+)\b/i;
 const GITHUB_PULL_PATH_RE = /\bpull\/(\d+)\b/i;
 const GITHUB_PR_NUMBER_RE = /\bPR\s*#?(\d+)\b/i;
+const GITHUB_REMOTE_REPOSITORY_RE = /github\.com(?::|\/)([^/\s:]+)\/([^/\s?#]+)/i;
+const CREDENTIAL_BEARING_URL_USERINFO_RE = /([a-z][a-z0-9+.-]*:\/\/)[^/\s"'`@]+@/gi;
 
-function extractGithubPrNumberFromIssueText(issue: {
+function normalizeGithubRepositoryKey(owner: string, repository: string) {
+  return `${owner}/${repository.replace(/\.git$/i, "")}`.toLowerCase();
+}
+
+function extractGithubRepositoryKey(remoteUrl: string) {
+  const match = GITHUB_REMOTE_REPOSITORY_RE.exec(remoteUrl);
+  return match?.[1] && match[2]
+    ? normalizeGithubRepositoryKey(match[1], match[2])
+    : null;
+}
+
+function extractGithubPrReferenceFromIssueText(issue: {
   title?: string | null;
   description?: string | null;
-} | null | undefined): number | null {
+} | null | undefined): GithubPullRequestReference | null {
   const text = `${issue?.title ?? ""}\n${issue?.description ?? ""}`;
-  for (const pattern of [GITHUB_PULL_URL_RE, GITHUB_PULL_PATH_RE, GITHUB_PR_NUMBER_RE]) {
+  const githubUrlMatch = GITHUB_PULL_URL_RE.exec(text);
+  const githubUrlPrNumber = githubUrlMatch?.[3]
+    ? Number.parseInt(githubUrlMatch[3], 10)
+    : NaN;
+  if (
+    githubUrlMatch?.[1]
+    && githubUrlMatch[2]
+    && Number.isSafeInteger(githubUrlPrNumber)
+    && githubUrlPrNumber > 0
+  ) {
+    return {
+      prNumber: githubUrlPrNumber,
+      repositoryKey: normalizeGithubRepositoryKey(githubUrlMatch[1], githubUrlMatch[2]),
+    };
+  }
+
+  for (const pattern of [GITHUB_PULL_PATH_RE, GITHUB_PR_NUMBER_RE]) {
     const match = pattern.exec(text);
     const parsed = match?.[1] ? Number.parseInt(match[1], 10) : NaN;
-    if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+    if (Number.isSafeInteger(parsed) && parsed > 0) {
+      return { prNumber: parsed, repositoryKey: null };
+    }
   }
   return null;
+}
+
+async function readGitConfigValue(cwd: string, key: string) {
+  return execFile("git", ["config", "--get", key], { cwd })
+    .then((result) => readNonEmptyString(result.stdout))
+    .catch(() => null);
+}
+
+async function resolveGitPushRemote(
+  cwd: string,
+  githubRepositoryKey: string | null,
+): Promise<string | null> {
+  const remotes = await listGitPushRemotes(cwd);
+  if (remotes.length === 0) return null;
+
+  if (githubRepositoryKey) {
+    const matchingRemote = remotes.find(
+      (remote) => extractGithubRepositoryKey(remote.pushUrl) === githubRepositoryKey,
+    );
+    if (matchingRemote) return matchingRemote.name;
+  }
+
+  const currentBranch = await execFile("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd })
+    .then((result) => readNonEmptyString(result.stdout))
+    .catch(() => null);
+  const preferredRemoteNames = [
+    currentBranch ? await readGitConfigValue(cwd, `branch.${currentBranch}.pushRemote`) : null,
+    await readGitConfigValue(cwd, "remote.pushDefault"),
+    currentBranch ? await readGitConfigValue(cwd, `branch.${currentBranch}.remote`) : null,
+  ];
+  for (const preferredRemoteName of preferredRemoteNames) {
+    if (preferredRemoteName && remotes.some((remote) => remote.name === preferredRemoteName)) {
+      return preferredRemoteName;
+    }
+  }
+
+  return remotes[0]?.name ?? null;
+}
+
+function redactGitFetchErrorMessage(message: string) {
+  return redactSensitiveText(message).replace(
+    CREDENTIAL_BEARING_URL_USERINFO_RE,
+    `$1${REDACTED_EVENT_VALUE}@`,
+  );
 }
 
 async function resolveGitCommitSha(cwd: string, ref: string) {
@@ -1525,20 +1619,20 @@ async function resolveGitCommitSha(cwd: string, ref: string) {
 
 async function refreshGithubPrHeadForReview(input: {
   cwd: string;
+  remoteName: string;
+  prReference: GithubPullRequestReference;
   issue: {
     id: string;
     identifier: string | null;
     title?: string | null;
     description?: string | null;
   };
-}): Promise<GithubPrHeadReviewPreflight | null> {
-  const prNumber = extractGithubPrNumberFromIssueText(input.issue);
-  if (!prNumber) return null;
-
-  const refreshedRef = `refs/remotes/origin/pull/${prNumber}/head`;
+}): Promise<GithubPrHeadReviewPreflight> {
+  const { prNumber } = input.prReference;
+  const refreshedRef = `refs/remotes/${input.remoteName}/pull/${prNumber}/head`;
   const refspec = `+refs/pull/${prNumber}/head:${refreshedRef}`;
   const issueLabel = input.issue.identifier ?? input.issue.id;
-  const fetchResult = await execFile("git", ["fetch", "--force", "origin", refspec], { cwd: input.cwd })
+  const fetchResult = await execFile("git", ["fetch", "--force", input.remoteName, refspec], { cwd: input.cwd })
     .then(() => ({ ok: true as const, message: null as string | null }))
     .catch((error) => ({
       ok: false as const,
@@ -1556,7 +1650,8 @@ async function refreshGithubPrHeadForReview(input: {
           prNumber,
           refreshedRef,
           fetchRef: `refs/pull/${prNumber}/head`,
-          errorMessage: fetchResult.message,
+          fetchRemote: input.remoteName,
+          errorMessage: redactGitFetchErrorMessage(fetchResult.message),
         },
       },
     );
@@ -1607,6 +1702,7 @@ async function refreshGithubPrHeadForReview(input: {
     livePrHeadSha,
     reviewedSha,
     refreshedRef,
+    remoteName: input.remoteName,
   };
 }
 
@@ -1688,7 +1784,9 @@ export async function assertPushCapabilityCheckoutValid(input: {
   if (!input.enabled || !input.issue) return null;
   const cwd = readNonEmptyString(input.cwd);
   if (!cwd) return null;
-  if (!await hasGitPushRemote(cwd)) {
+  const prReference = extractGithubPrReferenceFromIssueText(input.issue);
+  const remoteName = await resolveGitPushRemote(cwd, prReference?.repositoryKey ?? null);
+  if (!remoteName) {
     throw new WorkspaceValidationFailure(
       `Issue ${input.issue.identifier ?? input.issue.id} requested the GitHub PR workflow, but checkout "${cwd}" has no configured push remote. Bind the run to a writable repo checkout before dispatching the agent.`,
       {
@@ -1702,7 +1800,13 @@ export async function assertPushCapabilityCheckoutValid(input: {
       },
     );
   }
-  return await refreshGithubPrHeadForReview({ cwd, issue: input.issue });
+  if (!prReference) return null;
+  return await refreshGithubPrHeadForReview({
+    cwd,
+    remoteName,
+    prReference,
+    issue: input.issue,
+  });
 }
 
 export async function assertGitSensitiveAdapterWorkspaceValid(input: {
@@ -12261,6 +12365,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       adapterType: agent.adapterType,
       issueId,
       explicitRunScopedSkillKeys: runScopedMentionedSkillKeys,
+      wakeReason: readNonEmptyString(context.wakeReason),
     });
     const { resolvedConfig, secretKeys, secretManifest } = await resolveExecutionRunAdapterConfig({
       companyId: agent.companyId,
