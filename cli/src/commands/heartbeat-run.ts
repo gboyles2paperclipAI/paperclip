@@ -7,7 +7,13 @@ import { resolveCommandContext } from "./client/common.js";
 const HEARTBEAT_SOURCES = ["timer", "assignment", "on_demand", "automation"] as const;
 const HEARTBEAT_TRIGGERS = ["manual", "ping", "callback", "system"] as const;
 const TERMINAL_STATUSES = new Set<HeartbeatRunStatus>(["succeeded", "failed", "cancelled", "timed_out"]);
-const POLL_INTERVAL_MS = 200;
+// Events are not in a guarded polling family and stay responsive. Run logs are
+// limited to 30 requests per 60 seconds, so 3 seconds leaves one-third headroom.
+// Exact run status avoids the separately limited company run-list endpoint.
+const EVENT_POLL_INTERVAL_MS = 200;
+const RUN_STATUS_POLL_INTERVAL_MS = 1_000;
+const RUN_LOG_POLL_INTERVAL_MS = 3_000;
+const LOST_VISIBILITY_EXIT_CODE = 2;
 
 type HeartbeatSource = (typeof HEARTBEAT_SOURCES)[number];
 type HeartbeatTrigger = (typeof HEARTBEAT_TRIGGERS)[number];
@@ -28,6 +34,11 @@ interface HeartbeatRunOptions {
   timeoutMs: string;
   debug?: boolean;
   json?: boolean;
+}
+
+interface HeartbeatRunDependencies {
+  now: () => number;
+  wait: (ms: number) => Promise<void>;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -55,7 +66,12 @@ function asErrorText(value: unknown): string {
 
 type AdapterType = string;
 
-export async function heartbeatRun(opts: HeartbeatRunOptions): Promise<void> {
+export async function heartbeatRun(
+  opts: HeartbeatRunOptions,
+  dependencies: Partial<HeartbeatRunDependencies> = {},
+): Promise<void> {
+  const now = dependencies.now ?? Date.now;
+  const wait = dependencies.wait ?? delay;
   const debug = Boolean(opts.debug);
   const parsedTimeout = Number.parseInt(opts.timeoutMs, 10);
   const timeoutMs = Number.isFinite(parsedTimeout) ? parsedTimeout : 0;
@@ -208,73 +224,85 @@ export async function heartbeatRun(opts: HeartbeatRunOptions): Promise<void> {
   let finalStatus: string | null = null;
   let finalError: string | null = null;
   let finalRun: HeartbeatRun | null = null;
+  let visibilityLossReason: string | null = null;
 
-  const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : null;
+  const deadline = timeoutMs > 0 ? now() + timeoutMs : null;
   if (!activeRunId) {
     console.error(pc.red("Failed to capture heartbeat run id"));
     return;
   }
 
+  let nextRunStatusPollAt = 0;
+  let nextRunLogPollAt = 0;
   while (true) {
+    try {
       const events = await api.get<HeartbeatRunEvent[]>(
         `/api/heartbeat-runs/${activeRunId}/events?afterSeq=${lastEventSeq}&limit=100`,
       );
-    for (const event of Array.isArray(events) ? (events as HeartbeatRunEventRecord[]) : []) {
-      handleEvent(event);
-    }
-
-      const runList = (await api.get<(HeartbeatRun | null)[]>(
-        `/api/companies/${agent.companyId}/heartbeat-runs?agentId=${agent.id}`,
-      )) || [];
-      const currentRun = runList.find((r) => r && r.id === activeRunId) ?? null;
-
-    if (!currentRun) {
-      console.error(pc.red("Heartbeat run disappeared"));
-      break;
-    }
-
-    const currentStatus = currentRun.status as HeartbeatRunStatus | undefined;
-    if (currentStatus !== finalStatus && currentStatus) {
-      finalStatus = currentStatus;
-      console.log(pc.blue(`Status: ${currentStatus}`));
-    }
-
-    if (currentStatus && TERMINAL_STATUSES.has(currentStatus)) {
-      finalStatus = currentRun.status;
-      finalError = currentRun.error;
-      finalRun = currentRun;
-      break;
-    }
-
-    if (deadline && Date.now() >= deadline) {
-      finalError = `CLI timed out after ${timeoutMs}ms`;
-      finalStatus = "timed_out";
-      console.error(pc.yellow(finalError));
-      break;
-    }
-
-    const logResult = await api.get<{ content: string; nextOffset?: number }>(
-      `/api/heartbeat-runs/${activeRunId}/log?offset=${logOffset}&limitBytes=16384`,
-      { ignoreNotFound: true },
-    );
-    if (logResult && logResult.content) {
-      for (const chunk of logResult.content.split(/\r?\n/)) {
-        if (!chunk) continue;
-        const parsed = safeParseLogLine(chunk);
-        if (!parsed) continue;
-        handleStreamChunk(parsed.stream, parsed.chunk);
+      for (const event of Array.isArray(events) ? (events as HeartbeatRunEventRecord[]) : []) {
+        handleEvent(event);
       }
-      if (typeof logResult.nextOffset === "number") {
-        logOffset = logResult.nextOffset;
-      } else if (logResult.content) {
-        logOffset += Buffer.byteLength(logResult.content, "utf8");
+
+      if (now() >= nextRunStatusPollAt) {
+        const currentRun = await api.get<HeartbeatRun>(
+          `/api/heartbeat-runs/${activeRunId}`,
+          { ignoreNotFound: true },
+        );
+        nextRunStatusPollAt = now() + RUN_STATUS_POLL_INTERVAL_MS;
+
+        if (!currentRun) {
+          visibilityLossReason = "The heartbeat run could no longer be found.";
+          break;
+        }
+
+        const currentStatus = currentRun.status as HeartbeatRunStatus | undefined;
+        if (currentStatus !== finalStatus && currentStatus) {
+          finalStatus = currentStatus;
+          console.log(pc.blue(`Status: ${currentStatus}`));
+        }
+
+        if (currentStatus && TERMINAL_STATUSES.has(currentStatus)) {
+          finalStatus = currentRun.status;
+          finalError = currentRun.error;
+          finalRun = currentRun;
+          break;
+        }
       }
+
+      if (deadline && now() >= deadline) {
+        visibilityLossReason = `CLI stopped polling after its ${timeoutMs}ms timeout.`;
+        break;
+      }
+
+      if (now() >= nextRunLogPollAt) {
+        const logResult = await api.get<{ content: string; nextOffset?: number }>(
+          `/api/heartbeat-runs/${activeRunId}/log?offset=${logOffset}&limitBytes=16384`,
+          { ignoreNotFound: true },
+        );
+        nextRunLogPollAt = now() + RUN_LOG_POLL_INTERVAL_MS;
+        if (logResult && logResult.content) {
+          for (const chunk of logResult.content.split(/\r?\n/)) {
+            if (!chunk) continue;
+            const parsed = safeParseLogLine(chunk);
+            if (!parsed) continue;
+            handleStreamChunk(parsed.stream, parsed.chunk);
+          }
+          if (typeof logResult.nextOffset === "number") {
+            logOffset = logResult.nextOffset;
+          } else if (logResult.content) {
+            logOffset += Buffer.byteLength(logResult.content, "utf8");
+          }
+        }
+      }
+    } catch (error) {
+      visibilityLossReason = describePollingError(error);
+      break;
     }
 
-    await delay(POLL_INTERVAL_MS);
+    await wait(EVENT_POLL_INTERVAL_MS);
   }
 
-  if (finalStatus) {
+  if (finalRun && finalStatus) {
     if (!debug && stdoutJsonBuffer.trim()) {
       cliAdapter.formatStdoutEvent(stdoutJsonBuffer, debug);
       stdoutJsonBuffer = "";
@@ -318,9 +346,25 @@ export async function heartbeatRun(opts: HeartbeatRunOptions): Promise<void> {
     }
     process.exitCode = 1;
   } else {
-    process.exitCode = 1;
-    console.log(pc.gray("Heartbeat stream ended without terminal status"));
+    const lastStatus = finalStatus ? ` Last observed server status: ${finalStatus}.` : "";
+    console.error(pc.yellow(`Lost visibility into heartbeat run ${activeRunId}.${lastStatus}`));
+    console.error(
+      pc.yellow("The run may still be running or may have completed; the CLI did not confirm a terminal status."),
+    );
+    if (visibilityLossReason) {
+      console.error(pc.yellow(`Polling stopped: ${visibilityLossReason}`));
+    }
+    console.error(pc.yellow(`Check status with: paperclipai run get ${activeRunId}`));
+    process.exitCode = LOST_VISIBILITY_EXIT_CODE;
   }
+}
+
+function describePollingError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message.trim() || error.name;
+  }
+  const message = String(error).trim();
+  return message || "Unknown polling error";
 }
 
 function normalizePayload(payload: unknown): Record<string, unknown> {
