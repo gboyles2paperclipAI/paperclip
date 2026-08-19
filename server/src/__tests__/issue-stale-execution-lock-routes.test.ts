@@ -215,6 +215,179 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
     });
   });
 
+  it("lets the same agent retry run PATCH an issue owned by the original run", async () => {
+    const { companyId, agentId } = await seedCompanyAgentAndRuns();
+    const originalRunId = randomUUID();
+    const retryRunId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(heartbeatRuns).values([
+      {
+        id: originalRunId,
+        companyId,
+        agentId,
+        status: "running",
+        invocationSource: "assignment",
+        startedAt: new Date(),
+        contextSnapshot: { issueId },
+      },
+      {
+        id: retryRunId,
+        companyId,
+        agentId,
+        status: "running",
+        invocationSource: "process_lost_retry",
+        startedAt: new Date(),
+        retryOfRunId: originalRunId,
+        contextSnapshot: { issueId },
+      },
+    ]);
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Same-agent continuation",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: originalRunId,
+      executionRunId: originalRunId,
+      executionAgentNameKey: "codexcoder",
+      executionLockedAt: new Date(),
+    });
+
+    const res = await request(createApp(agentActor(companyId, agentId, retryRunId)))
+      .patch(`/api/issues/${issueId}`)
+      .send({ title: "Recovered same-agent continuation" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.title).toBe("Recovered same-agent continuation");
+
+    const row = await db
+      .select({ checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({ checkoutRunId: retryRunId, executionRunId: retryRunId });
+  });
+
+  it("lets the same agent retry run checkout idempotently over its original run", async () => {
+    const { companyId, agentId } = await seedCompanyAgentAndRuns();
+    const originalRunId = randomUUID();
+    const retryRunId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(heartbeatRuns).values([
+      {
+        id: originalRunId,
+        companyId,
+        agentId,
+        status: "running",
+        invocationSource: "assignment",
+        startedAt: new Date(),
+        contextSnapshot: { issueId },
+      },
+      {
+        id: retryRunId,
+        companyId,
+        agentId,
+        status: "running",
+        invocationSource: "process_lost_retry",
+        startedAt: new Date(),
+        retryOfRunId: originalRunId,
+        contextSnapshot: { issueId },
+      },
+    ]);
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Same-agent checkout continuation",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: originalRunId,
+      executionRunId: originalRunId,
+      executionAgentNameKey: "codexcoder",
+      executionLockedAt: new Date(),
+    });
+
+    const res = await request(createApp(agentActor(companyId, agentId, retryRunId)))
+      .post(`/api/issues/${issueId}/checkout`)
+      .send({
+        agentId,
+        expectedStatuses: ["todo", "backlog", "blocked", "in_review"],
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    const row = await db
+      .select({ checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({ checkoutRunId: retryRunId, executionRunId: retryRunId });
+  });
+
+  it("lets the same agent retry run release an issue owned by the original run", async () => {
+    const { companyId, agentId } = await seedCompanyAgentAndRuns();
+    const originalRunId = randomUUID();
+    const retryRunId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(heartbeatRuns).values([
+      {
+        id: originalRunId,
+        companyId,
+        agentId,
+        status: "running",
+        invocationSource: "assignment",
+        startedAt: new Date(),
+        contextSnapshot: { issueId },
+      },
+      {
+        id: retryRunId,
+        companyId,
+        agentId,
+        status: "running",
+        invocationSource: "process_lost_retry",
+        startedAt: new Date(),
+        retryOfRunId: originalRunId,
+        contextSnapshot: { issueId },
+      },
+    ]);
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Same-agent release continuation",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: originalRunId,
+      executionRunId: originalRunId,
+      executionAgentNameKey: "codexcoder",
+      executionLockedAt: new Date(),
+    });
+
+    const res = await request(createApp(agentActor(companyId, agentId, retryRunId)))
+      .post(`/api/issues/${issueId}/release`)
+      .send();
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    const row = await db
+      .select({
+        status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({
+      status: "todo",
+      assigneeAgentId: null,
+      checkoutRunId: null,
+      executionRunId: null,
+    });
+  });
+
   it("lets the current assignee recover a timed_out stale checkout owner during PATCH", async () => {
     const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
     const timedOutRunId = randomUUID();

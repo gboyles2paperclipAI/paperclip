@@ -4411,6 +4411,43 @@ export function issueService(db: Db) {
     return TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status);
   }
 
+  async function isRecoverableSameAgentContinuationRun(input: {
+    issueId: string;
+    actorAgentId: string;
+    actorRunId: string;
+    expectedCheckoutRunId: string;
+    dbOrTx?: DbReader;
+  }) {
+    const dbOrTx = input.dbOrTx ?? db;
+    const [existingRun, actorRun] = await Promise.all([
+      dbOrTx
+        .select({ status: heartbeatRuns.status, agentId: heartbeatRuns.agentId })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, input.expectedCheckoutRunId))
+        .then((rows) => rows[0] ?? null),
+      dbOrTx
+        .select({
+          status: heartbeatRuns.status,
+          agentId: heartbeatRuns.agentId,
+          retryOfRunId: heartbeatRuns.retryOfRunId,
+          contextSnapshot: heartbeatRuns.contextSnapshot,
+        })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, input.actorRunId))
+        .then((rows) => rows[0] ?? null),
+    ]);
+
+    if (!actorRun || TERMINAL_HEARTBEAT_RUN_STATUSES.has(actorRun.status)) return false;
+    if (actorRun.agentId !== input.actorAgentId) return false;
+    if (actorRun.retryOfRunId !== input.expectedCheckoutRunId) return false;
+    if (existingRun && existingRun.agentId !== input.actorAgentId) return false;
+
+    const snapshotIssueId = typeof actorRun.contextSnapshot?.issueId === "string"
+      ? actorRun.contextSnapshot.issueId
+      : null;
+    return snapshotIssueId == null || snapshotIssueId === input.issueId;
+  }
+
   async function adoptStaleCheckoutRun(input: {
     issueId: string;
     actorAgentId: string;
@@ -4462,7 +4499,15 @@ export function issueService(db: Db) {
           .where(eq(heartbeatRuns.id, input.actorRunId))
           .then((rows) => rows[0] ?? null),
       ]);
-      const stale = !existingRun || TERMINAL_HEARTBEAT_RUN_STATUSES.has(existingRun.status);
+      const stale = !existingRun
+        || TERMINAL_HEARTBEAT_RUN_STATUSES.has(existingRun.status)
+        || (await isRecoverableSameAgentContinuationRun({
+          issueId: input.issueId,
+          actorAgentId: input.actorAgentId,
+          actorRunId: input.actorRunId,
+          expectedCheckoutRunId: input.expectedCheckoutRunId,
+          dbOrTx: tx,
+        }));
       const actorLive = actorRun && !TERMINAL_HEARTBEAT_RUN_STATUSES.has(actorRun.status);
       if (!stale || !actorLive) {
         return { adopted: null, latest: lockedIssue };
@@ -7093,7 +7138,17 @@ export function issueService(db: Db) {
           existing.checkoutRunId &&
           !sameRunLock(existing.checkoutRunId, actorRunId ?? null)
         ) {
-          const stale = await isTerminalOrMissingHeartbeatRun(existing.checkoutRunId, tx);
+          const stale = await isTerminalOrMissingHeartbeatRun(existing.checkoutRunId, tx)
+            || Boolean(
+              actorRunId
+                && await isRecoverableSameAgentContinuationRun({
+                  issueId: id,
+                  actorAgentId,
+                  actorRunId,
+                  expectedCheckoutRunId: existing.checkoutRunId,
+                  dbOrTx: tx,
+                }),
+            );
           if (!stale) {
             throw conflict("Only checkout run can release issue", {
               issueId: existing.id,

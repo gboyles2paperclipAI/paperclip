@@ -128,9 +128,19 @@ The active-lock lifecycle is part of the checkout contract:
 - finalization must not clear a lock already reacquired by a successor run
 - process-loss retry handoff must not leave `checkoutRunId` pinned to the failed run when `executionRunId` moves to the retry run
 - checkout and checkout-owner checks may self-heal lock columns that point at terminal or missing runs before evaluating conflicts
+- a same-agent continuation run whose `retryOfRunId` points at the current checkout owner may adopt that checkout lock when the continuation is scoped to the same issue
 - the recovery sweeper may clear rows whose checkout and execution locks all point at terminal or missing runs
 
 Stale-lock recovery is crash recovery, not a retry loop. Paperclip must not clear or adopt locks held by non-terminal runs. After stale cleanup, a checkout `409` should mean a real live owner, status/assignee mismatch, unresolved blocker, or active gate still prevents checkout. Agents must treat that `409` as an ownership conflict and stop rather than retrying the same checkout.
+
+Same-agent continuation recovery is narrower than general stale-lock recovery. It exists for process-loss or continuation handoff where Paperclip has already started a successor run for the same assignee and issue, but the issue still records the original run in `checkoutRunId` or `executionRunId`. The successor run may checkout idempotently, update disposition, or release the issue only when all of these are true:
+
+- the issue is still `in_progress` and assigned to the same agent
+- the current run is non-terminal and belongs to that same agent
+- the current run records `retryOfRunId` equal to the issue's recorded checkout owner
+- when the current run has an issue id in its context snapshot, it matches the issue being recovered
+
+This path does not permit a different agent, unrelated run, terminal run, or unscoped retry to take over a live checkout. Those cases remain conflicts unless the original checkout owner is terminal or missing.
 
 ### Pre-dispatch configuration validation
 
