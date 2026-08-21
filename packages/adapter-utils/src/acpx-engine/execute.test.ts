@@ -893,7 +893,7 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(wrapperFile).toBeTruthy();
     expect(envFile).toBeTruthy();
     const wrapper = await fs.readFile(path.join(stateDir, "wrappers", wrapperFile!), "utf8");
-    expect(wrapper).toContain('exec setsid "$0" "$@"');
+    expect(wrapper).toContain('exec setsid "$0" "$clean_env_marker" "$group_ready_marker" "$@"');
     expect(wrapper).toContain("processGroupId");
     expect(result.logs).toContainEqual({
       stream: "stderr",
@@ -1209,6 +1209,61 @@ describe("shared ACPX engine runtime behavior", () => {
     } finally {
       if (previousApiKey === undefined) delete process.env.PAPERCLIP_API_KEY;
       else process.env.PAPERCLIP_API_KEY = previousApiKey;
+    }
+  });
+
+  it("does not inherit the server signing secret into spawned ACP agent environments", async () => {
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const probePath = path.join(root, "probe-env.mjs");
+    await fs.writeFile(
+      probePath,
+      [
+        "const keys = new Set(Object.keys(process.env));",
+        "process.stdout.write(JSON.stringify({",
+        "  hasSigningSecret: keys.has('PAPERCLIP_AGENT_JWT_SECRET'),",
+        "  hasParentOnlyMarker: keys.has('PAPERCLIP_TEST_PARENT_ONLY'),",
+        "  hasExplicitAdapterEnv: keys.has('PAPERCLIP_TEST_EXPLICIT_ADAPTER_ENV'),",
+        "  hasRunApiKey: keys.has('PAPERCLIP_API_KEY'),",
+        "}));",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const previousSigningSecret = process.env.PAPERCLIP_AGENT_JWT_SECRET;
+    try {
+      process.env.PAPERCLIP_AGENT_JWT_SECRET = "unit-test-signing-secret";
+      await runExecutor(
+        {
+          agent: "custom",
+          agentCommand: `node ${probePath}`,
+          stateDir,
+          env: { PAPERCLIP_TEST_EXPLICIT_ADAPTER_ENV: "configured" },
+        },
+        { authToken: "runtime-key" },
+      );
+
+      const wrappersDir = path.join(stateDir, "wrappers");
+      const wrapperFile = (await fs.readdir(wrappersDir)).find((name) => name.endsWith(".sh"));
+      expect(wrapperFile).toBeTruthy();
+      const wrapperPath = path.join(wrappersDir, wrapperFile!);
+      const { stdout } = await execFileAsync("bash", [wrapperPath], {
+        env: {
+          ...process.env,
+          PAPERCLIP_TEST_PARENT_ONLY: "present-only-in-parent",
+        },
+      });
+
+      expect(JSON.parse(stdout)).toEqual({
+        hasSigningSecret: false,
+        hasParentOnlyMarker: false,
+        hasExplicitAdapterEnv: true,
+        hasRunApiKey: true,
+      });
+    } finally {
+      if (previousSigningSecret === undefined) delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
+      else process.env.PAPERCLIP_AGENT_JWT_SECRET = previousSigningSecret;
     }
   });
 

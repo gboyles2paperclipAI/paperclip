@@ -10,6 +10,7 @@ import {
   applyPaperclipWorkspaceEnv,
   asNumber,
   asString,
+  buildSafeInheritedProcessEnv,
   buildInvocationEnvForLogs,
   buildPaperclipEnv,
   ensureAbsoluteDirectory,
@@ -673,8 +674,15 @@ async function writeAgentWrapper(input: {
 }): Promise<{ wrapperPath: string; envFilePath: string }> {
   const wrappersDir = path.join(input.stateDir, "wrappers");
   await fs.mkdir(wrappersDir, { recursive: true });
-  const envLines = Object.entries(input.env)
-    .filter(([key]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
+  const childEnv = {
+    ...buildSafeInheritedProcessEnv(process.env),
+    ...input.env,
+  };
+  const envLines = Object.entries(childEnv)
+    .filter(
+      (entry): entry is [string, string] =>
+        /^[A-Za-z_][A-Za-z0-9_]*$/.test(entry[0]) && typeof entry[1] === "string",
+    )
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `${key}=${shellQuote(value)}`);
   const wrapperHash = shortHash({
@@ -688,6 +696,13 @@ async function writeAgentWrapper(input: {
   const script = [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
+    `clean_env_marker=__paperclip_acp_clean_env_${wrapperHash}__`,
+    "if [[ \"${1:-}\" != \"$clean_env_marker\" ]]; then",
+    "  env_bin=\"$(command -v env)\"",
+    "  bash_bin=\"${BASH:-bash}\"",
+    "  exec \"$env_bin\" -i \"$bash_bin\" \"$0\" \"$clean_env_marker\" \"$@\"",
+    "fi",
+    "shift",
     `env_file=${shellQuote(envFilePath)}`,
     "if [[ -f \"$env_file\" ]]; then",
     "  set -a",
@@ -922,7 +937,7 @@ async function buildRuntime(input: {
   });
   const taskKey = asString(input.ctx.runtime.taskKey, "") || wakeTaskId || workspaceId || "default";
   const sessionKey = `paperclip:${agent.companyId}:${agent.id}:${taskKey}:${fingerprint}`;
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const runtimeEnv = ensurePathInEnv({ ...buildSafeInheritedProcessEnv(process.env), ...env });
   const loggedEnv = buildInvocationEnvForLogs(env, {
     runtimeEnv,
     includeRuntimeKeys: ["HOME"],
