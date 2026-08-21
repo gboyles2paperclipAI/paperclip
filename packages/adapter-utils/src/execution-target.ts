@@ -1456,26 +1456,20 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
           socket = nextSocket;
           flushPendingRemoteEvents();
         }
+        const queuedMessage = message.type === "stdin" && typeof message.data === "string"
+          ? { type: "stdin" as const, data: message.data }
+          : message.type === "stdinEnd"
+            ? { type: "stdinEnd" as const }
+            : null;
+        if (!queuedMessage) continue;
+        stdinSeq += 1;
+        const name = `${String(stdinSeq).padStart(12, "0")}.json`;
         remoteStdinWriteChain = remoteStdinWriteChain
-          .then(async () => {
-            if (message.type === "stdin" && typeof message.data === "string") {
-              stdinSeq += 1;
-              const name = `${String(stdinSeq).padStart(12, "0")}.json`;
-              await writeRemoteJsonFileAtomically({
-                client,
-                filePath: path.posix.join(stdinDir, name),
-                body: jsonLine({ type: "stdin", data: message.data }),
-              });
-            } else if (message.type === "stdinEnd") {
-              stdinSeq += 1;
-              const name = `${String(stdinSeq).padStart(12, "0")}.json`;
-              await writeRemoteJsonFileAtomically({
-                client,
-                filePath: path.posix.join(stdinDir, name),
-                body: jsonLine({ type: "stdinEnd" }),
-              });
-            }
-          })
+          .then(() => writeRemoteJsonFileAtomically({
+            client,
+            filePath: path.posix.join(stdinDir, name),
+            body: jsonLine(queuedMessage),
+          }))
           .catch((error) => {
             nextSocket.write(jsonLine({ type: "error", message: error instanceof Error ? error.message : String(error) }));
             nextSocket.destroy();
@@ -1525,11 +1519,16 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
       if (pollTimer) clearTimeout(pollTimer);
       for (const liveSocket of liveSockets) liveSocket.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve())).catch(() => undefined);
-      await writeRemoteJsonFileAtomically({
-        client,
-        filePath: path.posix.join(stdinDir, `${String(stdinSeq + 1).padStart(12, "0")}.json`),
-        body: jsonLine({ type: "terminate" }),
-      }).catch(() => undefined);
+      stdinSeq += 1;
+      const terminateName = `${String(stdinSeq).padStart(12, "0")}.json`;
+      remoteStdinWriteChain = remoteStdinWriteChain
+        .then(() => writeRemoteJsonFileAtomically({
+          client,
+          filePath: path.posix.join(stdinDir, terminateName),
+          body: jsonLine({ type: "terminate" }),
+        }))
+        .catch(() => undefined);
+      await remoteStdinWriteChain;
       const stopResult = await runner.execute({
         command: shellCommand,
         args: shellCommandArgs(
