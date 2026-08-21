@@ -962,8 +962,15 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       finishFirstRun();
 
       expect(await waitForCondition(async () => startedRunIds.includes(criticalWake!.id), 30_000)).toBe(true);
-      expect(startedRunIds[0]).toBe(firstLowWake!.id);
-      expect(startedRunIds[1]).toBe(criticalWake!.id);
+      // Successful issue runs may enqueue a cheap finish_successful_run_handoff
+      // concurrently with the premium queue. That recovery invocation is outside
+      // this test's contender set and can reach the shared adapter mock before a
+      // premium run that was already admitted. Assert the scheduling contract
+      // among the premium contenders rather than global adapter invocation order.
+      const premiumContenderIds = new Set([firstLowWake!.id, ...queuedLowWakeIds, criticalWake!.id]);
+      const startedPremiumContenderIds = startedRunIds.filter((runId) => premiumContenderIds.has(runId));
+      expect(startedPremiumContenderIds[0]).toBe(firstLowWake!.id);
+      expect(startedPremiumContenderIds[1]).toBe(criticalWake!.id);
     } finally {
       if (originalPremiumCap === undefined) {
         delete process.env.PAPERCLIP_PREMIUM_MAX_CONCURRENT_RUNS;
