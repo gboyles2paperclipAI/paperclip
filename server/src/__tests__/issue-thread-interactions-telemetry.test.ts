@@ -267,7 +267,7 @@ describeEmbeddedPostgres("issueThreadInteractionService telemetry", () => {
       resolved_by_kind: "agent",
       resolution_reason: "rejected",
       created_by_kind: "user",
-      continuation_policy: "none",
+      continuation_policy: "wake_assignee",
       target_type: "none",
     });
     expect(dimensions).not.toHaveProperty("creator_agent_role");
@@ -453,7 +453,7 @@ describeEmbeddedPostgres("issueThreadInteractionService telemetry", () => {
       resolved_by_kind: "system",
       resolution_reason: "stale_target",
       created_by_kind: "user",
-      continuation_policy: "none",
+      continuation_policy: "wake_assignee",
       target_type: "issue_document",
     });
     expect(dimensions).not.toHaveProperty("staleTarget");
