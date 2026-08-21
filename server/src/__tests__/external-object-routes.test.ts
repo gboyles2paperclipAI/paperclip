@@ -189,19 +189,14 @@ describe("external object routes", () => {
     });
   });
 
-  it(
-    "enforces company access on read routes",
-    async () => {
-      const app = await createApp({ ...ownerActor(), companyId: "other-company" });
+  it("enforces company access on read routes", async () => {
+    const app = await createApp({ ...ownerActor(), companyId: "other-company" });
 
-      const res = await request(app).get(`/api/issues/${issueId}/external-object-summary`);
+    const res = await request(app).get(`/api/issues/${issueId}/external-object-summary`);
 
-      expect(res.status).toBe(403);
-      expect(mockExternalObjectsService.getIssueSummary).not.toHaveBeenCalled();
-    },
-    // Isolated app startup pushed this integration case to 5,011 ms on paperclip01.
-    15_000,
-  );
+    expect(res.status).toBe(403);
+    expect(mockExternalObjectsService.getIssueSummary).not.toHaveBeenCalled();
+  });
 
   it("allows board users to read issue external object summaries", async () => {
     const app = await createApp(boardActor());
