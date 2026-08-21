@@ -10555,11 +10555,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           activePremiumRunningCount++;
         }
         if (activePremiumRunningCount >= premiumManagedMaxConcurrentRuns()) return null;
-        if (await hasHigherPriorityReadyQueuedPremiumRun(
-          tx,
-          run,
-          companyAgents ? new Map([[run.companyId, companyAgents]]) : undefined,
-        )) return null;
+        let higherPriorityReadyQueuedPremiumRun = false;
+        try {
+          higherPriorityReadyQueuedPremiumRun = await hasHigherPriorityReadyQueuedPremiumRun(
+            tx,
+            run,
+            companyAgents ? new Map([[run.companyId, companyAgents]]) : undefined,
+          );
+        } catch (error) {
+          logger.warn(
+            {
+              runId: run.id,
+              agentId: run.agentId,
+              companyId: run.companyId,
+              errorName: error instanceof Error ? error.name : typeof error,
+            },
+            "claimQueuedRun: failed to evaluate higher priority premium run; continuing claim path",
+          );
+        }
+        if (higherPriorityReadyQueuedPremiumRun) return null;
       }
       return claimRun(tx);
     });
