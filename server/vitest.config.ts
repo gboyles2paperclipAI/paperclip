@@ -17,5 +17,8 @@ export default defineConfig({
       "./src/__tests__/setup-paperclip-home.ts",
       "./src/__tests__/setup-supertest.ts",
     ],
+    // First-load route imports vary from ~1.9s to ~5.0s on paperclip01;
+    // requests/assertions are tens of milliseconds, so allow stable boot headroom.
+    testTimeout: 15_000,
   },
 });

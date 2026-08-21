@@ -28,6 +28,7 @@ import {
   applyPaperclipWorkspaceEnv,
   asNumber,
   asString,
+  buildSafeInheritedProcessEnv,
   buildInvocationEnvForLogs,
   buildPaperclipEnv,
   ensureAbsoluteDirectory,
@@ -888,8 +889,15 @@ async function writeAgentWrapper(input: {
 }): Promise<{ wrapperPath: string; envFilePath: string }> {
   const wrappersDir = path.join(input.stateDir, "wrappers");
   await fs.mkdir(wrappersDir, { recursive: true });
-  const envLines = Object.entries(input.env)
-    .filter(([key]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
+  const childEnv = {
+    ...buildSafeInheritedProcessEnv(process.env),
+    ...input.env,
+  };
+  const envLines = Object.entries(childEnv)
+    .filter(
+      (entry): entry is [string, string] =>
+        /^[A-Za-z_][A-Za-z0-9_]*$/.test(entry[0]) && typeof entry[1] === "string",
+    )
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `${key}=${shellQuote(value)}`);
   const wrapperHash = shortHash({
@@ -904,6 +912,14 @@ async function writeAgentWrapper(input: {
   const script = [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
+    `clean_env_marker=__paperclip_acp_clean_env_${wrapperHash}__`,
+    `group_ready_marker=__paperclip_acp_group_ready_${wrapperHash}__`,
+    "if [[ \"${1:-}\" != \"$clean_env_marker\" ]]; then",
+    "  env_bin=\"$(command -v env)\"",
+    "  bash_bin=\"${BASH:-bash}\"",
+    "  exec \"$env_bin\" -i \"$bash_bin\" \"$0\" \"$clean_env_marker\" \"$@\"",
+    "fi",
+    "shift",
     `env_file=${shellQuote(envFilePath)}`,
     "if [[ -f \"$env_file\" ]]; then",
     "  set -a",
@@ -912,14 +928,14 @@ async function writeAgentWrapper(input: {
     "fi",
     `process_metadata_dir=${shellQuote(input.processMetadataDir)}`,
     `if [[ ${shellQuote(input.acpxAgent)} == "codex" && -n "\${PAPERCLIP_RUN_ID:-}" ]]; then`,
-    "  if [[ \"${PAPERCLIP_ACP_GROUP_READY:-}\" != \"1\" ]]; then",
+    "  if [[ \"${1:-}\" != \"$group_ready_marker\" ]]; then",
     "    if ! command -v setsid >/dev/null 2>&1; then",
     "      echo '[paperclip] setsid is required for supervised Codex ACP execution.' >&2",
     "      exit 70",
     "    fi",
-    "    export PAPERCLIP_ACP_GROUP_READY=1",
-    "    exec setsid \"$0\" \"$@\"",
+    "    exec setsid \"$0\" \"$clean_env_marker\" \"$group_ready_marker\" \"$@\"",
     "  fi",
+    "  shift",
     "  safe_run_id=\"$(printf '%s' \"$PAPERCLIP_RUN_ID\" | sed 's/[^A-Za-z0-9._-]/_/g' | cut -c1-180)\"",
     "  [[ -n \"$safe_run_id\" ]] || safe_run_id=run",
     "  mkdir -p \"$process_metadata_dir\"",
@@ -1221,7 +1237,7 @@ async function buildRuntime(input: {
     }
   }
   const runtimeEnv = Object.fromEntries(
-    Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
+    Object.entries(ensurePathInEnv({ ...buildSafeInheritedProcessEnv(process.env), ...env })).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );

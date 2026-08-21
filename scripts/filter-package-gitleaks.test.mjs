@@ -49,6 +49,14 @@ test("accepts only the two exact independently reviewable package fingerprints",
   assert.deepEqual(result.policyErrors, []);
 });
 
+test("accepts zero package findings when the exception policy is empty", () => {
+  const result = evaluatePackageGitleaks([], { schemaVersion: 1, exceptions: [] });
+  assert.equal(result.status, "pass");
+  assert.equal(result.remaining.length, 0);
+  assert.equal(result.exclusions.length, 0);
+  assert.deepEqual(result.policyErrors, []);
+});
+
 test("fails closed when the finding content drifts", () => {
   const findings = exactFindings();
   findings[0] = { ...findings[0], Secret: `${selectedText}x` };
