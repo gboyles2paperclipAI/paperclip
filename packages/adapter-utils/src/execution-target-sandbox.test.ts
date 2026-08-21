@@ -42,7 +42,14 @@ describe("sandbox adapter execution targets", () => {
     }
   });
 
-  function createLocalSandboxRunner() {
+  function createLocalSandboxRunner(options: {
+    beforeExecute?: (input: {
+      command: string;
+      args?: string[];
+      cwd?: string;
+      env?: Record<string, string>;
+    }) => Promise<void>;
+  } = {}) {
     let counter = 0;
     return {
       execute: async (input: {
@@ -56,6 +63,7 @@ describe("sandbox adapter execution targets", () => {
         onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
       }) => {
         counter += 1;
+        await options.beforeExecute?.(input);
         const command = input.command === "bash" ? "/bin/bash" : input.command;
         return runChildProcess(`sandbox-run-${counter}`, command, input.args ?? [], {
           cwd: input.cwd ?? process.cwd(),
@@ -199,9 +207,15 @@ describe("sandbox adapter execution targets", () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-"));
     cleanupDirs.push(rootDir);
     const childPath = path.join(rootDir, "fake-acp-child.mjs");
+    const envReportPath = path.join(rootDir, "fake-acp-child-env.json");
+    const secretEnvNames = ["PAPERCLIP_AGENT_JWT_SECRET", "DATABASE_URL", "SLACK_BOT_TOKEN"];
+    for (const name of secretEnvNames) vi.stubEnv(name, `unit-test-${name.toLowerCase()}`);
     await writeFile(
       childPath,
       [
+        "import { writeFileSync } from 'node:fs';",
+        `const secretEnvNames = ${JSON.stringify(secretEnvNames)};`,
+        `writeFileSync(${JSON.stringify(envReportPath)}, JSON.stringify(secretEnvNames.filter((name) => Object.hasOwn(process.env, name))));`,
         "process.stdin.on('data', (chunk) => {",
         "  process.stdout.write('out:' + chunk.toString());",
         "  process.stderr.write('err:' + chunk.toString());",
@@ -215,7 +229,22 @@ describe("sandbox adapter execution targets", () => {
       providerKey: "local-test",
       remoteCwd: rootDir,
       timeoutMs: 30_000,
-      runner: createLocalSandboxRunner(),
+      runner: createLocalSandboxRunner({
+        beforeExecute: async (input) => {
+          // Force stdinEnd to race the first data write and make that write
+          // observable while incomplete. The bridge must preserve order and
+          // publish only complete queue files under this provider behavior.
+          if ((input.args ?? []).some((arg) => arg.includes("/stdin/000000000001.json"))) {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            input.args = input.args?.map((arg) =>
+              arg.replace(
+                /base64 -d < (.+?) > (.+?) && rm -f/,
+                "{ sleep 0.25; base64 -d < $1; } > $2 && rm -f",
+              ),
+            );
+          }
+        },
+      }),
     };
 
     const bridge = await startAdapterExecutionTargetProcessSessionBridge({
@@ -237,6 +266,7 @@ describe("sandbox adapter execution targets", () => {
       expect(result.code).toBe(0);
       expect(result.stdout).toBe("out:hello\n");
       expect(result.stderr).toBe("err:hello\n");
+      expect(JSON.parse(await readFile(envReportPath, "utf8"))).toEqual([]);
     } finally {
       await bridge?.stop();
     }

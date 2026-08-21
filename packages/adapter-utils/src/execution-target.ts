@@ -1254,6 +1254,22 @@ async function readRemoteJsonFiles(input: {
   return out;
 }
 
+async function writeRemoteJsonFileAtomically(input: {
+  client: ReturnType<typeof createCommandManagedSandboxCallbackBridgeQueueClient>;
+  filePath: string;
+  body: string;
+}): Promise<void> {
+  // Command-managed writes may span several remote shell calls. Keep partial
+  // content invisible to the queue poller until the complete JSON can land.
+  const tempPath = `${input.filePath}.${randomUUID()}.tmp`;
+  try {
+    await input.client.writeTextFile(tempPath, input.body);
+    await input.client.rename(tempPath, input.filePath);
+  } finally {
+    await input.client.remove(tempPath).catch(() => undefined);
+  }
+}
+
 async function waitForLocalServerListen(server: net.Server): Promise<number> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -1349,6 +1365,9 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
   let socket: net.Socket | null = null;
   let stopping = false;
   let stdinSeq = 0;
+  // A data chunk and stdinEnd can arrive in one socket read. Preserve their
+  // wire order even when the sandbox provider completes remote writes out of order.
+  let remoteStdinWriteChain: Promise<void> = Promise.resolve();
   let pollTimer: NodeJS.Timeout | null = null;
   const pendingRemoteEvents: Array<{
     type?: string;
@@ -1437,20 +1456,30 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
           socket = nextSocket;
           flushPendingRemoteEvents();
         }
-        void (async () => {
-          if (message.type === "stdin" && typeof message.data === "string") {
-            stdinSeq += 1;
-            const name = `${String(stdinSeq).padStart(12, "0")}.json`;
-            await client.writeTextFile(path.posix.join(stdinDir, name), jsonLine({ type: "stdin", data: message.data }));
-          } else if (message.type === "stdinEnd") {
-            stdinSeq += 1;
-            const name = `${String(stdinSeq).padStart(12, "0")}.json`;
-            await client.writeTextFile(path.posix.join(stdinDir, name), jsonLine({ type: "stdinEnd" }));
-          }
-        })().catch((error) => {
-          nextSocket.write(jsonLine({ type: "error", message: error instanceof Error ? error.message : String(error) }));
-          nextSocket.destroy();
-        });
+        remoteStdinWriteChain = remoteStdinWriteChain
+          .then(async () => {
+            if (message.type === "stdin" && typeof message.data === "string") {
+              stdinSeq += 1;
+              const name = `${String(stdinSeq).padStart(12, "0")}.json`;
+              await writeRemoteJsonFileAtomically({
+                client,
+                filePath: path.posix.join(stdinDir, name),
+                body: jsonLine({ type: "stdin", data: message.data }),
+              });
+            } else if (message.type === "stdinEnd") {
+              stdinSeq += 1;
+              const name = `${String(stdinSeq).padStart(12, "0")}.json`;
+              await writeRemoteJsonFileAtomically({
+                client,
+                filePath: path.posix.join(stdinDir, name),
+                body: jsonLine({ type: "stdinEnd" }),
+              });
+            }
+          })
+          .catch((error) => {
+            nextSocket.write(jsonLine({ type: "error", message: error instanceof Error ? error.message : String(error) }));
+            nextSocket.destroy();
+          });
       }
     });
   });
@@ -1496,10 +1525,11 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
       if (pollTimer) clearTimeout(pollTimer);
       for (const liveSocket of liveSockets) liveSocket.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve())).catch(() => undefined);
-      await client.writeTextFile(
-        path.posix.join(stdinDir, `${String(stdinSeq + 1).padStart(12, "0")}.json`),
-        jsonLine({ type: "terminate" }),
-      ).catch(() => undefined);
+      await writeRemoteJsonFileAtomically({
+        client,
+        filePath: path.posix.join(stdinDir, `${String(stdinSeq + 1).padStart(12, "0")}.json`),
+        body: jsonLine({ type: "terminate" }),
+      }).catch(() => undefined);
       const stopResult = await runner.execute({
         command: shellCommand,
         args: shellCommandArgs(
