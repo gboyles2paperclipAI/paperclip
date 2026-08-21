@@ -10607,12 +10607,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const runningCount = runningCountByAgentId.get(candidate.agentId) ?? 0;
       if (runningCount >= policy.maxConcurrentRuns) continue;
 
-      const candidateReadyRank = candidate.issueStatus === "in_progress" ? 0 : 1;
-      if (candidateReadyRank < currentReadyRank) return true;
-      if (candidateReadyRank > currentReadyRank) continue;
       const candidatePriorityRank = issueRunPriorityRank(candidate.issuePriority);
       if (candidatePriorityRank < currentPriorityRank) return true;
       if (candidatePriorityRank > currentPriorityRank) continue;
+      const candidateReadyRank = candidate.issueStatus === "in_progress" ? 0 : 1;
+      if (candidateReadyRank < currentReadyRank) return true;
+      if (candidateReadyRank > currentReadyRank) continue;
       if (candidate.createdAt.getTime() < run.createdAt.getTime()) return true;
     }
     return false;
@@ -11861,12 +11861,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const rightReady = rightIssueId ? (rightReadiness?.isDependencyReady ?? true) : true;
     const leftIssue = leftIssueId ? issueById.get(leftIssueId) : null;
     const rightIssue = rightIssueId ? issueById.get(rightIssueId) : null;
-    const leftRank = leftIssueId ? (leftReady ? (leftIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
-    const rightRank = rightIssueId ? (rightReady ? (rightIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
+    const leftRank = leftIssueId ? (leftReady ? 0 : 3) : 2;
+    const rightRank = rightIssueId ? (rightReady ? 0 : 3) : 2;
     if (leftRank !== rightRank) return leftRank - rightRank;
     const leftPriorityRank = issueRunPriorityRank(leftIssue?.priority);
     const rightPriorityRank = issueRunPriorityRank(rightIssue?.priority);
     if (leftPriorityRank !== rightPriorityRank) return leftPriorityRank - rightPriorityRank;
+    const leftStatusRank = leftIssue?.status === "in_progress" ? 0 : 1;
+    const rightStatusRank = rightIssue?.status === "in_progress" ? 0 : 1;
+    if (leftStatusRank !== rightStatusRank) return leftStatusRank - rightStatusRank;
     return left.createdAt.getTime() - right.createdAt.getTime();
   }
 
