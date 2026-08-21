@@ -272,6 +272,72 @@ describe("sandbox adapter execution targets", () => {
     }
   });
 
+  it("queues sandbox process session termination after pending stdin writes", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-stop-order-"));
+    cleanupDirs.push(rootDir);
+    const childPath = path.join(rootDir, "long-running-acp-child.mjs");
+    await writeFile(childPath, "process.stdin.resume(); setInterval(() => {}, 1000);", "utf8");
+
+    let releaseFirstWrite!: () => void;
+    const firstWriteStarted = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    let delayedFirstWrite = false;
+    const publishedSequences: number[] = [];
+    const target: AdapterSandboxExecutionTarget = {
+      kind: "remote",
+      transport: "sandbox",
+      providerKey: "local-test",
+      remoteCwd: rootDir,
+      timeoutMs: 30_000,
+      runner: createLocalSandboxRunner({
+        beforeExecute: async (input) => {
+          const script = (input.args ?? []).join("\n");
+          const renameMatch = /&& mv '[^']+' '[^']*\/stdin\/(\d{12})\.json'/.exec(script);
+          if (renameMatch) publishedSequences.push(Number(renameMatch[1]));
+          if (!delayedFirstWrite && script.includes("/stdin/000000000001.json")) {
+            delayedFirstWrite = true;
+            releaseFirstWrite();
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+        },
+      }),
+    };
+
+    const bridge = await startAdapterExecutionTargetProcessSessionBridge({
+      runId: "run-process-session-stop-order",
+      target,
+      runtimeRootDir: path.posix.join(rootDir, ".paperclip-runtime", "acpx"),
+      adapterKey: "acpx",
+      command: process.execPath,
+      args: [childPath],
+      cwd: rootDir,
+      env: {},
+      timeoutSec: 5,
+      onLog: async () => {},
+    });
+    expect(bridge).not.toBeNull();
+
+    const proxy = spawn(bridge!.agentCommand, [], { stdio: ["pipe", "ignore", "ignore"] });
+    const proxyClosed = new Promise<void>((resolve) => {
+      proxy.once("error", () => resolve());
+      proxy.once("close", () => resolve());
+    });
+    let stopped = false;
+    try {
+      proxy.stdin.end("hello\n");
+      await firstWriteStarted;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await bridge!.stop();
+      stopped = true;
+      await proxyClosed;
+      expect(publishedSequences).toEqual([1, 2, 3]);
+    } finally {
+      proxy.kill("SIGKILL");
+      if (!stopped) await bridge?.stop();
+    }
+  });
+
   it("buffers sandbox process session output until the local proxy connects", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-process-session-buffer-"));
     cleanupDirs.push(rootDir);
