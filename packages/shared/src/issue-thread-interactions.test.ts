@@ -9,7 +9,7 @@ import {
 } from "./validators/issue.js";
 
 describe("issue thread interaction schemas", () => {
-  it("parses request_confirmation payloads with default no-wake continuation", () => {
+  it("parses request_confirmation payloads with default assignee wake continuation", () => {
     const parsed = createIssueThreadInteractionSchema.parse({
       kind: "request_confirmation",
       payload: {
@@ -27,7 +27,7 @@ describe("issue thread interaction schemas", () => {
 
     expect(parsed).toMatchObject({
       kind: "request_confirmation",
-      continuationPolicy: "none",
+      continuationPolicy: "wake_assignee",
       payload: {
         prompt: "Apply this plan?",
         acceptLabel: "Apply",
@@ -37,6 +37,25 @@ describe("issue thread interaction schemas", () => {
         allowDeclineReason: true,
         declineReasonPlaceholder: "Optional: tell the agent what you'd change.",
         supersedeOnUserComment: true,
+      },
+    });
+  });
+
+  it("allows request_confirmation creators to explicitly opt out of continuation wakeups", () => {
+    const parsed = createIssueThreadInteractionSchema.parse({
+      kind: "request_confirmation",
+      continuationPolicy: "none",
+      payload: {
+        version: 1,
+        prompt: "Apply this plan?",
+      },
+    });
+
+    expect(parsed).toMatchObject({
+      kind: "request_confirmation",
+      continuationPolicy: "none",
+      payload: {
+        prompt: "Apply this plan?",
       },
     });
   });

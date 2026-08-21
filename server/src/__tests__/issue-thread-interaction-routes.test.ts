@@ -1253,7 +1253,55 @@ describe.sequential("issue thread interaction routes", () => {
     );
   });
 
-  it("does not emit a continuation wake when request confirmations are rejected", async () => {
+  it("wakes the assignee when request confirmations are rejected with default continuation", async () => {
+    mockInteractionService.rejectInteraction.mockResolvedValueOnce({
+      id: "interaction-3",
+      companyId: "company-1",
+      issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      kind: "request_confirmation",
+      status: "rejected",
+      continuationPolicy: "wake_assignee",
+      idempotencyKey: null,
+      sourceCommentId: null,
+      sourceRunId: "run-3",
+      payload: {
+        version: 1,
+        prompt: "Apply this plan?",
+      },
+      result: {
+        version: 1,
+        outcome: "rejected",
+        reason: "Needs changes",
+      },
+      createdAt: "2026-04-20T12:00:00.000Z",
+      updatedAt: "2026-04-20T12:05:00.000Z",
+      resolvedAt: "2026-04-20T12:05:00.000Z",
+    });
+    const app = await createApp();
+
+    const res = await request(app)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions/interaction-3/reject")
+      .send({ reason: "Needs changes" });
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      ASSIGNEE_AGENT_ID,
+      expect.objectContaining({
+        source: "automation",
+        reason: "issue_commented",
+        payload: expect.objectContaining({
+          issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          interactionId: "interaction-3",
+          interactionKind: "request_confirmation",
+          interactionStatus: "rejected",
+          sourceRunId: "run-3",
+        }),
+      }),
+    );
+  });
+
+  it("does not emit an accept-only continuation wake when request confirmations are rejected", async () => {
     mockInteractionService.rejectInteraction.mockResolvedValueOnce({
       id: "interaction-3",
       companyId: "company-1",
