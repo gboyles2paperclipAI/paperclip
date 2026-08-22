@@ -37,12 +37,17 @@ const SECRET_TEXT_HINTS = [
   "ghs_",
   "ghr_",
 ] as const;
+const DATABASE_URL_SCHEME_RE = /\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss):\/\//i;
 export const REDACTED_EVENT_VALUE = "***REDACTED***";
 export const GITHUB_AUTH_OUTPUT_DENY_VALUE = "[REDACTED:github_auth_output]";
 
 function maybeContainsSecretText(input: string) {
   const lower = input.toLowerCase();
-  return SECRET_TEXT_HINTS.some((hint) => lower.includes(hint)) || input.includes(".");
+  return (
+    SECRET_TEXT_HINTS.some((hint) => lower.includes(hint)) ||
+    input.includes(".") ||
+    DATABASE_URL_SCHEME_RE.test(input)
+  );
 }
 
 function redactGitHubAuthStatusOutput(input: string): string {
