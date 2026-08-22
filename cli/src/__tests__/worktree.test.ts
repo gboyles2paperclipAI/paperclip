@@ -510,7 +510,7 @@ describe("worktree helpers", () => {
     }
   });
 
-  it("persists the current agent jwt secret into the worktree env file", async () => {
+  it("does not persist the parent agent jwt secret into the worktree env file", async () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-worktree-jwt-"));
     const repoRoot = path.join(tempRoot, "repo");
     const originalCwd = process.cwd();
@@ -529,7 +529,8 @@ describe("worktree helpers", () => {
 
       const envPath = path.join(repoRoot, ".paperclip", ".env");
       const envContents = fs.readFileSync(envPath, "utf8");
-      expect(envContents).toContain("PAPERCLIP_AGENT_JWT_SECRET=worktree-shared-secret");
+      expect(envContents).toContain("PAPERCLIP_AGENT_JWT_SECRET=");
+      expect(envContents).not.toContain("worktree-shared-secret");
       expect(envContents).toMatch(/PAPERCLIP_WORKTREE_NAME=(repo|main)/);
       expect(envContents).toMatch(/PAPERCLIP_WORKTREE_COLOR=\"#[0-9a-f]{6}\"/);
     } finally {

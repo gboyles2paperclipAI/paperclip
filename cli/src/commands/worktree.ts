@@ -204,6 +204,20 @@ function nonEmpty(value: string | null | undefined): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+function ensureAgentJwtSecretWithoutParentEnv(configPath: string): void {
+  const originalAgentJwtSecret = process.env.PAPERCLIP_AGENT_JWT_SECRET;
+  try {
+    delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
+    ensureAgentJwtSecret(configPath);
+  } finally {
+    if (originalAgentJwtSecret === undefined) {
+      delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
+    } else {
+      process.env.PAPERCLIP_AGENT_JWT_SECRET = originalAgentJwtSecret;
+    }
+  }
+}
+
 function isCurrentSourceConfigPath(sourceConfigPath: string): boolean {
   const currentConfigPath = process.env.PAPERCLIP_CONFIG;
   if (!currentConfigPath || currentConfigPath.trim().length === 0) {
@@ -1412,18 +1426,11 @@ async function runWorktreeInit(opts: WorktreeInitOptions): Promise<void> {
   });
 
   writeConfig(targetConfig, paths.configPath);
-  const sourceEnvEntries = readPaperclipEnvEntries(resolvePaperclipEnvFile(sourceConfigPath));
-  const existingAgentJwtSecret =
-    nonEmpty(sourceEnvEntries.PAPERCLIP_AGENT_JWT_SECRET) ??
-    nonEmpty(process.env.PAPERCLIP_AGENT_JWT_SECRET);
   mergePaperclipEnvEntries(
-    {
-      ...buildWorktreeEnvEntries(paths, branding),
-      ...(existingAgentJwtSecret ? { PAPERCLIP_AGENT_JWT_SECRET: existingAgentJwtSecret } : {}),
-    },
+    buildWorktreeEnvEntries(paths, branding),
     paths.envPath,
   );
-  ensureAgentJwtSecret(paths.configPath);
+  ensureAgentJwtSecretWithoutParentEnv(paths.configPath);
   loadPaperclipEnvFile(paths.configPath);
   const copiedGitHooks = copyGitHooksToWorktreeGitDir(cwd);
 
