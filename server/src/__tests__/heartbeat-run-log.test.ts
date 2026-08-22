@@ -86,4 +86,12 @@ describe("compactRunLogChunk", () => {
       expect(compacted).not.toContain(value);
     }
   });
+
+  it("redacts a raw localhost database URL without fast-path secret hints before persistence", () => {
+    const rawDatabaseUrl = "postgresql://u:q@localhost:5432/app";
+    const compacted = compactRunLogChunk(`connect ${rawDatabaseUrl}`);
+
+    expect(compacted).toBe("connect ***REDACTED***");
+    expect(compacted).not.toContain(rawDatabaseUrl);
+  });
 });

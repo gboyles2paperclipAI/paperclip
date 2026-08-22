@@ -117,6 +117,17 @@ describe("buildInvocationEnvForLogs", () => {
     expect(command).not.toContain("SYNTHETIC_COLON_DB_URL_VALUE_DO_NOT_USE");
     expect(command).not.toContain("synthetic-pass");
   });
+
+  it("redacts a raw localhost database URL without fast-path secret hints", () => {
+    const rawDatabaseUrl = "postgresql://u:q@localhost:5432/app";
+    const loggedEnv = buildInvocationEnvForLogs(
+      { SAFE_VALUE: "visible" },
+      { resolvedCommand: `connect ${rawDatabaseUrl}` },
+    );
+
+    expect(loggedEnv.PAPERCLIP_RESOLVED_COMMAND).toBe("connect ***REDACTED***");
+    expect(loggedEnv.PAPERCLIP_RESOLVED_COMMAND).not.toContain(rawDatabaseUrl);
+  });
 });
 
 describe("buildSafeInheritedProcessEnv", () => {
