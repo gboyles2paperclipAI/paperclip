@@ -86,4 +86,14 @@ describe("compactRunLogChunk", () => {
       expect(compacted).not.toContain(value);
     }
   });
+
+  it("redacts no-dot localhost database URLs before persisting run-log chunks", () => {
+    const chunk = "DATABASE_URL=postgresql://synthetic-user@localhost/synthetic-db";
+
+    const compacted = compactRunLogChunk(chunk);
+
+    expect(compacted).toBe("DATABASE_URL=***REDACTED***");
+    expect(compacted).not.toContain("postgresql://");
+    expect(compacted).not.toContain("localhost/synthetic-db");
+  });
 });

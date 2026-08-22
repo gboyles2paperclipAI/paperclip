@@ -57,12 +57,12 @@ function maybeContainsSecretText(command: string) {
 }
 
 export function redactCommandText(command: string, redactedValue = REDACTED_COMMAND_TEXT_VALUE): string {
-  if (!maybeContainsSecretText(command)) return command;
-  return command
+  const databaseUrlRedacted = command.replace(COMMAND_DATABASE_URL_VALUE_RE, redactedValue);
+  if (!maybeContainsSecretText(databaseUrlRedacted)) return databaseUrlRedacted;
+  return databaseUrlRedacted
     .replace(COMMAND_AUTHORIZATION_BEARER_RE, `$1${redactedValue}`)
     .replace(COMMAND_SECRET_HTTP_HEADER_RE, `$1${redactedValue}`)
     .replace(COMMAND_ENV_SECRET_COLON_RE, `$1${redactedValue}$3`)
-    .replace(COMMAND_DATABASE_URL_VALUE_RE, redactedValue)
     .replace(COMMAND_CLI_SECRET_OPTION_RE, `$1${redactedValue}$3`)
     .replace(
       COMMAND_ENV_SECRET_ASSIGNMENT_RE,

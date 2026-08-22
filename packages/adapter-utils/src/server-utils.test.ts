@@ -117,6 +117,20 @@ describe("buildInvocationEnvForLogs", () => {
     expect(command).not.toContain("SYNTHETIC_COLON_DB_URL_VALUE_DO_NOT_USE");
     expect(command).not.toContain("synthetic-pass");
   });
+
+  it("redacts no-dot localhost database URLs from resolved command metadata", () => {
+    const loggedEnv = buildInvocationEnvForLogs(
+      { SAFE_VALUE: "visible" },
+      {
+        resolvedCommand: "psql postgresql://synthetic-user@localhost/synthetic-db",
+      },
+    );
+
+    const command = loggedEnv.PAPERCLIP_RESOLVED_COMMAND;
+    expect(command).toBe("psql ***REDACTED***");
+    expect(command).not.toContain("postgresql://");
+    expect(command).not.toContain("localhost/synthetic-db");
+  });
 });
 
 describe("buildSafeInheritedProcessEnv", () => {
