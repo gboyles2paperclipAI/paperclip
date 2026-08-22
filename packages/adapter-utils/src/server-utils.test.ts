@@ -71,6 +71,52 @@ describe("buildInvocationEnvForLogs", () => {
       "env OPENAI_API_KEY=***REDACTED*** PAPERCLIP_API_KEY='***REDACTED***' custom-acp --paperclip-api-key=***REDACTED*** --token ***REDACTED***",
     );
   });
+
+  it("redacts generated credential config content while preserving non-secret output", () => {
+    const loggedEnv = buildInvocationEnvForLogs(
+      { SAFE_VALUE: "visible" },
+      {
+        resolvedCommand: [
+          `header = "Authorization: Bearer SYNTHETIC_AUTH_CONFIG_VALUE_DO_NOT_USE"`,
+          `header = "X-Api-Key: SYNTHETIC_HEADER_CONFIG_VALUE_DO_NOT_USE"`,
+          `PAPERCLIP_API_KEY: SYNTHETIC_COLON_CONFIG_VALUE_DO_NOT_USE`,
+          `header = "Accept: application/json"`,
+          "normal command output preserved",
+        ].join("\n"),
+      },
+    );
+
+    const command = loggedEnv.PAPERCLIP_RESOLVED_COMMAND;
+    expect(command).toContain("***REDACTED***");
+    expect(command).toContain(`header = "Accept: application/json"`);
+    expect(command).toContain("normal command output preserved");
+    expect(command).not.toContain("SYNTHETIC_AUTH_CONFIG_VALUE_DO_NOT_USE");
+    expect(command).not.toContain("SYNTHETIC_HEADER_CONFIG_VALUE_DO_NOT_USE");
+    expect(command).not.toContain("SYNTHETIC_COLON_CONFIG_VALUE_DO_NOT_USE");
+  });
+
+  it("redacts database URL output from systemctl-style environment dumps", () => {
+    const loggedEnv = buildInvocationEnvForLogs(
+      { SAFE_VALUE: "visible" },
+      {
+        resolvedCommand: [
+          "Environment=NODE_ENV=production",
+          "DATABASE_URL=SYNTHETIC_DB_URL_VALUE_DO_NOT_USE",
+          "Environment=DATABASE_URL=SYNTHETIC_SYSTEMD_DB_URL_VALUE_DO_NOT_USE",
+          "DATABASE_URL: SYNTHETIC_COLON_DB_URL_VALUE_DO_NOT_USE",
+          "postgresql://synthetic-user:synthetic-pass@example.invalid:5432/synthetic-db",
+        ].join("\n"),
+      },
+    );
+
+    const command = loggedEnv.PAPERCLIP_RESOLVED_COMMAND;
+    expect(command).toContain("***REDACTED***");
+    expect(command).toContain("Environment=NODE_ENV=production");
+    expect(command).not.toContain("SYNTHETIC_DB_URL_VALUE_DO_NOT_USE");
+    expect(command).not.toContain("SYNTHETIC_SYSTEMD_DB_URL_VALUE_DO_NOT_USE");
+    expect(command).not.toContain("SYNTHETIC_COLON_DB_URL_VALUE_DO_NOT_USE");
+    expect(command).not.toContain("synthetic-pass");
+  });
 });
 
 describe("buildSafeInheritedProcessEnv", () => {

@@ -38,4 +38,52 @@ describe("compactRunLogChunk", () => {
     expect(compacted).not.toContain("paperclip-json-secret");
     expect(compacted).not.toContain("paperclip-flag-secret");
   });
+
+  it("redacts generated credential config content when shell redirection is omitted", () => {
+    const forbidden = [
+      "SYNTHETIC_AUTH_CONFIG_VALUE_DO_NOT_USE",
+      "SYNTHETIC_HEADER_CONFIG_VALUE_DO_NOT_USE",
+      "SYNTHETIC_COLON_CONFIG_VALUE_DO_NOT_USE",
+    ];
+    const chunk = [
+      `header = "Authorization: Bearer ${forbidden[0]}"`,
+      `header = "X-Api-Key: ${forbidden[1]}"`,
+      `PAPERCLIP_API_KEY: ${forbidden[2]}`,
+      `header = "Accept: application/json"`,
+      "normal command output preserved",
+    ].join("\n");
+
+    const compacted = compactRunLogChunk(chunk);
+
+    expect(compacted).toContain("***REDACTED***");
+    expect(compacted).toContain(`header = "Accept: application/json"`);
+    expect(compacted).toContain("normal command output preserved");
+    for (const value of forbidden) {
+      expect(compacted).not.toContain(value);
+    }
+  });
+
+  it("redacts database URL output before persisting run-log chunks", () => {
+    const forbidden = [
+      "SYNTHETIC_DB_URL_VALUE_DO_NOT_USE",
+      "SYNTHETIC_SYSTEMD_DB_URL_VALUE_DO_NOT_USE",
+      "SYNTHETIC_COLON_DB_URL_VALUE_DO_NOT_USE",
+      "synthetic-pass",
+    ];
+    const chunk = [
+      "Environment=NODE_ENV=production",
+      `DATABASE_URL=${forbidden[0]}`,
+      `Environment=DATABASE_URL=${forbidden[1]}`,
+      `DATABASE_URL: ${forbidden[2]}`,
+      `postgresql://synthetic-user:${forbidden[3]}@example.invalid:5432/synthetic-db`,
+    ].join("\n");
+
+    const compacted = compactRunLogChunk(chunk);
+
+    expect(compacted).toContain("***REDACTED***");
+    expect(compacted).toContain("Environment=NODE_ENV=production");
+    for (const value of forbidden) {
+      expect(compacted).not.toContain(value);
+    }
+  });
 });
