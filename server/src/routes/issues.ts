@@ -119,6 +119,7 @@ import {
 } from "../services/index.js";
 import { buildPlanReviewContext } from "../services/plan-review-context.js";
 import { findDecisionLeaseForDecision } from "../services/decision-leases.js";
+import { assertDecisionFreezeMutationAllowed } from "../services/decision-freeze.js";
 import {
   TASK_WATCHDOG_ORIGIN_KIND,
   resolveTaskWatchdogMutationScope,
@@ -1723,35 +1724,12 @@ type IssueTriageAuthorityPatchDecision = {
   routineExecutionCloseout?: boolean;
 };
 
-function shouldImplicitlyMoveCommentedIssueToTodo(input: {
-  issueStatus: string | null | undefined;
-  assigneeAgentId: string | null | undefined;
-  actorType: "agent" | "user";
-  actorId: string;
-  actorRunId: string | null | undefined;
-  checkoutRunId: string | null | undefined;
-  executionRunId: string | null | undefined;
-}) {
-  // Local-CLI agents post comments under user auth, so the actor.type is "user"
-  // even though the comment originates from the same heartbeat run that owns
-  // the issue lock. Without this guard, an agent that closes its own issue and
-  // then posts a follow-up comment in the same run silently reopens it.
-  // Suppress the implicit move whenever the comment's source run matches the
-  // issue's checkout/execution run.
-  if (
-    typeof input.actorRunId === "string"
-    && input.actorRunId.length > 0
-    && (input.actorRunId === input.checkoutRunId || input.actorRunId === input.executionRunId)
-  ) {
-    return false;
-  }
-  // Only human comments should implicitly reopen finished work.
-  // Agent-authored comments remain communicative unless reopen was explicit.
-  if (input.actorType !== "user") return false;
-  if (!isClosedIssueStatus(input.issueStatus) && input.issueStatus !== "blocked") return false;
-  if (typeof input.assigneeAgentId !== "string" || input.assigneeAgentId.length === 0) return false;
-  return true;
-}
+// ADR-20260823-quiescent-coordination terminal integrity (FUL-20244, PR-2b):
+// the implicit comment-reopen path (`shouldImplicitlyMoveCommentedIssueToTodo`)
+// is REMOVED. Comments never change issue status; moving a terminal or blocked
+// issue back to todo requires explicit `reopen: true` / `resume: true` intent
+// (or the scheduled-retry human-comment supersede below, which only acts on
+// `in_progress` issues that are waiting on a scheduled retry).
 
 function shouldHumanCommentResumeInProgressScheduledRetry(input: {
   hasComment: boolean;
@@ -6417,6 +6395,12 @@ export function issueRoutes(
     assertCompanyAccess(req, issue.companyId);
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
+    // Decision-freeze mutation gate (R2.2/R3.3, PR-2b); the anchor's assignee
+    // may still update documents on the anchor while the lease is `revising`.
+    await assertDecisionFreezeMutationAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: req.actor.agentId ?? null,
+    }, { revisingOwnerOperation: "document_put" });
     const keyParsed = issueDocumentKeySchema.safeParse(String(req.params.key ?? "").trim().toLowerCase());
     if (!keyParsed.success) {
       res.status(400).json({ error: "Invalid document key", details: keyParsed.error.issues });
@@ -6850,6 +6834,12 @@ export function issueRoutes(
     assertCompanyAccess(req, issue.companyId);
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
+    // Decision-freeze mutation gate (R2.2/R3.3, PR-2b): no owner exemption for
+    // work products — only comment/document/resubmit pierce while revising.
+    await assertDecisionFreezeMutationAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: req.actor.agentId ?? null,
+    });
     const actor = getActorInfo(req);
     const createInput = {
       ...req.body,
@@ -7452,6 +7442,15 @@ export function issueRoutes(
       await assertCanAssignTasks(req, companyId, createAssignmentScope);
     }
     await assertIssueEnvironmentSelection(companyId, createBody.executionWorkspaceSettings?.environmentId);
+    // Decision-freeze issue-create gate (R2.2/R3.3, PR-2b): agents cannot
+    // create new work items whose parent is inside an active decision cone
+    // (blocked-by containment is gated in-transaction by syncBlockedByIssueIds).
+    if (createBody.parentId) {
+      await assertDecisionFreezeMutationAllowed(db, companyId, createBody.parentId, {
+        type: req.actor.type,
+        agentId: req.actor.agentId ?? null,
+      });
+    }
 
     const executionPolicy = applyActorMonitorScheduledBy(
       normalizeIssueExecutionPolicy(createBody.executionPolicy),
@@ -7618,6 +7617,12 @@ export function issueRoutes(
       await assertCanAssignTasks(req, parent.companyId, childAssignmentScope);
     }
     await assertIssueEnvironmentSelection(parent.companyId, createBody.executionWorkspaceSettings?.environmentId);
+    // Decision-freeze issue-create gate (R2.2/R3.3, PR-2b): agents cannot
+    // create children under a parent inside an active decision cone.
+    await assertDecisionFreezeMutationAllowed(db, parent.companyId, parent.id, {
+      type: req.actor.type,
+      agentId: req.actor.agentId ?? null,
+    });
 
     const actor = getActorInfo(req);
     const serializationContext = await resolveWatchdogFollowUpSerializationContext(req, parent);
@@ -8082,6 +8087,23 @@ export function issueRoutes(
     if (triageAuthorityPatch.routineExecutionCloseout) {
       delete updateFields.executionState;
     }
+    // Decision-freeze mutation gate (R2.2/R3.3, PR-2b): agent writes to a
+    // member of an active decision cone are rejected before any mutation.
+    // While the lease is `revising`, a comment-only PATCH by the anchor's
+    // assignee stays allowed (owner exemption, R3.1); any other field, intent
+    // flag, or review request is still gated.
+    const isCommentOnlyPatch =
+      !!commentBody &&
+      Object.keys(updateFields).length === 0 &&
+      reviewRequest === undefined &&
+      reopenRequested !== true &&
+      resumeRequested !== true &&
+      !interruptRequested &&
+      hiddenAtRaw === undefined;
+    await assertDecisionFreezeMutationAllowed(db, existing.companyId, existing.id, {
+      type: req.actor.type,
+      agentId: actor.agentId ?? null,
+    }, { revisingOwnerOperation: isCommentOnlyPatch ? "comment" : null });
     const shouldCancelActiveRunForCancelledStatus =
       existing.status !== "cancelled" && updateFields.status === "cancelled";
     if (resumeRequested === true && !commentBody) {
@@ -8156,20 +8178,12 @@ export function issueRoutes(
       actorType: actor.actorType,
       actorId: actor.actorId,
     });
+    // Comments never implicitly change status (terminal integrity, PR-2b):
+    // only explicit reopen/resume intent or the scheduled-retry supersede move
+    // an issue back to todo.
     const effectiveMoveToTodoRequested =
       !assigneeSelfCommentOnTerminal &&
-      (explicitMoveToTodoRequested ||
-        (!!commentBody &&
-          shouldImplicitlyMoveCommentedIssueToTodo({
-            issueStatus: existing.status,
-            assigneeAgentId: requestedAssigneeAgentId,
-            actorType: actor.actorType,
-            actorId: actor.actorId,
-            actorRunId: actor.runId,
-            checkoutRunId: existing.checkoutRunId,
-            executionRunId: existing.executionRunId,
-          })) ||
-        shouldResumeInProgressScheduledRetry);
+      (explicitMoveToTodoRequested || shouldResumeInProgressScheduledRetry);
     const updateReferenceSummaryBefore = titleOrDescriptionChanged
       ? await issueReferencesSvc.listIssueReferenceSummary(existing.id)
       : null;
@@ -10407,6 +10421,17 @@ export function issueRoutes(
     const reopenRequested = req.body.reopen === true;
     const resumeRequested = req.body.resume === true;
     const interruptRequested = req.body.interrupt === true;
+    // Decision-freeze mutation gate (R2.2/R3.3, PR-2b): agent comments on a
+    // member of an active decision cone are rejected; a pure comment (no
+    // reopen/resume/interrupt intent) by the anchor's assignee stays allowed
+    // while the lease is `revising` (owner exemption, R3.1).
+    await assertDecisionFreezeMutationAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: actor.agentId ?? null,
+    }, {
+      revisingOwnerOperation:
+        reopenRequested || resumeRequested || interruptRequested ? null : "comment",
+    });
     const isClosed = isClosedIssueStatus(issue.status);
     const isBlocked = issue.status === "blocked";
     const mentionGrantedPeerAgentCommentOnly =
@@ -10453,19 +10478,12 @@ export function issueRoutes(
       actorType: actor.actorType,
       actorId: actor.actorId,
     });
+    // Comments never implicitly change status (terminal integrity, PR-2b):
+    // only explicit reopen/resume intent or the scheduled-retry supersede move
+    // an issue back to todo.
     const effectiveMoveToTodoRequested =
       !assigneeSelfCommentOnTerminal &&
-      (explicitMoveToTodoRequested ||
-        shouldImplicitlyMoveCommentedIssueToTodo({
-          issueStatus: issue.status,
-          assigneeAgentId: issue.assigneeAgentId,
-          actorType: actor.actorType,
-          actorId: actor.actorId,
-          actorRunId: actor.runId,
-          checkoutRunId: issue.checkoutRunId,
-          executionRunId: issue.executionRunId,
-        }) ||
-        shouldResumeInProgressScheduledRetry);
+      (explicitMoveToTodoRequested || shouldResumeInProgressScheduledRetry);
     const hasUnresolvedFirstClassBlockers =
       isBlocked && effectiveMoveToTodoRequested
         ? (await svc.getDependencyReadiness(issue.id)).unresolvedBlockerCount > 0
@@ -11138,6 +11156,12 @@ export function issueRoutes(
     }
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
+    // Decision-freeze mutation gate (R2.2/R3.3, PR-2b): no owner exemption for
+    // attachments — only comment/document/resubmit pierce while revising.
+    await assertDecisionFreezeMutationAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: req.actor.agentId ?? null,
+    });
 
     const company = await companiesSvc.getById(companyId);
     const attachmentMaxBytes = normalizeIssueAttachmentMaxBytes(company?.attachmentMaxBytes);

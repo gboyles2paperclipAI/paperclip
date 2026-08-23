@@ -171,7 +171,13 @@ export type PipelineReviewDecision = "approve" | "reject" | "request_changes";
 export type PipelineAutomationExecutionResult =
   | { status: "none" }
   | { status: "succeeded"; execution: typeof pipelineAutomationExecutions.$inferSelect }
-  | { status: "failed"; execution: typeof pipelineAutomationExecutions.$inferSelect };
+  | { status: "failed"; execution: typeof pipelineAutomationExecutions.$inferSelect }
+  /** Stage-entry routine run suppressed by an active decision freeze (R2.14):
+   * not a failure — the ledger stays retryable and no failure event is written. */
+  | { status: "retry_later"; execution: typeof pipelineAutomationExecutions.$inferSelect };
+
+/** Retryable ledger error marker for decision-freeze-suppressed stage entries. */
+export const PIPELINE_DECISION_FREEZE_RETRY_LATER_ERROR = "decision_freeze_retry_later";
 
 type PipelineDb = Db | Parameters<Parameters<Db["transaction"]>[0]>[0];
 
@@ -3005,6 +3011,20 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         const failureReason = typeof run.failureReason === "string" && run.failureReason.trim().length > 0
           ? run.failureReason.trim()
           : null;
+        if (failureReason === "decision_freeze") {
+          // R2.14 / R3.10: a routine run suppressed by an active decision
+          // freeze is RETRY-LATER, not a failure. Keep the ledger in the
+          // retryable `failed` shape (same as `pending_dispatch`) with a
+          // distinguishable marker, write NO automation_failed case event, and
+          // let a later drive (retry or stage re-entry) execute it after the
+          // freeze releases.
+          const [retryLater] = await db
+            .update(pipelineAutomationExecutions)
+            .set({ status: "failed", error: PIPELINE_DECISION_FREEZE_RETRY_LATER_ERROR, updatedAt: nowDate() })
+            .where(eq(pipelineAutomationExecutions.id, execution.id))
+            .returning();
+          return { status: "retry_later", execution: retryLater ?? execution };
+        }
         throw new Error(
           failureReason
             ? `Routine run ${run.id} failed: ${failureReason}`

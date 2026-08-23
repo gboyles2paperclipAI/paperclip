@@ -32,6 +32,7 @@ import {
   collectExecutionWorkspaceCommandPaths,
 } from "./workspace-command-authz.js";
 import { assertCanManageExecutionWorkspaceRuntimeServices } from "./workspace-runtime-service-authz.js";
+import { assertDecisionFreezeMutationAllowed } from "../services/decision-freeze.js";
 import { appendWithCap } from "../adapters/utils.js";
 import { environmentRuntimeService } from "../services/environment-runtime.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
@@ -170,6 +171,15 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
       executionWorkspaceId: existing.id,
       sourceIssueId: existing.sourceIssueId,
     });
+    // Decision-freeze mutation gate (R2.2/R3.3, PR-2b): agents cannot drive
+    // workspace runtime services for a workspace whose source issue sits
+    // inside an active decision cone.
+    if (existing.sourceIssueId) {
+      await assertDecisionFreezeMutationAllowed(db, existing.companyId, existing.sourceIssueId, {
+        type: req.actor.type,
+        agentId: req.actor.agentId ?? null,
+      });
+    }
 
     const workspaceCwd = existing.cwd;
     if (!workspaceCwd) {

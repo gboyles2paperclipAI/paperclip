@@ -106,6 +106,12 @@ import {
 } from "./recovery/origins.js";
 import { classifyIssueGraphLiveness, type IssueLivenessFinding } from "./recovery/issue-graph-liveness.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
+import {
+  DECISION_FREEZE_ACTIVE_ERROR_CODE,
+  decisionFreezeExclusionSql,
+  listActiveDecisionFreezesForIssues,
+} from "./decision-freeze.js";
+import { recomputeConeForEdgeChange } from "./decision-leases.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -4243,6 +4249,52 @@ export function issueService(db: Db) {
       await assertNoBlockingCycles(companyId, issueId, deduped, dbOrTx);
     }
 
+    // Edge-expansion gate + recompute hooks (R2.8 / Gemini C2, PR-2b): agent
+    // actors cannot add or remove blocked-by edges that touch an active
+    // decision cone; board/user edge changes that could expand a cone trigger
+    // the union-only recompute in the SAME transaction.
+    const previousBlockerIds: string[] = await dbOrTx
+      .select({ id: issueRelations.issueId })
+      .from(issueRelations)
+      .where(
+        and(
+          eq(issueRelations.companyId, companyId),
+          eq(issueRelations.relatedIssueId, issueId),
+          eq(issueRelations.type, "blocks"),
+        ),
+      )
+      .then((rows: Array<{ id: string }>) => rows.map((row) => row.id));
+    const previousBlockerSet = new Set(previousBlockerIds);
+    const nextBlockerSet = new Set(deduped);
+    const addedBlockerIds = deduped.filter((candidate) => !previousBlockerSet.has(candidate));
+    const removedBlockerIds = previousBlockerIds.filter((candidate) => !nextBlockerSet.has(candidate));
+    let leaseIdsToRecompute: string[] = [];
+    if (addedBlockerIds.length > 0 || removedBlockerIds.length > 0) {
+      const touchedFreezes = await listActiveDecisionFreezesForIssues(
+        dbOrTx,
+        companyId,
+        [issueId, ...addedBlockerIds, ...removedBlockerIds],
+      );
+      if (touchedFreezes.length > 0 && actor.agentId) {
+        const blocking = touchedFreezes[0]!;
+        throw unprocessable("Blocked-by edges touching an active decision freeze cannot be changed by agents", {
+          code: DECISION_FREEZE_ACTIVE_ERROR_CODE,
+          issueId,
+          leaseId: blocking.leaseId,
+          anchorIssueId: blocking.anchorIssueId,
+          leaseState: blocking.state,
+        });
+      }
+      // A new edge whose BLOCKER is a cone member pulls this issue (and its
+      // dependents) into that cone; recompute those leases after the insert.
+      const addedBlockerSet = new Set(addedBlockerIds);
+      leaseIdsToRecompute = [...new Set(
+        touchedFreezes
+          .filter((freeze) => addedBlockerSet.has(freeze.issueId))
+          .map((freeze) => freeze.leaseId),
+      )];
+    }
+
     await dbOrTx
       .delete(issueRelations)
       .where(
@@ -4253,18 +4305,22 @@ export function issueService(db: Db) {
         ),
       );
 
-    if (deduped.length === 0) return;
+    if (deduped.length > 0) {
+      await dbOrTx.insert(issueRelations).values(
+        deduped.map((blockerIssueId) => ({
+          companyId,
+          issueId: blockerIssueId,
+          relatedIssueId: issueId,
+          type: "blocks",
+          createdByAgentId: actor.agentId ?? null,
+          createdByUserId: actor.userId ?? null,
+        })),
+      );
+    }
 
-    await dbOrTx.insert(issueRelations).values(
-      deduped.map((blockerIssueId) => ({
-        companyId,
-        issueId: blockerIssueId,
-        relatedIssueId: issueId,
-        type: "blocks",
-        createdByAgentId: actor.agentId ?? null,
-        createdByUserId: actor.userId ?? null,
-      })),
-    );
+    for (const leaseId of leaseIdsToRecompute) {
+      await recomputeConeForEdgeChange(dbOrTx, leaseId);
+    }
   }
 
   async function isTerminalOrMissingHeartbeatRun(runId: string, dbOrTx: DbReader = db) {
@@ -4611,6 +4667,13 @@ export function issueService(db: Db) {
         conditions.push(isNull(issues.assigneeAgentId));
       } else if (assigneeAgentFilter) {
         conditions.push(eq(issues.assigneeAgentId, assigneeAgentFilter));
+        // Pick-work SQL exclusion (R3.4, PR-2b): the assignee+status list shape
+        // is the pick-work surface (inbox-lite, the assignee skill fallback,
+        // and the MCP inbox via /agents/me/inbox-lite). Members of an active
+        // decision cone vanish from it while frozen and reappear on release.
+        if (statuses.length > 0) {
+          conditions.push(decisionFreezeExclusionSql(issues.id, issues.companyId));
+        }
       }
       if (filters?.participantAgentId) {
         conditions.push(participatedByAgentCondition(companyId, filters.participantAgentId));
@@ -6150,6 +6213,16 @@ export function issueService(db: Db) {
         );
 
         const [issue] = await tx.insert(issues).values(values).returning();
+        // Cone maintenance (R2.8, PR-2b): a board/system-created child under a
+        // frozen parent joins the cone immediately (union-only recompute in the
+        // same transaction). Agent creates were already rejected at the route
+        // gate before reaching this insert.
+        if (issue.parentId) {
+          const parentFreezes = await listActiveDecisionFreezesForIssues(tx as unknown as Db, companyId, [issue.parentId]);
+          for (const leaseId of [...new Set(parentFreezes.map((freeze) => freeze.leaseId))]) {
+            await recomputeConeForEdgeChange(tx as unknown as Db, leaseId);
+          }
+        }
         if (watchdog) {
           await upsertIssueWatchdogForIssue(tx, companyId, issue.id, {
             agentId: watchdog.agentId,
@@ -6417,6 +6490,39 @@ export function issueService(db: Db) {
       }
 
       const runUpdate = async (tx: any) => {
+        // Edge-expansion gate + recompute hook for parent edges (R2.8, PR-2b):
+        // agent actors cannot re-parent an issue into or out of an active
+        // decision cone; board/user re-parenting INTO a cone triggers the
+        // union-only recompute in the same transaction (after the write below).
+        const parentChanged =
+          issueData.parentId !== undefined && issueData.parentId !== existing.parentId;
+        let parentLeaseIdsToRecompute: string[] = [];
+        if (parentChanged) {
+          const touchedParentIssueIds = [
+            id,
+            ...(typeof issueData.parentId === "string" && issueData.parentId ? [issueData.parentId] : []),
+          ];
+          const parentFreezes = await listActiveDecisionFreezesForIssues(
+            tx,
+            existing.companyId,
+            touchedParentIssueIds,
+          );
+          if (parentFreezes.length > 0 && actorAgentId) {
+            const blocking = parentFreezes[0]!;
+            throw unprocessable("Parent edges touching an active decision freeze cannot be changed by agents", {
+              code: DECISION_FREEZE_ACTIVE_ERROR_CODE,
+              issueId: id,
+              leaseId: blocking.leaseId,
+              anchorIssueId: blocking.anchorIssueId,
+              leaseState: blocking.state,
+            });
+          }
+          parentLeaseIdsToRecompute = [...new Set(
+            parentFreezes
+              .filter((freeze) => freeze.issueId === issueData.parentId)
+              .map((freeze) => freeze.leaseId),
+          )];
+        }
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
         const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
           getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
@@ -6457,6 +6563,11 @@ export function issueService(db: Db) {
             },
             tx,
           );
+        }
+        // Board/user re-parenting into an active cone expands it (R2.8):
+        // recompute after the parent edge is written so the BFS sees it.
+        for (const leaseId of parentLeaseIdsToRecompute) {
+          await recomputeConeForEdgeChange(tx, leaseId);
         }
         if (
           issueData.executionWorkspaceSettings !== undefined &&

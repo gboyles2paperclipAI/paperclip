@@ -182,3 +182,120 @@ export async function assertNotDecisionFrozen(
     leaseState: freeze.state,
   });
 }
+
+/** One frozen membership row (an issue can be held by several leases — R2.8). */
+export type ActiveDecisionFreezeMembership = ActiveDecisionFreeze & { issueId: string };
+
+/**
+ * All frozen (active/revising) lease memberships for a set of issues,
+ * company-scoped (PR-2b: route mutation gate + edge-expansion/recompute hooks
+ * in services/issues.ts). Empty tables / empty input return an empty array.
+ * Deliberately two flat `select().from().where()` queries (membership rows,
+ * then lease rows, ordered client-side) rather than a join, so the helper
+ * stays compatible with every thin Db facade while behaving identically on
+ * real Postgres.
+ */
+export async function listActiveDecisionFreezesForIssues(
+  dbOrTx: DbOrTx,
+  companyId: string,
+  issueIds: readonly string[],
+): Promise<ActiveDecisionFreezeMembership[]> {
+  const candidates = [...new Set(issueIds)].filter((issueId) => isUuidLike(issueId));
+  if (candidates.length === 0) return [];
+  const memberRows = await dbOrTx
+    .select({
+      leaseId: decisionLeaseMembers.leaseId,
+      issueId: decisionLeaseMembers.issueId,
+    })
+    .from(decisionLeaseMembers)
+    .where(inArray(decisionLeaseMembers.issueId, candidates));
+  if (memberRows.length === 0) return [];
+
+  const leaseIds = [...new Set(memberRows.map((row) => row.leaseId))];
+  const leaseRows = await dbOrTx
+    .select({
+      id: decisionLeases.id,
+      state: decisionLeases.state,
+      anchorIssueId: decisionLeases.anchorIssueId,
+      createdAt: decisionLeases.createdAt,
+    })
+    .from(decisionLeases)
+    .where(
+      and(
+        inArray(decisionLeases.id, leaseIds),
+        eq(decisionLeases.companyId, companyId),
+        inArray(decisionLeases.state, [...FROZEN_DECISION_LEASE_STATES]),
+      ),
+    );
+  if (leaseRows.length === 0) return [];
+  const leasesById = new Map(leaseRows.map((row) => [row.id, row]));
+
+  return memberRows
+    .filter((row) => leasesById.has(row.leaseId))
+    .map((row) => {
+      const lease = leasesById.get(row.leaseId)!;
+      return {
+        leaseId: lease.id,
+        issueId: row.issueId,
+        state: lease.state === "revising" ? "revising" as const : "active" as const,
+        anchorIssueId: lease.anchorIssueId,
+        createdAt: lease.createdAt,
+      };
+    })
+    .sort((a, b) =>
+      a.createdAt.getTime() - b.createdAt.getTime()
+      || a.leaseId.localeCompare(b.leaseId)
+      || a.issueId.localeCompare(b.issueId))
+    .map(({ createdAt: _createdAt, ...membership }) => membership);
+}
+
+/**
+ * Operations the anchor's assignee agent may perform ON THE ANCHOR ONLY while
+ * the lease is in the `revising` substate (R3.1): comment, document PUT, and
+ * resubmitting the same decision. All other members stay fully gated.
+ */
+export type DecisionFreezeRevisingOwnerOperation = "comment" | "document_put" | "resubmit";
+
+/**
+ * Route-facing mutation gate (R2.2/R3.1/R3.3). Same contract as
+ * `assertNotDecisionFrozen` (agent actors 422 `decision_freeze_active`;
+ * board/user/system exempt), plus the revising-owner exemption: when
+ * `revisingOwnerOperation` is passed, the write is allowed if EVERY frozen
+ * lease holding the issue is in state `revising`, anchored on this exact
+ * issue, and the acting agent is the anchor's assignee. Overlapping leases
+ * (R2.8) therefore keep the issue gated unless each one grants the exemption.
+ */
+export async function assertDecisionFreezeMutationAllowed(
+  tx: DbOrTx,
+  companyId: string,
+  issueId: string,
+  actor: { type: string | null | undefined; agentId?: string | null },
+  opts: { revisingOwnerOperation?: DecisionFreezeRevisingOwnerOperation | null } = {},
+): Promise<void> {
+  if (actor.type !== "agent") return;
+  const freezes = await listActiveDecisionFreezesForIssues(tx, companyId, [issueId]);
+  if (freezes.length === 0) return;
+
+  const agentId = typeof actor.agentId === "string" && actor.agentId.length > 0 ? actor.agentId : null;
+  if (
+    opts.revisingOwnerOperation
+    && agentId
+    && freezes.every((freeze) => freeze.state === "revising" && freeze.anchorIssueId === issueId)
+  ) {
+    const anchor = await tx
+      .select({ assigneeAgentId: issues.assigneeAgentId })
+      .from(issues)
+      .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)))
+      .then((rows) => rows[0] ?? null);
+    if (anchor?.assigneeAgentId === agentId) return;
+  }
+
+  const blocking = freezes[0]!;
+  throw unprocessable("Issue is inside an active decision freeze", {
+    code: DECISION_FREEZE_ACTIVE_ERROR_CODE,
+    issueId,
+    leaseId: blocking.leaseId,
+    anchorIssueId: blocking.anchorIssueId,
+    leaseState: blocking.state,
+  });
+}
