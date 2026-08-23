@@ -80,6 +80,8 @@ export interface Routine {
   status: string;
   concurrencyPolicy: string;
   catchUpPolicy: string;
+  /** Board visibility of execution issues: issue_always | run_only | issue_on_failure. */
+  trackingMode?: string;
   originKind?: string;
   originId?: string | null;
   variables: RoutineVariable[];

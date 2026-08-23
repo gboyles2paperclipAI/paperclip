@@ -74,7 +74,10 @@ export function expiresAtForInteraction(
   return ttlSeconds === 0 ? null : new Date(createdAt.getTime() + ttlSeconds * 1_000);
 }
 
-export type InteractionLifecycleNotificationEvent = "interaction.created" | "interaction.expired";
+export type InteractionLifecycleNotificationEvent =
+  | "interaction.created"
+  | "interaction.expired"
+  | "interaction.resolved";
 
 export async function emitInteractionLifecycleNotification(
   event: InteractionLifecycleNotificationEvent,

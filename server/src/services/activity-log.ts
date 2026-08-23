@@ -118,8 +118,11 @@ export async function logActivity(db: Db, input: LogActivityInput) {
     publishPluginDomainEvent(event);
   }
 
+  // Slack fan-out goes through the durable transition-keyed notification
+  // dedup (notification_transitions, R2.15) inside maybeNotifySlackForActivity.
+  // Fire-and-forget: activity logging must never block on channel delivery.
   void import("./slack-integration.js")
-    .then(({ maybeNotifySlackForActivity }) => {
+    .then(({ maybeNotifySlackForActivity }) =>
       maybeNotifySlackForActivity({
         db,
         companyId: input.companyId,
@@ -127,7 +130,6 @@ export async function logActivity(db: Db, input: LogActivityInput) {
         entityType: input.entityType,
         entityId: input.entityId,
         details: redactedDetails,
-      });
-    })
+      }))
     .catch(() => {});
 }

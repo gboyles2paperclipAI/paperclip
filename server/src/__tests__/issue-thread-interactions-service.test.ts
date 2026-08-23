@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
   companies,
   createDb,
+  decisionLeaseMembers,
+  decisionLeases,
   documentRevisions,
   documents,
   executionWorkspaces,
@@ -45,6 +47,10 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
   }, 20_000);
 
   afterEach(async () => {
+    vi.unstubAllGlobals();
+    delete process.env.PAPERCLIP_INTERACTION_NOTIFICATION_WEBHOOK_URL;
+    await db.delete(decisionLeaseMembers);
+    await db.delete(decisionLeases);
     await db.delete(issueThreadInteractions);
     await db.delete(issueComments);
     await db.delete(issueDocuments);
@@ -2510,6 +2516,99 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     );
     expect(finalSweep).toMatchObject({ expired: 1, reissued: 0 });
     expect(await interactionsSvc.listForIssue(issueId)).toHaveLength(2);
+  });
+
+  function captureLifecycleWebhookEvents() {
+    const events: string[] = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: { body?: unknown }) => {
+      events.push((JSON.parse(String(init?.body)) as { event: string }).event);
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+    process.env.PAPERCLIP_INTERACTION_NOTIFICATION_WEBHOOK_URL = "https://notify.example.test/cards";
+    return events;
+  }
+
+  it("emits the interaction.resolved lifecycle webhook when a confirmation is rejected", async () => {
+    const events = captureLifecycleWebhookEvents();
+    const { companyId, issueId } = await seedConfirmationIssue("Resolved webhook on reject");
+    const created = await interactionsSvc.create({ id: issueId, companyId }, {
+      kind: "request_confirmation",
+      continuationPolicy: "none",
+      title: "Operator approval",
+      payload: { version: 1, prompt: "Approve the proposed action?" },
+    }, { agentId: null, userId: "local-board" });
+    expect(events).toEqual(["interaction.created"]);
+
+    await interactionsSvc.rejectInteraction(
+      { id: issueId, companyId },
+      created.id,
+      { reason: "not needed" },
+      { userId: "local-board" },
+    );
+    expect(events).toEqual(["interaction.created", "interaction.resolved"]);
+  });
+
+  it("emits interaction.resolved alongside interaction.expired for a non-lease TTL expiry and its reissue", async () => {
+    const events = captureLifecycleWebhookEvents();
+    const { companyId, issueId } = await seedConfirmationIssue("Resolved webhook on TTL expiry");
+    const created = await interactionsSvc.create({ id: issueId, companyId }, {
+      kind: "request_confirmation",
+      continuationPolicy: "none",
+      title: "Operator approval",
+      payload: { version: 1, prompt: "Approve the proposed action?" },
+    }, { agentId: null, userId: "local-board" });
+    const config = {
+      interactionTtlSeconds: 60,
+      approvalTtlSeconds: 60,
+      notificationWebhookUrl: "https://notify.example.test/cards",
+    };
+
+    await interactionsSvc.expireDueOperatorInteractions(
+      new Date(new Date(created.payload.expiresAt!).getTime() + 1),
+      { config },
+    );
+    expect(events).toEqual([
+      "interaction.created",
+      "interaction.expired",
+      "interaction.resolved",
+      "interaction.created",
+    ]);
+  });
+
+  it("suppresses lifecycle webhooks (including interaction.resolved) for a lease-bound TTL reissue", async () => {
+    const events = captureLifecycleWebhookEvents();
+    const { companyId, issueId } = await seedConfirmationIssue("Suppressed webhook on lease reissue");
+    const created = await interactionsSvc.create({ id: issueId, companyId }, {
+      kind: "request_confirmation",
+      continuationPolicy: "none",
+      title: "Operator approval",
+      payload: { version: 1, prompt: "Approve the proposed action?" },
+    }, { agentId: null, userId: "local-board" });
+    await db.insert(decisionLeases).values({
+      companyId,
+      decisionKind: "interaction",
+      decisionId: created.id,
+      decisionIdempotencyKey: `decision-${created.id}`,
+      anchorIssueId: issueId,
+      state: "active",
+    });
+    events.length = 0;
+
+    const sweep = await interactionsSvc.expireDueOperatorInteractions(
+      new Date(new Date(created.payload.expiresAt!).getTime() + 1),
+      {
+        config: {
+          interactionTtlSeconds: 60,
+          approvalTtlSeconds: 60,
+          notificationWebhookUrl: "https://notify.example.test/cards",
+        },
+      },
+    );
+    expect(sweep).toMatchObject({ expired: 1, reissued: 1 });
+    // The decision continues on the reissued card: no expired, no resolved,
+    // no created webhook while the lease waits (PR-2a suppression pattern).
+    expect(events).toEqual([]);
   });
 
   describe("workspace_finalize accept gate", () => {

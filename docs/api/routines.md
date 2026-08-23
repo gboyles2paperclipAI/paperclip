@@ -54,6 +54,8 @@ Fields:
 | `status` | no | `active` (default), `paused`, `archived` |
 | `concurrencyPolicy` | no | Behaviour when a run fires while a previous one is still active |
 | `catchUpPolicy` | no | Behaviour for missed scheduled runs |
+| `trackingMode` | no | Board visibility of execution issues: `issue_always` (default), `run_only`, `issue_on_failure` |
+| `failureOwner` | when `trackingMode` is `run_only` | Name of the external monitor that owns this routine's failures |
 
 **Concurrency policies:**
 
@@ -69,6 +71,28 @@ Fields:
 |-------|-----------|
 | `skip_missed` (default) | Missed scheduled runs are dropped |
 | `enqueue_missed_with_cap` | Missed runs are enqueued up to an internal cap |
+
+**Tracking modes:**
+
+| Value | Behaviour |
+|-------|-----------|
+| `issue_always` (default) | Every run creates a board-visible execution issue (pre-existing behaviour) |
+| `run_only` | Execution issues are hidden from the board; run history lives in `routine_runs` only. Requires `failureOwner`: failures are owned by that named external monitor, and the server emits one transition-keyed notification per failure state change instead of opening board issues |
+| `issue_on_failure` | Execution issues are hidden while healthy; repeated failures open ONE board-visible failure-episode issue that recovery closes exactly once |
+
+`trackingMode` is exposed on all routine read models (list, detail,
+create/update responses). `failureOwner` is stored on the routine's existing
+env surface under the reserved `PAPERCLIP_FAILURE_OWNER` key (as a plain
+binding) and surfaced back as a top-level `failureOwner` field; pass
+`failureOwner: null` on update to clear it.
+
+> Note: `trackingMode` is accepted and validated at this surface, and the
+> scheduler/dispatch path fully honours the stored column. Persisting a
+> non-default `trackingMode` through create/update requires the pending
+> routine-service amendment (the create/update persistence lives in a
+> change-frozen file); until it lands, the stored mode remains the response's
+> source of truth — check the returned `trackingMode` rather than assuming the
+> requested value was applied.
 
 ## Update Routine
 

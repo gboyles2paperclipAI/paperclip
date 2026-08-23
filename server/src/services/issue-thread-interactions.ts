@@ -658,6 +658,21 @@ async function emitExpiredInteractionNotifications(
   ));
 }
 
+/**
+ * `interaction.resolved` lifecycle webhook: fired whenever an interaction
+ * reaches a terminal status (accepted/answered/rejected/dismissed/cancelled/
+ * expired). Lease-bound TTL reissues are suppressed by callers per the PR-2a
+ * pattern — the decision continues on the reissued card, so nothing resolved.
+ */
+async function emitResolvedInteractionNotifications(
+  interactions: readonly IssueThreadInteraction[],
+  config = loadInteractionLifecycleConfig(),
+) {
+  await Promise.all(interactions.map((interaction) =>
+    emitInteractionLifecycleNotification("interaction.resolved", interaction, { config })
+  ));
+}
+
 function isCommentAtOrAfterInteraction(args: {
   commentCreatedAt: Date | string;
   interactionCreatedAt: Date | string;
@@ -1037,6 +1052,7 @@ async function expireStaleRequestConfirmationTarget(db: Db | any, args: {
   const expired = hydrateInteraction(updated);
   await emitInteractionResolvedTelemetry(db, expired);
   await emitExpiredInteractionNotifications([expired]);
+  await emitResolvedInteractionNotifications([expired]);
   return expired;
 }
 
@@ -1226,6 +1242,7 @@ export function issueThreadInteractionService(
       };
     });
     await emitInteractionResolvedTelemetry(db, result.interaction);
+    await emitResolvedInteractionNotifications([result.interaction]);
     return result;
   }
 
@@ -1283,6 +1300,7 @@ export function issueThreadInteractionService(
     await touchIssue(db, args.issue.id);
     const rejected = hydrateInteraction(updated);
     await emitInteractionResolvedTelemetry(db, rejected);
+    await emitResolvedInteractionNotifications([rejected]);
     return rejected;
   }
 
@@ -1704,12 +1722,15 @@ export function issueThreadInteractionService(
         await emitInteractionResolvedTelemetry(db, result.expiredInteraction);
         // Lifecycle webhook/Slack emissions for lease-bound reissues are
         // suppressed (R2.5): no repeated operator notification during a wait.
+        // interaction.resolved follows the same suppression — the decision
+        // continues on the reissued card, so nothing actually resolved.
         if (!result.leaseTransferred) {
           await emitInteractionLifecycleNotification(
             "interaction.expired",
             result.expiredInteraction,
             { config },
           );
+          await emitResolvedInteractionNotifications([result.expiredInteraction], config);
           if (result.reissuedInteraction) {
             await emitInteractionLifecycleNotification(
               "interaction.created",
@@ -1925,6 +1946,7 @@ export function issueThreadInteractionService(
       await emitInteractionResolvedTelemetry(db, accepted, {
         createdTaskCount: createdWakeTargets.length,
       });
+      await emitResolvedInteractionNotifications([accepted]);
       return {
         interaction: accepted,
         createdIssues: createdWakeTargets,
@@ -1993,6 +2015,7 @@ export function issueThreadInteractionService(
       await touchIssue(db, issue.id);
       const dismissed = hydrateInteraction(updated);
       await emitInteractionResolvedTelemetry(db, dismissed);
+      await emitResolvedInteractionNotifications([dismissed]);
       return dismissed;
     },
 
@@ -2100,6 +2123,7 @@ export function issueThreadInteractionService(
 
       if (submission.resolved) {
         await emitInteractionResolvedTelemetry(db, submission.interaction);
+        await emitResolvedInteractionNotifications([submission.interaction]);
       }
       return submission;
     },
@@ -2152,6 +2176,7 @@ export function issueThreadInteractionService(
       await touchIssue(db, issue.id);
       const rejected = hydrateInteraction(updated);
       await emitInteractionResolvedTelemetry(db, rejected);
+      await emitResolvedInteractionNotifications([rejected]);
       return rejected;
     },
 
@@ -2219,6 +2244,7 @@ export function issueThreadInteractionService(
         await touchIssue(db, issue.id);
         await emitResolvedInteractionsTelemetry(db, expired);
         await emitExpiredInteractionNotifications(expired);
+        await emitResolvedInteractionNotifications(expired);
       }
       return expired;
     },
@@ -2361,6 +2387,7 @@ export function issueThreadInteractionService(
         await touchIssue(db, issue.id);
         await emitResolvedInteractionsTelemetry(db, expired);
         await emitExpiredInteractionNotifications(expired);
+        await emitResolvedInteractionNotifications(expired);
       }
       return expired;
     },
@@ -2434,6 +2461,7 @@ export function issueThreadInteractionService(
         await touchIssue(db, issue.id);
         await emitResolvedInteractionsTelemetry(db, expired);
         await emitExpiredInteractionNotifications(expired);
+        await emitResolvedInteractionNotifications(expired);
       }
       return expired;
     },
@@ -2500,6 +2528,7 @@ export function issueThreadInteractionService(
       await touchIssue(db, issue.id);
       const answered = hydrateInteraction(updated);
       await emitInteractionResolvedTelemetry(db, answered);
+      await emitResolvedInteractionNotifications([answered]);
       return answered;
     },
 
@@ -2562,6 +2591,7 @@ export function issueThreadInteractionService(
       await touchIssue(db, issue.id);
       const cancelled = hydrateInteraction(updated);
       await emitInteractionResolvedTelemetry(db, cancelled);
+      await emitResolvedInteractionNotifications([cancelled]);
       return cancelled;
     },
   };
