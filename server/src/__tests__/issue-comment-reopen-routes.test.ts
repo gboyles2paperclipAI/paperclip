@@ -40,13 +40,28 @@ const mockTxInsert = vi.hoisted(() => vi.fn(() => ({ values: mockTxInsertValues 
 const mockTx = vi.hoisted(() => ({
   insert: mockTxInsert,
 }));
-const mockDbSelectOrderBy = vi.hoisted(() => vi.fn(async () => []));
+const mockDbSelectLimit = vi.hoisted(() => vi.fn(() => ({
+  then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
+    Promise.resolve([]).then(onFulfilled, onRejected),
+})));
+// Awaitable AND chainable (`.limit(1).then(...)` — the decision-freeze lookup
+// shape) while still resolving to [] when awaited directly.
+const mockDbSelectOrderBy = vi.hoisted(() => vi.fn(() => ({
+  limit: mockDbSelectLimit,
+  then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
+    Promise.resolve([]).then(onFulfilled, onRejected),
+})));
 const mockDbSelectWhere = vi.hoisted(() => vi.fn(() => ({
   orderBy: mockDbSelectOrderBy,
   then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
     Promise.resolve([]).then(onFulfilled, onRejected),
 })));
-const mockDbSelectFrom = vi.hoisted(() => vi.fn(() => ({ where: mockDbSelectWhere })));
+// `.from(...)` supports the plain `.where(...)` shape and the decision-freeze
+// membership `.innerJoin(...).where(...)` shape.
+const mockDbSelectFrom = vi.hoisted(() => vi.fn(() => ({
+  where: mockDbSelectWhere,
+  innerJoin: vi.fn(() => ({ where: mockDbSelectWhere })),
+})));
 const mockDbSelect = vi.hoisted(() => vi.fn(() => ({ from: mockDbSelectFrom })));
 const mockDb = vi.hoisted(() => ({
   select: mockDbSelect,
@@ -287,16 +302,28 @@ describe.sequential("issue comment reopen routes", () => {
     mockDbSelectFrom.mockReset();
     mockDbSelectWhere.mockReset();
     mockDbSelectOrderBy.mockReset();
+    mockDbSelectLimit.mockReset();
     mockDb.transaction.mockReset();
     mockTxInsertValues.mockResolvedValue(undefined);
     mockTxInsert.mockImplementation(() => ({ values: mockTxInsertValues }));
-    mockDbSelectOrderBy.mockResolvedValue([]);
+    mockDbSelectLimit.mockImplementation(() => ({
+      then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
+        Promise.resolve([]).then(onFulfilled, onRejected),
+    }));
+    mockDbSelectOrderBy.mockImplementation(() => ({
+      limit: mockDbSelectLimit,
+      then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
+        Promise.resolve([]).then(onFulfilled, onRejected),
+    }));
     mockDbSelectWhere.mockImplementation(() => ({
       orderBy: mockDbSelectOrderBy,
       then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
         Promise.resolve([]).then(onFulfilled, onRejected),
     }));
-    mockDbSelectFrom.mockImplementation(() => ({ where: mockDbSelectWhere }));
+    mockDbSelectFrom.mockImplementation(() => ({
+      where: mockDbSelectWhere,
+      innerJoin: vi.fn(() => ({ where: mockDbSelectWhere })),
+    }));
     mockDbSelect.mockImplementation(() => ({ from: mockDbSelectFrom }));
     mockDb.transaction.mockImplementation(async (fn: (tx: typeof mockTx) => Promise<unknown>) => fn(mockTx));
     mockHeartbeatService.wakeup.mockResolvedValue(undefined);
@@ -1032,12 +1059,15 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.addComment).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       "Paperclip needs a disposition before this issue can continue.",
-      { agentId: undefined, userId: "local-board", runId: null },
+      { agentId: undefined, userId: "local-board", runId: null, actorType: "board" },
       {
         authorType: "user",
         presentation: { kind: "system_notice", tone: "warning", detailsDefaultOpen: false },
         metadata,
         sourceTrust: null,
+        // Pure comment (no reopen/resume/interrupt intent): the service gate
+        // receives the revising-owner "comment" exemption (stack-review B).
+        revisingOwnerOperation: "comment",
       },
     );
   });

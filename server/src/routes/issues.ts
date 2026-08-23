@@ -119,7 +119,11 @@ import {
 } from "../services/index.js";
 import { buildPlanReviewContext } from "../services/plan-review-context.js";
 import { findDecisionLeaseForDecision } from "../services/decision-leases.js";
-import { assertDecisionFreezeMutationAllowed } from "../services/decision-freeze.js";
+import {
+  assertDecisionFreezeInteractionCreateAllowed,
+  assertDecisionFreezeMutationAllowed,
+  getActiveDecisionFreeze,
+} from "../services/decision-freeze.js";
 import {
   TASK_WATCHDOG_ORIGIN_KIND,
   resolveTaskWatchdogMutationScope,
@@ -5899,6 +5903,16 @@ export function issueRoutes(
       updateFields,
       actorType: req.actor.type,
     });
+    // Recovery-action resolve writes the source issue status (stack-review E):
+    // the same freeze/mutation gate applies before any status is restored on a
+    // frozen member. The service-level gate in issueService.update re-checks
+    // inside the write transaction.
+    if (sourceIssueStatus) {
+      await assertDecisionFreezeMutationAllowed(db, existing.companyId, existing.id, {
+        type: req.actor.type,
+        agentId: actor.agentId ?? null,
+      });
+    }
 
     const actionStatus = outcome === "cancelled" ? "cancelled" : "resolved";
     const result = await db.transaction(async (tx) => {
@@ -5929,6 +5943,7 @@ export function issueRoutes(
             status: sourceIssueStatus,
             actorAgentId: actor.agentId ?? null,
             actorUserId: actor.actorType === "user" ? actor.actorId : null,
+            actorType: req.actor.type,
           },
           tx,
         );
@@ -6421,6 +6436,7 @@ export function issueRoutes(
       createdByAgentId: actor.agentId ?? null,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
       createdByRunId: actor.runId ?? null,
+      actorType: req.actor.type,
       sourceTrust,
       lockedDocumentStrategy: req.actor.type === "agent" ? "create_new_document" : "conflict",
     });
@@ -6855,7 +6871,11 @@ export function issueRoutes(
         metadata: req.body.metadata ?? null,
       });
     }
-    const product = await workProductsSvc.createForIssue(issue.id, issue.companyId, createInput);
+    const product = await workProductsSvc.createForIssue(issue.id, issue.companyId, createInput, {
+      agentId: actor.agentId ?? null,
+      userId: actor.actorType === "user" ? actor.actorId : null,
+      actorType: req.actor.type,
+    });
     if (!product) {
       res.status(422).json({ error: "Invalid work product payload" });
       return;
@@ -7040,6 +7060,12 @@ export function issueRoutes(
     }
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
+    // Decision-freeze mutation gate (R2.2/R3.3, stack-review B): work-product
+    // mutation on a frozen member is refused; the service re-checks in-tx.
+    await assertDecisionFreezeMutationAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: req.actor.type === "agent" ? req.actor.agentId ?? null : null,
+    });
     const actor = getActorInfo(req);
     const patch = { ...req.body };
     const createdByRunId = await resolveWorkProductCreatedByRunId(req, res, existing.companyId, req.body, "update");
@@ -7060,6 +7086,10 @@ export function issueRoutes(
     const product = await workProductsSvc.update(id, {
       ...patch,
       ...(sourceTrust ? { sourceTrust } : {}),
+    }, {
+      agentId: actor.agentId ?? null,
+      userId: actor.actorType === "user" ? actor.actorId : null,
+      actorType: req.actor.type,
     });
     if (!product) {
       res.status(404).json({ error: "Work product not found" });
@@ -7100,12 +7130,23 @@ export function issueRoutes(
     }
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
-    const removed = await workProductsSvc.remove(id);
+    // Decision-freeze mutation gate (R2.2/R3.3, stack-review B): deleting a
+    // work product from a frozen member is refused; service re-checks in-tx.
+    await assertDecisionFreezeMutationAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: req.actor.type === "agent" ? req.actor.agentId ?? null : null,
+    });
+    const deleteActor = getActorInfo(req);
+    const removed = await workProductsSvc.remove(id, {
+      agentId: deleteActor.agentId ?? null,
+      userId: deleteActor.actorType === "user" ? deleteActor.actorId : null,
+      actorType: req.actor.type,
+    });
     if (!removed) {
       res.status(404).json({ error: "Work product not found" });
       return;
     }
-    const actor = getActorInfo(req);
+    const actor = deleteActor;
     await logActivity(db, {
       companyId: existing.companyId,
       actorType: actor.actorType,
@@ -7488,6 +7529,7 @@ export function issueRoutes(
       actorRunId: actor.runId,
       actorResponsibleUserId: authenticatedActorResponsibleUserId(req),
       trustExplicitResponsibleUserId: actor.actorType === "user",
+      actorType: req.actor.type,
       watchdogActorRunId: actor.runId,
     });
     await issueReferencesSvc.syncIssue(issue.id);
@@ -7670,6 +7712,7 @@ export function issueRoutes(
       actorRunId: actor.runId,
       actorResponsibleUserId: authenticatedActorResponsibleUserId(req),
       trustExplicitResponsibleUserId: actor.actorType === "user",
+      actorType: req.actor.type,
       actorAgentId: actor.agentId,
       actorUserId: actor.actorType === "user" ? actor.actorId : null,
       watchdogActorRunId: actor.runId,
@@ -7873,6 +7916,7 @@ export function issueRoutes(
       actorAgentId: actor.agentId,
       actorUserId: actor.actorType === "user" ? actor.actorId : null,
       actorRunId: actor.runId ?? null,
+      actorType: req.actor.type,
     });
 
     await logActivity(db, {
@@ -8215,7 +8259,11 @@ export function issueRoutes(
         : null;
     const shouldResumeInProgressScheduledRetry =
       !!scheduledRetryForHumanComment &&
-      scheduledRetryForHumanComment.agentId === requestedAssigneeAgentId;
+      scheduledRetryForHumanComment.agentId === requestedAssigneeAgentId &&
+      // Scheduled-retry human-comment resume must never fire for a frozen
+      // member (stack-review E): the comment is recorded, the implicit
+      // status move is suppressed until the decision resolves.
+      !(await getActiveDecisionFreeze(db, existing.companyId, existing.id));
     const assigneeSelfCommentOnTerminal = isAssigneeSelfCommentOnTerminalIssue({
       hasCommentBody: !!commentBody,
       resumeRequested: resumeRequested === true,
@@ -8497,6 +8545,9 @@ export function issueRoutes(
               ...updateFields,
               actorAgentId: actor.agentId ?? null,
               actorUserId: actor.actorType === "user" ? actor.actorId : null,
+              actorType: req.actor.type,
+              revisingOwnerOperation: isCommentOnlyPatch ? "comment" : null,
+              reopen: reopenRequested === true || resumeRequested === true,
             },
             tx,
           );
@@ -8525,6 +8576,9 @@ export function issueRoutes(
               ...updateFields,
               actorAgentId: actor.agentId ?? null,
               actorUserId: actor.actorType === "user" ? actor.actorId : null,
+              actorType: req.actor.type,
+              revisingOwnerOperation: isCommentOnlyPatch ? "comment" : null,
+              reopen: reopenRequested === true || resumeRequested === true,
             },
             tx,
           );
@@ -8536,9 +8590,11 @@ export function issueRoutes(
               agentId: actor.agentId ?? undefined,
               userId: actor.actorType === "user" ? actor.actorId : undefined,
               runId: actor.runId,
+              actorType: req.actor.type,
             },
             {
               sourceTrust: await sourceTrustForActorWrite(updated, actor),
+              revisingOwnerOperation: isCommentOnlyPatch ? "comment" : null,
             },
             tx,
           );
@@ -8549,6 +8605,9 @@ export function issueRoutes(
           ...updateFields,
           actorAgentId: actor.agentId ?? null,
           actorUserId: actor.actorType === "user" ? actor.actorId : null,
+          actorType: req.actor.type,
+          revisingOwnerOperation: isCommentOnlyPatch ? "comment" : null,
+          reopen: reopenRequested === true || resumeRequested === true,
         });
       }
     } catch (err) {
@@ -8967,8 +9026,10 @@ export function issueRoutes(
         agentId: actor.agentId ?? undefined,
         userId: actor.actorType === "user" ? actor.actorId : undefined,
         runId: actor.runId,
+        actorType: req.actor.type,
       }, {
         sourceTrust: await sourceTrustForActorWrite(issue, actor),
+        revisingOwnerOperation: isCommentOnlyPatch ? "comment" : null,
       });
       await issueReferencesSvc.syncComment(comment.id);
       await externalObjectsSvc.syncCommentSafely(comment.id);
@@ -9789,6 +9850,16 @@ export function issueRoutes(
     const agentSourceRunId = req.actor.type === "agent" ? requireAgentRunId(req, res) : null;
     if (req.actor.type === "agent" && !agentSourceRunId) return;
 
+    // Decision-freeze interaction gate (R2.2, stack-review B): an agent may
+    // not open a NEW interaction on a frozen member — unless it carries the
+    // SAME decision idempotency key as every freezing lease (the revision
+    // resubmit path re-posting the same decision). Board/user actors are the
+    // deciders and stay exempt.
+    await assertDecisionFreezeInteractionCreateAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: req.actor.type === "agent" ? req.actor.agentId ?? null : null,
+    }, { decisionIdempotencyKey: req.body?.decisionLease?.idempotencyKey ?? null });
+
     const interaction = await issueThreadInteractionService(db, { cancelRun: heartbeat.cancelRun }).create(issue, {
       ...req.body,
       sourceRunId: req.actor.type === "agent" ? agentSourceRunId : req.body.sourceRunId ?? null,
@@ -10538,7 +10609,11 @@ export function issueRoutes(
         : null;
     const shouldResumeInProgressScheduledRetry =
       !!scheduledRetryForHumanComment &&
-      scheduledRetryForHumanComment.agentId === issue.assigneeAgentId;
+      scheduledRetryForHumanComment.agentId === issue.assigneeAgentId &&
+      // Scheduled-retry human-comment resume must never fire for a frozen
+      // member (stack-review E): the comment lands, the implicit status move
+      // waits for the decision to resolve.
+      !(await getActiveDecisionFreeze(db, issue.companyId, issue.id));
     const assigneeSelfCommentOnTerminal = isAssigneeSelfCommentOnTerminalIssue({
       hasCommentBody: true,
       resumeRequested: resumeRequested === true,
@@ -10696,6 +10771,7 @@ export function issueRoutes(
         status: typeof transition.patch.status === "string" ? transition.patch.status : "done",
         actorAgentId: actor.agentId ?? null,
         actorUserId: actor.actorType === "user" ? actor.actorId : null,
+        actorType: req.actor.type,
       };
 
       const sourceTrust = await sourceTrustForActorWrite(currentIssue, actor);
@@ -10715,6 +10791,7 @@ export function issueRoutes(
               agentId: actor.agentId ?? undefined,
               userId: actor.actorType === "user" ? actor.actorId : undefined,
               runId: actor.runId,
+              actorType: req.actor.type,
             },
             commentOptions,
             tx,
@@ -10783,11 +10860,14 @@ export function issueRoutes(
         agentId: actor.agentId ?? undefined,
         userId: actor.actorType === "user" ? actor.actorId : undefined,
         runId: actor.runId,
+        actorType: req.actor.type,
       }, {
         authorType: req.body.authorType ?? (actor.actorType === "agent" ? "agent" : "user"),
         presentation: req.body.presentation ?? null,
         metadata: req.body.metadata ?? null,
         sourceTrust: await sourceTrustForActorWrite(currentIssue, actor),
+        revisingOwnerOperation:
+          reopenRequested || resumeRequested || interruptRequested ? null : "comment",
       });
     }
 
@@ -11286,6 +11366,7 @@ export function issueRoutes(
       originalFilename: stored.originalFilename,
       createdByAgentId: actor.agentId,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+      actorType: req.actor.type,
     });
 
     await logActivity(db, {
@@ -11388,6 +11469,14 @@ export function issueRoutes(
     }
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
+    // Decision-freeze mutation gate (R2.2/R3.3, stack-review B): agent
+    // deletion of evidence attachments on a frozen member is refused BEFORE
+    // the storage object is touched; the service re-checks in-tx.
+    await assertDecisionFreezeMutationAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: req.actor.type === "agent" ? req.actor.agentId ?? null : null,
+    });
+    const actor = getActorInfo(req);
 
     try {
       await storage.deleteObject(attachment.companyId, attachment.objectKey);
@@ -11395,13 +11484,15 @@ export function issueRoutes(
       logger.warn({ err, attachmentId }, "storage delete failed while removing attachment");
     }
 
-    const removed = await svc.removeAttachment(attachmentId);
+    const removed = await svc.removeAttachment(attachmentId, {
+      agentId: actor.agentId ?? null,
+      userId: actor.actorType === "user" ? actor.actorId : null,
+      actorType: req.actor.type,
+    });
     if (!removed) {
       res.status(404).json({ error: "Attachment not found" });
       return;
     }
-
-    const actor = getActorInfo(req);
     await logActivity(db, {
       companyId: removed.companyId,
       actorType: actor.actorType,

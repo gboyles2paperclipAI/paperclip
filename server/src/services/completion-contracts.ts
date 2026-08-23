@@ -95,14 +95,35 @@ const rollbackEvidenceSchema = z.object({
   archiveSha256: sha256HexSchema,
 }).strict();
 
-/** Acceptance stamp added by the server when a receipt is accepted. */
+/**
+ * Acceptance stamp added by the server when a receipt is accepted. The
+ * optional `disposition` lets a server-side acceptance path (never a client)
+ * carry the resolution disposition the terminal transition should record
+ * (Gemini C4: disposition propagation).
+ */
 const receiptAcceptanceSchema = z.object({
   issueId: z.string().min(1),
   executionRunId: z.string().min(1),
   contractRevision: contractRevisionSchema,
   acceptedAt: z.string().min(1),
+  disposition: z.enum(["completed", "superseded", "failed"]).optional(),
 }).strict();
 export type CompletionReceiptAcceptance = z.infer<typeof receiptAcceptanceSchema>;
+
+/**
+ * Strip every underscore-prefixed key (`_acceptance` above all) from a
+ * client-supplied completion receipt BEFORE it is shape-checked or stored.
+ * Server code is the only writer of `_acceptance`: it is stamped exclusively
+ * after `validateCompletionReceipt` accepts (here or on the broker forward
+ * path), so a stamp arriving from a route/plugin/MCP payload is always a
+ * forgery attempt — silently dropped, never honored (stack-review blocker A).
+ */
+export function stripClientCompletionReceiptFields(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).filter(([key]) => !key.startsWith("_")),
+  );
+}
 
 const receiptBaseShape = {
   version: z.literal(1),

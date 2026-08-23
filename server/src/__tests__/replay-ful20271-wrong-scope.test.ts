@@ -8,11 +8,14 @@ import {
   agentRuntimeState,
   agentWakeupRequests,
   agents,
+  approvals,
+  brokerOperations,
   companies,
   createDb,
   heartbeatRunEvents,
   heartbeatRuns,
   instanceSettings,
+  issueApprovals,
   issueComments,
   issueExecutionDecisions,
   issueRelations,
@@ -153,6 +156,9 @@ describeEmbeddedPostgres("replay — FUL-20271 wrong-scope quarantine (PR-3 comp
     for (let attempt = 0; ; attempt += 1) {
       try {
         await db.delete(issueExecutionDecisions);
+        await db.delete(brokerOperations);
+        await db.delete(issueApprovals);
+        await db.delete(approvals);
         await db.delete(issueRelations);
         await db.delete(issueComments);
         await db.delete(issues);
@@ -275,13 +281,17 @@ describeEmbeddedPostgres("replay — FUL-20271 wrong-scope quarantine (PR-3 comp
   /**
    * Board attaches the contract at create (exercising the attach
    * normalization), then the issue is put in progress with an execution-run
-   * stamp the receipt must bind to.
+   * stamp. A SUCCEEDED `broker_operations` row — approval linked to the
+   * issue, args rebuilding EXACTLY this contract's preimage — backs the
+   * accepted receipts (stack-review A: a string executorIdentity is never
+   * sufficient; `done` verifies the broker row).
    */
   async function seedContractIssue(input: {
     companyId: string;
     executorAgentId: string;
     executionPolicy?: Record<string, unknown>;
     stampExecutionRun?: boolean;
+    brokerOperationState?: string;
   }) {
     const boardApp = await createIssueApp(boardActor(input.companyId));
     const createResponse = await request(boardApp)
@@ -295,6 +305,36 @@ describeEmbeddedPostgres("replay — FUL-20271 wrong-scope quarantine (PR-3 comp
     expect(createResponse.status, JSON.stringify(createResponse.body)).toBe(201);
     expect(createResponse.body.completionContract.preimageSha256).toBe(PREIMAGE_SHA);
     const issueId = createResponse.body.id as string;
+
+    const approvalId = randomUUID();
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId: input.companyId,
+      type: "broker_operation",
+      payload: {},
+      status: "approved",
+    });
+    await db.insert(issueApprovals).values({
+      companyId: input.companyId,
+      issueId,
+      approvalId,
+    });
+    const brokerOperationId = randomUUID();
+    await db.insert(brokerOperations).values({
+      id: brokerOperationId,
+      companyId: input.companyId,
+      name: "quarantine_exact_file",
+      args: {
+        sourcePath: SOURCE_PATH,
+        sourceContentSha256: SOURCE_SHA,
+        quarantineTargetPath: TARGET_PATH,
+        sourceDirEntryBaselineCount: BASELINE_COUNT,
+        rollbackOperation: "restore_quarantined_exact_file",
+      },
+      approvalId,
+      idempotencyKey: `broker:${approvalId}:quarantine_exact_file`,
+      state: input.brokerOperationState ?? "succeeded",
+    });
 
     let executionRunId: string | null = null;
     if (input.stampExecutionRun !== false) {
@@ -313,7 +353,7 @@ describeEmbeddedPostgres("replay — FUL-20271 wrong-scope quarantine (PR-3 comp
         .set({ status: "in_progress", assigneeAgentId: input.executorAgentId })
         .where(eq(issues.id, issueId));
     }
-    return { issueId, executionRunId, boardApp };
+    return { issueId, executionRunId, brokerOperationId, boardApp };
   }
 
   it("(a) the wrong-scope receipt is rejected: file still present, 1,340 unrelated entries moved", async () => {
@@ -361,10 +401,10 @@ describeEmbeddedPostgres("replay — FUL-20271 wrong-scope quarantine (PR-3 comp
     const companyId = await seedCompany();
     const executorAgentId = await seedAgent(companyId, "Executor");
     const reviewerAgentId = await seedAgent(companyId, "Reviewer");
-    const { issueId, executionRunId, boardApp } = await seedContractIssue({ companyId, executorAgentId });
+    const { issueId, brokerOperationId, boardApp } = await seedContractIssue({ companyId, executorAgentId });
 
     const exactReceipt = buildExactReceipt({
-      executionRunId: executionRunId!,
+      executionRunId: brokerOperationId,
       reviewerIdentity: reviewerAgentId,
     });
     const doneResponse = await request(boardApp)
@@ -379,7 +419,7 @@ describeEmbeddedPostgres("replay — FUL-20271 wrong-scope quarantine (PR-3 comp
     const acceptance = (stored?.completionReceipt as Record<string, any>)._acceptance;
     expect(acceptance).toMatchObject({
       issueId,
-      executionRunId,
+      executionRunId: brokerOperationId,
       contractRevision: QUARANTINE_CONTRACT.contractRevision,
     });
     expect(typeof acceptance.acceptedAt).toBe("string");
@@ -391,30 +431,33 @@ describeEmbeddedPostgres("replay — FUL-20271 wrong-scope quarantine (PR-3 comp
     const companyId = await seedCompany();
     const executorAgentId = await seedAgent(companyId, "Executor");
     const reviewerAgentId = await seedAgent(companyId, "Reviewer");
-    const { issueId, executionRunId, boardApp } = await seedContractIssue({ companyId, executorAgentId });
+    const { issueId, brokerOperationId, boardApp } = await seedContractIssue({ companyId, executorAgentId });
 
     const rejections: Array<{ name: string; receipt: Record<string, unknown>; reason: string }> = [
       {
         name: "stale contractRevision",
         receipt: buildExactReceipt({
-          executionRunId: executionRunId!,
+          executionRunId: brokerOperationId,
           reviewerIdentity: reviewerAgentId,
           overrides: { contractRevision: 1 },
         }),
         reason: "stale_contract_revision",
       },
       {
+        // An executionRunId that is not a succeeded broker operation is
+        // rejected by the broker-execution binding (stack-review A) — the
+        // string checks alone can no longer admit it.
         name: "wrong executionRunId",
         receipt: buildExactReceipt({
           executionRunId: randomUUID(),
           reviewerIdentity: reviewerAgentId,
         }),
-        reason: "wrong_execution_id",
+        reason: "broker_operation_missing",
       },
       {
         name: "changed source hash",
         receipt: buildExactReceipt({
-          executionRunId: executionRunId!,
+          executionRunId: brokerOperationId,
           reviewerIdentity: reviewerAgentId,
           assertionOverrides: { observedTargetContentSha256: OTHER_SHA },
         }),
@@ -423,7 +466,7 @@ describeEmbeddedPostgres("replay — FUL-20271 wrong-scope quarantine (PR-3 comp
       {
         name: "missing rollback evidence",
         receipt: buildExactReceipt({
-          executionRunId: executionRunId!,
+          executionRunId: brokerOperationId,
           reviewerIdentity: reviewerAgentId,
           overrides: { rollbackEvidence: null },
         }),
@@ -448,10 +491,10 @@ describeEmbeddedPostgres("replay — FUL-20271 wrong-scope quarantine (PR-3 comp
     const companyId = await seedCompany();
     const executorAgentId = await seedAgent(companyId, "Executor");
     const reviewerAgentId = await seedAgent(companyId, "Reviewer");
-    const { issueId, executionRunId, boardApp } = await seedContractIssue({ companyId, executorAgentId });
+    const { issueId, brokerOperationId, boardApp } = await seedContractIssue({ companyId, executorAgentId });
 
     const exactReceipt = buildExactReceipt({
-      executionRunId: executionRunId!,
+      executionRunId: brokerOperationId,
       reviewerIdentity: reviewerAgentId,
     });
     const firstDone = await request(boardApp)
@@ -509,7 +552,7 @@ describeEmbeddedPostgres("replay — FUL-20271 wrong-scope quarantine (PR-3 comp
     const companyId = await seedCompany();
     const executorAgentId = await seedAgent(companyId, "Executor");
     const reviewerAgentId = await seedAgent(companyId, "Reviewer");
-    const { issueId, boardApp } = await seedContractIssue({
+    const { issueId, brokerOperationId, boardApp } = await seedContractIssue({
       companyId,
       executorAgentId,
       stampExecutionRun: false,
@@ -544,7 +587,7 @@ describeEmbeddedPostgres("replay — FUL-20271 wrong-scope quarantine (PR-3 comp
     // Board records the broker's receipt, then the same final stage-commit
     // done succeeds through the gate.
     const receipt = buildExactReceipt({
-      executionRunId: "broker-op-ful20271-final",
+      executionRunId: brokerOperationId,
       reviewerIdentity: reviewerAgentId,
     });
     const receiptSubmit = await request(boardApp)
@@ -563,7 +606,7 @@ describeEmbeddedPostgres("replay — FUL-20271 wrong-scope quarantine (PR-3 comp
     expect((stored?.executionState as Record<string, unknown> | null)?.status).toBe("completed");
     expect((stored?.completionReceipt as Record<string, any>)._acceptance).toMatchObject({
       issueId,
-      executionRunId: "broker-op-ful20271-final",
+      executionRunId: brokerOperationId,
     });
   }, 120_000);
 
@@ -633,5 +676,97 @@ describeEmbeddedPostgres("replay — FUL-20271 wrong-scope quarantine (PR-3 comp
     expect(gatedDone.status, JSON.stringify(gatedDone.body)).toBe(422);
     expect(gatedDone.body.details.reasons).toContain("reviewer_is_executor");
     expect((await readIssue(issueId))?.status).toBe("in_progress");
+  }, 120_000);
+
+  it("custody (stack-review A): a spoofed _acceptance is stripped on submit and can never satisfy the done gate as a replay", async () => {
+    const companyId = await seedCompany();
+    const executorAgentId = await seedAgent(companyId, "Executor");
+    const reviewerAgentId = await seedAgent(companyId, "Reviewer");
+    const { issueId, executionRunId, brokerOperationId } = await seedContractIssue({ companyId, executorAgentId });
+    const executorApp = await createIssueApp(agentActor(companyId, executorAgentId, executionRunId!));
+    const boardApp = await createIssueApp(boardActor(companyId));
+
+    // The assignee pre-loads a FUL-20271 wrong-scope receipt PLUS a forged
+    // server acceptance stamp naming the real broker operation.
+    const forgedReceipt = {
+      ...buildExactReceipt({
+        executionRunId: brokerOperationId,
+        reviewerIdentity: reviewerAgentId,
+        assertionOverrides: {
+          sourceAbsentFromSourceDir: false,
+          observedSourceDirEntryCount: BASELINE_COUNT,
+          movedEntryPaths: ["/var/tmp/uw-archive/unrelated-000001.json"],
+        },
+      }),
+      _acceptance: {
+        issueId,
+        executionRunId: brokerOperationId,
+        contractRevision: QUARANTINE_CONTRACT.contractRevision,
+        acceptedAt: new Date().toISOString(),
+      },
+    };
+    const preload = await request(executorApp)
+      .patch(`/api/issues/${issueId}`)
+      .send({ completionReceipt: forgedReceipt, comment: "Receipt attached." });
+    expect(preload.status, JSON.stringify(preload.body)).toBe(200);
+
+    // The stored receipt carries NO acceptance stamp — every underscore-
+    // prefixed key was stripped at the service boundary.
+    const stored = await readIssue(issueId);
+    const storedReceipt = stored?.completionReceipt as Record<string, unknown>;
+    expect(storedReceipt).not.toBeNull();
+    expect(storedReceipt._acceptance).toBeUndefined();
+
+    // done with no new receipt runs FULL validation (never idempotent
+    // replay): the wrong-scope assertions are rejected.
+    const doneResponse = await request(boardApp)
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "done" });
+    expect(doneResponse.status, JSON.stringify(doneResponse.body)).toBe(422);
+    expect(doneResponse.body.details.reasons).toEqual(expect.arrayContaining([
+      "source_file_still_present",
+      "resource_set_exceeds_preimage",
+    ]));
+    expect((await readIssue(issueId))?.status).toBe("in_progress");
+  }, 120_000);
+
+  it("broker binding (stack-review A): a receipt without a SUCCEEDED broker operation is rejected even when every string check passes", async () => {
+    const companyId = await seedCompany();
+    const executorAgentId = await seedAgent(companyId, "Executor");
+    const reviewerAgentId = await seedAgent(companyId, "Reviewer");
+
+    // Operation exists but never succeeded (still enqueued).
+    const enqueued = await seedContractIssue({
+      companyId,
+      executorAgentId,
+      brokerOperationState: "enqueued",
+    });
+    const notSucceeded = await request(enqueued.boardApp)
+      .patch(`/api/issues/${enqueued.issueId}`)
+      .send({
+        status: "done",
+        completionReceipt: buildExactReceipt({
+          executionRunId: enqueued.brokerOperationId,
+          reviewerIdentity: reviewerAgentId,
+        }),
+      });
+    expect(notSucceeded.status, JSON.stringify(notSucceeded.body)).toBe(422);
+    expect(notSucceeded.body.details.reasons).toContain("broker_operation_not_succeeded");
+    expect((await readIssue(enqueued.issueId))?.status).toBe("in_progress");
+
+    // No broker operation at all behind the named execution id.
+    const missing = await seedContractIssue({ companyId, executorAgentId });
+    const missingOp = await request(missing.boardApp)
+      .patch(`/api/issues/${missing.issueId}`)
+      .send({
+        status: "done",
+        completionReceipt: buildExactReceipt({
+          executionRunId: randomUUID(),
+          reviewerIdentity: reviewerAgentId,
+        }),
+      });
+    expect(missingOp.status, JSON.stringify(missingOp.body)).toBe(422);
+    expect(missingOp.body.details.reasons).toContain("broker_operation_missing");
+    expect((await readIssue(missing.issueId))?.status).toBe("in_progress");
   }, 120_000);
 });

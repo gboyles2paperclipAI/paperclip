@@ -25,9 +25,11 @@ import { slackIntegrationService } from "../services/slack-integration.js";
 import { loadMatchingAgentRun } from "../services/agent-run-context.js";
 import {
   createApprovalDecision,
+  findDecisionLeaseForDecision,
   interruptRunsForDecisionLease,
   resolveApprovalDecisionLease,
 } from "../services/decision-leases.js";
+import { assertDecisionFreezeMutationAllowed } from "../services/decision-freeze.js";
 import { bindBrokerOperationRequestToApprovalPayload } from "../services/broker-operations.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
@@ -510,7 +512,43 @@ export function approvalRoutes(
     assertCompanyAccess(req, existing.companyId);
     if (!(await assertApprovalMutationAllowedByRunContext(req, res, existing.companyId))) return;
 
-    if (req.actor.type === "agent" && req.actor.agentId !== existing.requestedByAgentId) {
+    // Resubmit narrowing (R3.1, stack-review F). When the approval is bound
+    // to a decision lease, resubmission is allowed ONLY while that lease is
+    // in state `revising`, ONLY by board/user actors or the anchor issue's
+    // assignee agent (the revising-owner "resubmit" exemption), and it always
+    // preserves the same decision idempotency key (the approval row — and its
+    // key — are reused; a mismatched binding is a 409).
+    const boundLease = await findDecisionLeaseForDecision(db, {
+      decisionKind: "approval",
+      decisionId: id,
+      companyId: existing.companyId,
+    });
+    if (boundLease) {
+      if (boundLease.state !== "revising") {
+        res.status(409).json({
+          error: "Approval resubmit requires the bound decision lease to be in state revising",
+          details: {
+            leaseId: boundLease.id,
+            leaseState: boundLease.state,
+            fix: "Ask the board to request a revision first, or wait for the decision to resolve",
+          },
+        });
+        return;
+      }
+      if ((existing.idempotencyKey ?? null) !== boundLease.decisionIdempotencyKey) {
+        res.status(409).json({
+          error: "Approval resubmit must preserve the bound decision idempotency key",
+          details: { leaseId: boundLease.id },
+        });
+        return;
+      }
+      // Agent actors: only the anchor's assignee may resubmit — exactly the
+      // revising-owner "resubmit" exemption. Board/user actors pass.
+      await assertDecisionFreezeMutationAllowed(db, existing.companyId, boundLease.anchorIssueId, {
+        type: req.actor.type,
+        agentId: req.actor.type === "agent" ? req.actor.agentId ?? null : null,
+      }, { revisingOwnerOperation: "resubmit" });
+    } else if (req.actor.type === "agent" && req.actor.agentId !== existing.requestedByAgentId) {
       res.status(403).json({ error: "Only requesting agent can resubmit this approval" });
       return;
     }

@@ -37,6 +37,7 @@ import {
   getActiveDecisionFreeze,
 } from "../services/decision-freeze.ts";
 import { createApprovalDecision } from "../services/decision-leases.ts";
+import { issueService } from "../services/issues.ts";
 import { runningProcesses } from "../adapters/index.ts";
 
 /**
@@ -222,6 +223,26 @@ describeEmbeddedPostgres("replay — decision revision round-trip (R3.1)", () =>
     const lease = created.lease!;
     const app = await createBoardApp();
 
+    // Pick-work exclusion is UNCONDITIONAL (stack-review C): the frozen
+    // sibling vanishes from the assignee arm with AND without a status
+    // filter (skill fallback / MCP listings use both shapes), and from the
+    // matching count.
+    const issuesSvc = issueService(db);
+    expect(await issuesSvc.list(companyId, { assigneeAgentId: siblingAgentId })).toEqual([]);
+    expect(await issuesSvc.list(companyId, {
+      assigneeAgentId: siblingAgentId,
+      status: "todo,in_progress,in_review,blocked",
+    })).toEqual([]);
+    expect(await issuesSvc.count(companyId, { assigneeAgentId: siblingAgentId })).toBe(0);
+
+    // Resubmit narrowing (stack-review F): while the lease is still ACTIVE
+    // (no revision requested yet) resubmit conflicts instead of resetting the
+    // approval.
+    const prematureResubmit = await request(app)
+      .post(`/api/approvals/${created.approval.id}/resubmit`)
+      .send({ payload: { proposal: "premature", subjectRevision: 1 } });
+    expect(prematureResubmit.status).toBe(409);
+
     // Board requests a revision.
     const revisionResponse = await request(app)
       .post(`/api/approvals/${created.approval.id}/request-revision`)
@@ -314,6 +335,10 @@ describeEmbeddedPostgres("replay — decision revision round-trip (R3.1)", () =>
     expect(releasedLease.disposition).toBe("approved");
     expect(await getActiveDecisionFreeze(db, companyId, anchorIssueId)).toBeNull();
     expect(await getActiveDecisionFreeze(db, companyId, siblingIssueId)).toBeNull();
+
+    // Release re-exposes the sibling on the assignee-only pick arm (C).
+    expect((await issuesSvc.list(companyId, { assigneeAgentId: siblingAgentId })).map((row) => row.id))
+      .toEqual([siblingIssueId]);
 
     // Exactly one outbox wake with the approved key reached the owner.
     const approvedWakes = await db

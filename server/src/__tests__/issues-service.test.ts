@@ -8,6 +8,8 @@ import {
   agents,
   companies,
   createDb,
+  decisionLeaseMembers,
+  decisionLeases,
   documentRevisions,
   documents,
   environments,
@@ -6197,4 +6199,480 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
     });
   });
 
+});
+
+describeEmbeddedPostgres("decision-freeze service gates (stack-review round)", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-freeze-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+    await ensureIssueRelationsTable(db);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(decisionLeaseMembers);
+    await db.delete(decisionLeases);
+    await db.delete(issueComments);
+    await db.delete(issueRelations);
+    await db.delete(activityLog);
+    await db.delete(issues);
+    await db.delete(heartbeatRuns);
+    await db.delete(agents);
+    await db.delete(instanceSettings);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function seedCompanyAndAgent() {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Coder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    return { companyId, agentId };
+  }
+
+  async function seedIssue(companyId: string, input: {
+    title: string;
+    status?: string;
+    assigneeAgentId?: string | null;
+    parentId?: string | null;
+  }) {
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: input.title,
+      status: input.status ?? "todo",
+      priority: "medium",
+      assigneeAgentId: input.assigneeAgentId ?? null,
+      parentId: input.parentId ?? null,
+      responsibleUserId: "responsible-user",
+    });
+    return issueId;
+  }
+
+  async function seedLease(input: {
+    companyId: string;
+    anchorIssueId: string;
+    memberIssueIds: string[];
+    state?: "active" | "revising" | "released";
+  }) {
+    const leaseId = randomUUID();
+    await db.insert(decisionLeases).values({
+      id: leaseId,
+      companyId: input.companyId,
+      decisionKind: "approval",
+      decisionId: randomUUID(),
+      decisionIdempotencyKey: `decision:${input.anchorIssueId}:test:${leaseId}`,
+      anchorIssueId: input.anchorIssueId,
+      state: input.state ?? "active",
+    });
+    if (input.memberIssueIds.length > 0) {
+      await db.insert(decisionLeaseMembers).values(
+        input.memberIssueIds.map((issueId) => ({ leaseId, issueId })),
+      );
+    }
+    return leaseId;
+  }
+
+  async function memberIdsOf(leaseId: string) {
+    const rows = await db
+      .select({ issueId: decisionLeaseMembers.issueId })
+      .from(decisionLeaseMembers)
+      .where(eq(decisionLeaseMembers.leaseId, leaseId));
+    return new Set(rows.map((row) => row.issueId));
+  }
+
+  describe("pick-work exclusion is unconditional (stack-review C)", () => {
+    it("excludes frozen members from EVERY assignee-filter arm of list() and count()", async () => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const frozenAssigned = await seedIssue(companyId, {
+        title: "Frozen assigned",
+        status: "in_progress",
+        assigneeAgentId: agentId,
+      });
+      const frozenUnassigned = await seedIssue(companyId, { title: "Frozen unassigned", status: "todo" });
+      const freeAssigned = await seedIssue(companyId, {
+        title: "Free assigned",
+        status: "todo",
+        assigneeAgentId: agentId,
+      });
+      const freeUnassigned = await seedIssue(companyId, { title: "Free unassigned", status: "todo" });
+      const leaseId = await seedLease({
+        companyId,
+        anchorIssueId: frozenAssigned,
+        memberIssueIds: [frozenAssigned, frozenUnassigned],
+      });
+
+      // Assignee arm WITHOUT a status filter (the stack-review hole).
+      const assigneeOnly = await svc.list(companyId, { assigneeAgentId: agentId });
+      expect(assigneeOnly.map((row) => row.id)).toEqual([freeAssigned]);
+      // Assignee + status arm (inbox-lite / skill-fallback shape).
+      const assigneeStatus = await svc.list(companyId, {
+        assigneeAgentId: agentId,
+        status: "todo,in_progress,blocked",
+      });
+      expect(assigneeStatus.map((row) => row.id)).toEqual([freeAssigned]);
+      // Unassigned pick arm.
+      const unassigned = await svc.list(companyId, { assigneeAgentId: "null" });
+      expect(unassigned.map((row) => row.id)).toEqual([freeUnassigned]);
+
+      // count() mirrors every arm.
+      expect(await svc.count(companyId, { assigneeAgentId: agentId })).toBe(1);
+      expect(await svc.count(companyId, { assigneeAgentId: agentId, status: "todo,in_progress,blocked" })).toBe(1);
+      expect(await svc.count(companyId, { assigneeAgentId: "null" })).toBe(1);
+
+      // Release re-exposes the members on the same arms.
+      await db.update(decisionLeases).set({ state: "released" }).where(eq(decisionLeases.id, leaseId));
+      expect((await svc.list(companyId, { assigneeAgentId: agentId })).map((row) => row.id).sort())
+        .toEqual([freeAssigned, frozenAssigned].sort());
+      expect(await svc.count(companyId, { assigneeAgentId: "null" })).toBe(2);
+    });
+  });
+
+  describe("cone dynamics (stack-review D)", () => {
+    it("board-created children under a frozen parent join the cone in the create transaction", async () => {
+      const { companyId } = await seedCompanyAndAgent();
+      const anchorId = await seedIssue(companyId, { title: "Anchor", status: "in_review" });
+      const leaseId = await seedLease({ companyId, anchorIssueId: anchorId, memberIssueIds: [anchorId] });
+
+      const child = await svc.create(companyId, {
+        title: "Board child under frozen parent",
+        status: "todo",
+        priority: "medium",
+        parentId: anchorId,
+        createdByUserId: "board-user",
+        actorType: "board",
+      });
+      expect(await memberIdsOf(leaseId)).toContain(child.id);
+    });
+
+    it("walks ancestors: a parent whose ANCESTOR is a member gates agents and absorbs board creates", async () => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const anchorId = await seedIssue(companyId, { title: "Anchor", status: "in_review" });
+      const reverseBlockMemberId = await seedIssue(companyId, { title: "Reverse-block member", status: "todo" });
+      // The anchor blocks the member (reverse-blocks pull it into the cone).
+      await db.insert(issueRelations).values({
+        companyId,
+        issueId: anchorId,
+        relatedIssueId: reverseBlockMemberId,
+        type: "blocks",
+      });
+      // A pre-existing child of the member that the (stale) membership table
+      // does NOT list — the direct-parent-only gate missed this shape.
+      const staleChildId = await seedIssue(companyId, {
+        title: "Stale non-member child of a member",
+        status: "todo",
+        parentId: reverseBlockMemberId,
+      });
+      const leaseId = await seedLease({
+        companyId,
+        anchorIssueId: anchorId,
+        memberIssueIds: [anchorId, reverseBlockMemberId],
+      });
+
+      // Agent create under the NON-member child still gates via the ancestor walk.
+      await expect(svc.create(companyId, {
+        title: "Agent grandchild",
+        status: "todo",
+        priority: "medium",
+        parentId: staleChildId,
+        createdByAgentId: agentId,
+        actorType: "agent",
+      })).rejects.toMatchObject({
+        status: 422,
+        details: { code: "decision_freeze_active" },
+      });
+
+      // Board create under the same parent absorbs the whole chain.
+      const boardChild = await svc.create(companyId, {
+        title: "Board grandchild",
+        status: "todo",
+        priority: "medium",
+        parentId: staleChildId,
+        createdByUserId: "board-user",
+        actorType: "board",
+      });
+      const members = await memberIdsOf(leaseId);
+      expect(members).toContain(staleChildId);
+      expect(members).toContain(boardChild.id);
+    });
+
+    it("agents cannot create a sibling that inherits a frozen issue's execution workspace", async () => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const frozenId = await seedIssue(companyId, { title: "Frozen workspace source", status: "in_review" });
+      await seedLease({ companyId, anchorIssueId: frozenId, memberIssueIds: [frozenId] });
+
+      await expect(svc.create(companyId, {
+        title: "Workspace-reusing sibling",
+        status: "todo",
+        priority: "medium",
+        inheritExecutionWorkspaceFromIssueId: frozenId,
+        createdByAgentId: agentId,
+        actorType: "agent",
+      })).rejects.toMatchObject({
+        status: 422,
+        details: { code: "decision_freeze_active" },
+      });
+    });
+
+    it("the reparent gate keys on actor type, and reparenting under any cone MEMBER recomputes", async () => {
+      const { companyId } = await seedCompanyAndAgent();
+      const anchorId = await seedIssue(companyId, { title: "Anchor", status: "in_review" });
+      const memberId = await seedIssue(companyId, { title: "Member (not anchor)", status: "todo", parentId: anchorId });
+      const leaseId = await seedLease({
+        companyId,
+        anchorIssueId: anchorId,
+        memberIssueIds: [anchorId, memberId],
+      });
+      const outsiderId = await seedIssue(companyId, { title: "Outsider", status: "todo" });
+      const outsiderChildId = await seedIssue(companyId, {
+        title: "Outsider child",
+        status: "todo",
+        parentId: outsiderId,
+      });
+
+      // Agent context WITHOUT an agent id must still gate (identity-optional hole).
+      await expect(svc.update(outsiderId, {
+        parentId: memberId,
+        actorType: "agent",
+      })).rejects.toMatchObject({
+        status: 422,
+        details: { code: "decision_freeze_active" },
+      });
+
+      // Board reparenting under a MEMBER (not the anchor) expands the cone to
+      // the moved subtree.
+      const updated = await svc.update(outsiderId, {
+        parentId: memberId,
+        actorUserId: "board-user",
+        actorType: "board",
+      });
+      expect(updated?.parentId).toBe(memberId);
+      const members = await memberIdsOf(leaseId);
+      expect(members).toContain(outsiderId);
+      expect(members).toContain(outsiderChildId);
+    });
+  });
+
+  describe("service-tx mutation gates (stack-review B)", () => {
+    it("issueService.update gates agent writes to frozen members inside the transaction", async () => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const frozenId = await seedIssue(companyId, {
+        title: "Frozen member",
+        status: "in_progress",
+        assigneeAgentId: agentId,
+      });
+      await seedLease({ companyId, anchorIssueId: frozenId, memberIssueIds: [frozenId] });
+
+      await expect(svc.update(frozenId, {
+        title: "Renamed by agent",
+        actorAgentId: agentId,
+      })).rejects.toMatchObject({
+        status: 422,
+        details: { code: "decision_freeze_active" },
+      });
+
+      // Board/system writes stay exempt.
+      const updated = await svc.update(frozenId, { title: "Renamed by board", actorUserId: "board-user" });
+      expect(updated?.title).toBe("Renamed by board");
+    });
+
+    it("checkout of a frozen member is refused (422 decision_freeze_active)", async () => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const frozenId = await seedIssue(companyId, { title: "Frozen pickable", status: "todo" });
+      await seedLease({ companyId, anchorIssueId: frozenId, memberIssueIds: [frozenId] });
+
+      await expect(svc.checkout(frozenId, agentId, ["todo"], null)).rejects.toMatchObject({
+        status: 422,
+        details: { code: "decision_freeze_active" },
+      });
+      const row = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, frozenId));
+      expect(row[0]?.status).toBe("todo");
+    });
+
+    it("agent comments and releases on frozen members are gated at the service layer", async () => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const frozenId = await seedIssue(companyId, {
+        title: "Frozen commented",
+        status: "in_progress",
+        assigneeAgentId: agentId,
+      });
+      await seedLease({ companyId, anchorIssueId: frozenId, memberIssueIds: [frozenId] });
+
+      await expect(svc.addComment(frozenId, "agent note", { agentId })).rejects.toMatchObject({
+        status: 422,
+        details: { code: "decision_freeze_active" },
+      });
+      await expect(svc.release(frozenId, agentId, null)).rejects.toMatchObject({
+        status: 422,
+        details: { code: "decision_freeze_active" },
+      });
+      // System comments (no agent attribution) still land.
+      const systemComment = await svc.addComment(frozenId, "system note", {});
+      expect(systemComment.id).toBeTruthy();
+    });
+
+    it("the revising anchor's assignee keeps comment writes through the service gate", async () => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const anchorId = await seedIssue(companyId, {
+        title: "Revising anchor",
+        status: "in_review",
+        assigneeAgentId: agentId,
+      });
+      await seedLease({
+        companyId,
+        anchorIssueId: anchorId,
+        memberIssueIds: [anchorId],
+        state: "revising",
+      });
+
+      const comment = await svc.addComment(
+        anchorId,
+        "revised plan attached",
+        { agentId },
+        { revisingOwnerOperation: "comment" },
+      );
+      expect(comment.id).toBeTruthy();
+    });
+  });
+
+  describe("disposition propagation (stack-review G / Gemini C4)", () => {
+    it("closing off a resolved decision lease derives resolutionDisposition from the lease disposition", async () => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+
+      // rejected lease → done records failed (documented mapping).
+      const rejectedAnchor = await seedIssue(companyId, {
+        title: "Rejected decision anchor",
+        status: "in_progress",
+        assigneeAgentId: agentId,
+      });
+      await db.insert(decisionLeases).values({
+        id: randomUUID(),
+        companyId,
+        decisionKind: "approval",
+        decisionId: randomUUID(),
+        decisionIdempotencyKey: `decision:${rejectedAnchor}:g:1`,
+        anchorIssueId: rejectedAnchor,
+        state: "released",
+        disposition: "rejected",
+        releasedAt: new Date(),
+      });
+      const closedRejected = await svc.update(rejectedAnchor, { status: "done", actorAgentId: agentId });
+      expect(closedRejected?.resolutionDisposition).toBe("failed");
+
+      // superseded_by_comment lease → done records superseded.
+      const supersededAnchor = await seedIssue(companyId, {
+        title: "Superseded decision anchor",
+        status: "in_progress",
+        assigneeAgentId: agentId,
+      });
+      await db.insert(decisionLeases).values({
+        id: randomUUID(),
+        companyId,
+        decisionKind: "interaction",
+        decisionId: randomUUID(),
+        decisionIdempotencyKey: `decision:${supersededAnchor}:g:1`,
+        anchorIssueId: supersededAnchor,
+        state: "released",
+        disposition: "superseded_by_comment",
+        releasedAt: new Date(),
+      });
+      const closedSuperseded = await svc.update(supersededAnchor, { status: "done", actorAgentId: agentId });
+      expect(closedSuperseded?.resolutionDisposition).toBe("superseded");
+
+      // approved lease → the status default (completed) is unchanged.
+      const approvedAnchor = await seedIssue(companyId, {
+        title: "Approved decision anchor",
+        status: "in_progress",
+        assigneeAgentId: agentId,
+      });
+      await db.insert(decisionLeases).values({
+        id: randomUUID(),
+        companyId,
+        decisionKind: "approval",
+        decisionId: randomUUID(),
+        decisionIdempotencyKey: `decision:${approvedAnchor}:g:1`,
+        anchorIssueId: approvedAnchor,
+        state: "released",
+        disposition: "approved",
+        releasedAt: new Date(),
+      });
+      const closedApproved = await svc.update(approvedAnchor, { status: "done", actorAgentId: agentId });
+      expect(closedApproved?.resolutionDisposition).toBe("completed");
+
+      // Explicit board values still win over the lease-derived default.
+      const explicitAnchor = await seedIssue(companyId, {
+        title: "Explicit disposition anchor",
+        status: "in_progress",
+      });
+      await db.insert(decisionLeases).values({
+        id: randomUUID(),
+        companyId,
+        decisionKind: "approval",
+        decisionId: randomUUID(),
+        decisionIdempotencyKey: `decision:${explicitAnchor}:g:1`,
+        anchorIssueId: explicitAnchor,
+        state: "released",
+        disposition: "rejected",
+        releasedAt: new Date(),
+      });
+      const closedExplicit = await svc.update(explicitAnchor, {
+        status: "done",
+        resolutionDisposition: "superseded",
+        actorUserId: "board-user",
+      });
+      expect(closedExplicit?.resolutionDisposition).toBe("superseded");
+    });
+  });
+
+  describe("terminal integrity (stack-review E)", () => {
+    it("agent status writes off a terminal issue require explicit reopen intent", async () => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const doneId = await seedIssue(companyId, { title: "Done work", status: "done" });
+
+      await expect(svc.update(doneId, {
+        status: "todo",
+        actorAgentId: agentId,
+      })).rejects.toMatchObject({
+        status: 422,
+        details: { code: "terminal_reopen_requires_explicit_intent" },
+      });
+
+      const reopened = await svc.update(doneId, {
+        status: "todo",
+        actorAgentId: agentId,
+        reopen: true,
+      });
+      expect(reopened?.status).toBe("todo");
+
+      // System/board writes (recovery restores, board PATCH) are not blocked.
+      await svc.update(doneId, { status: "done" });
+      const restored = await svc.update(doneId, { status: "in_progress", assigneeAgentId: agentId });
+      expect(restored?.status).toBe("in_progress");
+    });
+  });
 });

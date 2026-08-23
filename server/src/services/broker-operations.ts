@@ -17,6 +17,7 @@ import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import {
   assertCompletionReceiptShape,
+  computeCompletionContractPreimageSha256,
   getCompletionReceiptAcceptance,
   normalizeCompletionContractOnAttach,
   validateCompletionReceipt,
@@ -687,6 +688,83 @@ export async function submitBrokerOperationReceipt(
     applied: outcome.applied,
     forwardedIssueIds: outcome.forwardedIssueIds,
   };
+}
+
+export type BrokerReceiptExecutionVerification =
+  | { ok: true; operation: BrokerOperationRow }
+  | { ok: false; reasons: string[] };
+
+/**
+ * Verify that an accepted (or about-to-be-accepted) completion receipt for a
+ * broker-executed contract is backed by a REAL broker execution (stack-review
+ * blocker: "executor identity is a string"). A receipt for either MVP contract
+ * type is only proof when:
+ *
+ *  - `receipt.executionRunId` is the id of a `broker_operations` row in this
+ *    company, and that row's state is `succeeded`;
+ *  - the operation's approval is linked to THIS issue (`issue_approvals`), so a
+ *    succeeded operation for some other issue can never close this one; and
+ *  - the contract the operation's registry entry rebuilds from the stored args
+ *    hashes to the SAME preimage as the contract attached to the issue — the
+ *    operation that ran is the operation this contract binds.
+ *
+ * A well-formed receipt whose `executorIdentity` merely SAYS "broker" fails all
+ * three checks unless the host broker actually executed and recorded success.
+ */
+export async function verifyBrokerReceiptExecution(
+  dbOrTx: Pick<DbLike, "select">,
+  input: {
+    companyId: string;
+    issueId: string;
+    contract: unknown;
+    executionRunId: string;
+  },
+): Promise<BrokerReceiptExecutionVerification> {
+  const contractRecord =
+    input.contract && typeof input.contract === "object" && !Array.isArray(input.contract)
+      ? (input.contract as Record<string, unknown>)
+      : null;
+  const uuidLike = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuidLike.test(input.executionRunId)) {
+    return { ok: false, reasons: ["broker_operation_missing"] };
+  }
+
+  const operation = await dbOrTx
+    .select()
+    .from(brokerOperations)
+    .where(and(
+      eq(brokerOperations.id, input.executionRunId),
+      eq(brokerOperations.companyId, input.companyId),
+    ))
+    .then((rows) => rows[0] ?? null);
+  if (!operation) return { ok: false, reasons: ["broker_operation_missing"] };
+  if (operation.state !== "succeeded") {
+    return { ok: false, reasons: ["broker_operation_not_succeeded"] };
+  }
+
+  const link = await dbOrTx
+    .select({ issueId: issueApprovals.issueId })
+    .from(issueApprovals)
+    .where(and(
+      eq(issueApprovals.approvalId, operation.approvalId),
+      eq(issueApprovals.issueId, input.issueId),
+    ))
+    .then((rows) => rows[0] ?? null);
+  if (!link) return { ok: false, reasons: ["broker_operation_not_linked_to_issue"] };
+
+  const definition = BROKER_OPERATION_REGISTRY[operation.name as BrokerOperationName];
+  if (!definition) return { ok: false, reasons: ["broker_operation_unknown_name"] };
+  const rebuiltPreimageSha256 = computeCompletionContractPreimageSha256({
+    contractType: definition.contractType,
+    version: 1,
+    preimage: definition.buildContractPreimage(operation.args as Record<string, unknown>),
+  });
+  const attachedPreimageSha256 = contractRecord?.preimageSha256;
+  if (attachedPreimageSha256 !== rebuiltPreimageSha256) {
+    return { ok: false, reasons: ["broker_operation_contract_mismatch"] };
+  }
+
+  return { ok: true, operation };
 }
 
 export async function getBrokerOperation(db: DbLike, id: string): Promise<BrokerOperationRow | null> {

@@ -107,19 +107,38 @@ import {
 import { classifyIssueGraphLiveness, type IssueLivenessFinding } from "./recovery/issue-graph-liveness.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import {
+  assertDecisionFreezeMutationAllowed,
   DECISION_FREEZE_ACTIVE_ERROR_CODE,
   decisionFreezeExclusionSql,
+  deriveDecisionFreezeActorType,
+  getActiveDecisionFreeze,
   listActiveDecisionFreezesForIssues,
+  listIssueSelfAndAncestorIds,
+  type DecisionFreezeRevisingOwnerOperation,
 } from "./decision-freeze.js";
-import { recomputeConeForEdgeChange } from "./decision-leases.js";
+import {
+  findLatestReleasedLeaseDispositionForAnchor,
+  mapDecisionDispositionToResolutionDisposition,
+  recomputeConeForEdgeChange,
+} from "./decision-leases.js";
 import {
   assertCompletionReceiptShape,
   COMPLETION_CONTRACT_RECEIPT_RULE,
+  COMPLETION_CONTRACT_TYPES,
   getCompletionReceiptAcceptance,
   normalizeCompletionContractOnAttach,
   RESOLUTION_DISPOSITION_RULE,
+  stripClientCompletionReceiptFields,
   validateCompletionReceipt,
 } from "./completion-contracts.js";
+import { verifyBrokerReceiptExecution } from "./broker-operations.js";
+
+/**
+ * Both MVP completion-contract types are broker-executed (R2.16): an accepted
+ * receipt is only proof of completion when it is backed by a `broker_operations`
+ * row in state `succeeded` (see the done gate in `issueService.update`).
+ */
+const BROKER_EXECUTED_CONTRACT_TYPES: ReadonlySet<string> = new Set(COMPLETION_CONTRACT_TYPES);
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -656,6 +675,9 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   actorRunId?: string | null;
   actorResponsibleUserId?: string | null;
   trustExplicitResponsibleUserId?: boolean;
+  /** Actor type for the freeze gates (agent → gated). Routes/plugins pass
+   * their authenticated actor type; absent, it derives from createdBy ids. */
+  actorType?: string | null;
 };
 type IssueChildCreateInput = IssueCreateInput & {
   acceptanceCriteria?: string[];
@@ -670,6 +692,7 @@ type AcceptedPlanDecompositionInput = {
   actorAgentId?: string | null;
   actorUserId?: string | null;
   actorRunId?: string | null;
+  actorType?: string | null;
 };
 type AcceptedPlanDocumentInteraction = {
   id: string;
@@ -4231,7 +4254,7 @@ export function issueService(db: Db) {
     issueId: string,
     companyId: string,
     blockedByIssueIds: string[],
-    actor: { agentId?: string | null; userId?: string | null } = {},
+    actor: { agentId?: string | null; userId?: string | null; actorType?: string | null } = {},
     dbOrTx: any = db,
   ) {
     const deduped = [...new Set(blockedByIssueIds)];
@@ -4283,7 +4306,14 @@ export function issueService(db: Db) {
         companyId,
         [issueId, ...addedBlockerIds, ...removedBlockerIds],
       );
-      if (touchedFreezes.length > 0 && actor.agentId) {
+      // Keyed on ACTOR TYPE, not on the presence of an agent id — an agent
+      // context that omits its id must still gate (stack-review D).
+      const edgeActorType = deriveDecisionFreezeActorType({
+        actorType: actor.actorType ?? null,
+        actorAgentId: actor.agentId ?? null,
+        actorUserId: actor.userId ?? null,
+      });
+      if (touchedFreezes.length > 0 && edgeActorType === "agent") {
         const blocking = touchedFreezes[0]!;
         throw unprocessable("Blocked-by edges touching an active decision freeze cannot be changed by agents", {
           code: DECISION_FREEZE_ACTIVE_ERROR_CODE,
@@ -4672,16 +4702,20 @@ export function issueService(db: Db) {
         conditions.push(inArray(issues.status, statuses));
       }
       if (assigneeAgentFilter === null) {
+        // Pick-work SQL exclusion (R3.4, stack-review C): UNCONDITIONAL on
+        // every assignee-filter arm. The unassigned arm is a pick surface too
+        // (agents scanning for work to claim), so frozen members vanish from
+        // it exactly like the concrete-assignee arm.
         conditions.push(isNull(issues.assigneeAgentId));
+        conditions.push(decisionFreezeExclusionSql(issues.id, issues.companyId));
       } else if (assigneeAgentFilter) {
         conditions.push(eq(issues.assigneeAgentId, assigneeAgentFilter));
-        // Pick-work SQL exclusion (R3.4, PR-2b): the assignee+status list shape
-        // is the pick-work surface (inbox-lite, the assignee skill fallback,
-        // and the MCP inbox via /agents/me/inbox-lite). Members of an active
-        // decision cone vanish from it while frozen and reappear on release.
-        if (statuses.length > 0) {
-          conditions.push(decisionFreezeExclusionSql(issues.id, issues.companyId));
-        }
+        // Pick-work SQL exclusion (R3.4, stack-review C): applied on EVERY
+        // assignee-filtered list — with or without a status filter — so
+        // inbox-lite, the assignee skill fallback, MCP listings, and any
+        // assignee-only query all flow through the same gated arm. Members of
+        // an active decision cone vanish while frozen and reappear on release.
+        conditions.push(decisionFreezeExclusionSql(issues.id, issues.companyId));
       }
       if (filters?.participantAgentId) {
         conditions.push(participatedByAgentCondition(companyId, filters.participantAgentId));
@@ -4855,8 +4889,12 @@ export function issueService(db: Db) {
       assertValidAssigneeAgentFilter(assigneeAgentFilter);
       if (assigneeAgentFilter === null) {
         conditions.push(isNull(issues.assigneeAgentId));
+        // Mirror list()'s unconditional pick-work exclusion so counts and
+        // rows can never disagree about frozen members (stack-review C).
+        conditions.push(decisionFreezeExclusionSql(issues.id, issues.companyId));
       } else if (assigneeAgentFilter) {
         conditions.push(eq(issues.assigneeAgentId, assigneeAgentFilter));
+        conditions.push(decisionFreezeExclusionSql(issues.id, issues.companyId));
       }
       if (filters?.assigneeUserId) conditions.push(eq(issues.assigneeUserId, filters.assigneeUserId));
       if (filters?.projectId) conditions.push(eq(issues.projectId, filters.projectId));
@@ -5682,7 +5720,7 @@ export function issueService(db: Db) {
           parent.id,
           parent.companyId,
           [...new Set([...existingBlockers.map((row) => row.blockerIssueId), child.id])],
-          { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
+          { agentId: actorAgentId ?? null, userId: actorUserId ?? null, actorType: data.actorType ?? null },
         );
         [child] = await withIssueRelationSummaries(parent.companyId, [child], db);
       }
@@ -5716,6 +5754,18 @@ export function issueService(db: Db) {
 
       const initialClaim = await db.transaction(async (tx) => {
         await tx.execute(sql`select ${issues.id} from ${issues} where ${issues.id} = ${sourceIssue.id} for update`);
+
+        // In-tx freeze gate (stack-review B): plan decomposition creates
+        // children under the source issue — agents cannot decompose a frozen
+        // member. Each child create is also gated inside issueService.create.
+        await assertDecisionFreezeMutationAllowed(tx as unknown as Db, sourceIssue.companyId, sourceIssue.id, {
+          type: deriveDecisionFreezeActorType({
+            actorType: data.actorType ?? null,
+            actorAgentId: data.actorAgentId ?? null,
+            actorUserId: data.actorUserId ?? null,
+          }),
+          agentId: data.actorAgentId ?? null,
+        });
 
         const belongsToPlanDocument = await tx
           .select({ revisionId: documentRevisions.id })
@@ -6001,8 +6051,14 @@ export function issueService(db: Db) {
         actorRunId,
         actorResponsibleUserId,
         trustExplicitResponsibleUserId,
+        actorType,
         ...issueData
       } = data;
+      const createGateActorType = deriveDecisionFreezeActorType({
+        actorType: actorType ?? null,
+        actorAgentId: issueData.createdByAgentId ?? null,
+        actorUserId: issueData.createdByUserId ?? null,
+      });
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       const preservesAgentDefaultIntent =
         workspaceOverrideIntent?.executionWorkspace === true &&
@@ -6017,6 +6073,15 @@ export function issueService(db: Db) {
             useProjectWorkspace: false,
           };
         }
+      }
+      // Custody (stack-review A): a receipt supplied at create time can never
+      // carry the server acceptance stamp — underscore-prefixed keys are
+      // stripped before the shape check, so a pre-loaded `_acceptance` can
+      // never later satisfy the done gate as an "idempotent replay".
+      if (issueData.completionReceipt != null) {
+        const strippedReceipt = stripClientCompletionReceiptFields(issueData.completionReceipt);
+        assertCompletionReceiptShape(strippedReceipt);
+        issueData.completionReceipt = strippedReceipt as typeof issueData.completionReceipt;
       }
       // Completion contracts (ADR R2.12, PR-3): preimage-bind the contract at
       // attach time. An issue can never be BORN satisfied: creating it
@@ -6046,6 +6111,38 @@ export function issueService(db: Db) {
         throw unprocessable("in_progress issues require an assignee");
       }
       return db.transaction(async (tx) => {
+        // In-transaction freeze gate for issue creation (R2.2/R2.8,
+        // stack-review B/D). The gate walks the parent's ANCESTOR chain
+        // (bounded), so a parent whose ancestor sits inside a cone still
+        // gates; and it covers the explicit workspace-inheritance source, so
+        // an agent cannot spawn a non-member sibling that reuses a frozen
+        // issue's execution workspace. Keyed on ACTOR TYPE — board/user/system
+        // creates pass and are absorbed into the cone after the insert below.
+        const parentAncestorChain = issueData.parentId
+          ? await listIssueSelfAndAncestorIds(tx as unknown as Db, companyId, issueData.parentId)
+          : [];
+        if (createGateActorType === "agent") {
+          const gateIssueIds = [...parentAncestorChain];
+          const inheritanceSourceId = skipExecutionWorkspaceInheritance
+            ? null
+            : inheritExecutionWorkspaceFromIssueId ?? null;
+          if (inheritanceSourceId) gateIssueIds.push(inheritanceSourceId);
+          const createFreezes = await listActiveDecisionFreezesForIssues(
+            tx as unknown as Db,
+            companyId,
+            gateIssueIds,
+          );
+          if (createFreezes.length > 0) {
+            const blocking = createFreezes[0]!;
+            throw unprocessable("Agents cannot create issues attached to an active decision freeze", {
+              code: DECISION_FREEZE_ACTIVE_ERROR_CODE,
+              issueId: blocking.issueId,
+              leaseId: blocking.leaseId,
+              anchorIssueId: blocking.anchorIssueId,
+              leaseState: blocking.state,
+            });
+          }
+        }
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
         let executionWorkspaceId = issueData.executionWorkspaceId ?? null;
@@ -6236,12 +6333,17 @@ export function issueService(db: Db) {
         );
 
         const [issue] = await tx.insert(issues).values(values).returning();
-        // Cone maintenance (R2.8, PR-2b): a board/system-created child under a
-        // frozen parent joins the cone immediately (union-only recompute in the
-        // same transaction). Agent creates were already rejected at the route
-        // gate before reaching this insert.
-        if (issue.parentId) {
-          const parentFreezes = await listActiveDecisionFreezesForIssues(tx as unknown as Db, companyId, [issue.parentId]);
+        // Cone maintenance (R2.8, stack-review D): a board/system-created
+        // child under a frozen parent — or under any issue whose ANCESTOR is a
+        // cone member — joins the cone immediately (union-only recompute in
+        // the same transaction). Agent creates were rejected by the in-tx gate
+        // above before reaching this insert.
+        if (issue.parentId && parentAncestorChain.length > 0) {
+          const parentFreezes = await listActiveDecisionFreezesForIssues(
+            tx as unknown as Db,
+            companyId,
+            parentAncestorChain,
+          );
           for (const leaseId of [...new Set(parentFreezes.map((freeze) => freeze.leaseId))]) {
             await recomputeConeForEdgeChange(tx as unknown as Db, leaseId);
           }
@@ -6268,6 +6370,7 @@ export function issueService(db: Db) {
             {
               agentId: issueData.createdByAgentId ?? null,
               userId: issueData.createdByUserId ?? null,
+              actorType: createGateActorType,
             },
             tx,
           );
@@ -6371,6 +6474,16 @@ export function issueService(db: Db) {
         blockedByIssueIds?: string[];
         actorAgentId?: string | null;
         actorUserId?: string | null;
+        /** Actor type for the in-transaction freeze gate (agent → gated).
+         * Routes pass their authenticated actor type; absent, it derives
+         * from the attributed actor ids. */
+        actorType?: string | null;
+        /** Revising-owner exemption for this write, plumbed from the route
+         * (comment-only PATCH / document PUT / resubmit). */
+        revisingOwnerOperation?: DecisionFreezeRevisingOwnerOperation | null;
+        /** Explicit reopen intent (terminal integrity, stack-review E):
+         * agent-driven terminal → non-terminal transitions require it. */
+        reopen?: boolean;
       },
       dbOrTx: any = db,
     ) => {
@@ -6386,8 +6499,16 @@ export function issueService(db: Db) {
         blockedByIssueIds,
         actorAgentId,
         actorUserId,
+        actorType,
+        revisingOwnerOperation,
+        reopen,
         ...issueData
       } = data;
+      const gateActorType = deriveDecisionFreezeActorType({
+        actorType: actorType ?? null,
+        actorAgentId: actorAgentId ?? null,
+        actorUserId: actorUserId ?? null,
+      });
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
       if (!isolatedWorkspacesEnabled) {
         delete issueData.executionWorkspaceId;
@@ -6397,6 +6518,27 @@ export function issueService(db: Db) {
 
       if (issueData.status) {
         assertTransition(existing.status, issueData.status);
+      }
+
+      // Terminal integrity (stack-review E): an agent moving a terminal
+      // (done/cancelled) issue back to a non-terminal status must carry
+      // explicit reopen intent — a bare status PATCH is never a reopen. Inside
+      // a frozen cone the mutation gate below denies the write regardless.
+      if (
+        gateActorType === "agent"
+        && (existing.status === "done" || existing.status === "cancelled")
+        && issueData.status
+        && issueData.status !== "done"
+        && issueData.status !== "cancelled"
+        && reopen !== true
+      ) {
+        throw unprocessable("Reopening a terminal issue requires explicit reopen intent", {
+          code: "terminal_reopen_requires_explicit_intent",
+          issueId: id,
+          fromStatus: existing.status,
+          toStatus: issueData.status,
+          fix: "Pass reopen: true with the status change, or leave the terminal status in place",
+        });
       }
 
       // Completion-contract custody (ADR R2.12, PR-3). Agent-attributed
@@ -6430,10 +6572,16 @@ export function issueService(db: Db) {
         );
       }
       if (issueData.completionReceipt != null) {
-        assertCompletionReceiptShape(issueData.completionReceipt);
+        // Custody (stack-review A): every underscore-prefixed key —
+        // `_acceptance` above all — is stripped from client-supplied receipts
+        // BEFORE the shape check and BEFORE storage. Server code is the only
+        // writer of `_acceptance`, stamped exclusively after
+        // `validateCompletionReceipt` accepts.
+        const strippedReceipt = stripClientCompletionReceiptFields(issueData.completionReceipt);
+        assertCompletionReceiptShape(strippedReceipt);
         // Stamp the submitter: agents cannot spoof it; board/system stamps
         // apply only when the receipt does not already carry one.
-        const receiptRecord = { ...(issueData.completionReceipt as Record<string, unknown>) };
+        const receiptRecord = { ...(strippedReceipt as Record<string, unknown>) };
         if (actorAgentId) {
           receiptRecord.submittedBy = actorAgentId;
         } else if (receiptRecord.submittedBy == null && actorUserId) {
@@ -6454,9 +6602,15 @@ export function issueService(db: Db) {
         const submittedReceipt = issueData.completionReceipt !== undefined
           ? issueData.completionReceipt
           : existing.completionReceipt;
+        const contractTypeValue = (effectiveCompletionContract as Record<string, unknown>).contractType;
+        const brokerExecutedContract =
+          typeof contractTypeValue === "string" && BROKER_EXECUTED_CONTRACT_TYPES.has(contractTypeValue);
         const verdict = validateCompletionReceipt(effectiveCompletionContract, submittedReceipt, {
           issueId: id,
-          expectedExecutionRunId: existing.executionRunId ?? null,
+          // Broker-executed contracts bind to the broker operation id (checked
+          // fail-closed below against a `succeeded` broker_operations row) —
+          // never to the agent's own execution run.
+          expectedExecutionRunId: brokerExecutedContract ? null : existing.executionRunId ?? null,
           submitterIdentity: actorAgentId ?? actorUserId ?? null,
           previouslyAcceptedReceipt: getCompletionReceiptAcceptance(existing.completionReceipt)
             ? existing.completionReceipt
@@ -6470,6 +6624,29 @@ export function issueService(db: Db) {
             fix: "Submit a completionReceipt bound to the attached contract's preimage, revision, and execution, then retry status=done",
           });
         }
+        // Broker execution binding (stack-review A, R2.16/R3.7): for the MVP
+        // broker contract types a string `executorIdentity` is never
+        // sufficient — the receipt's executionRunId must be a
+        // `broker_operations` row in state `succeeded` whose approval is
+        // linked to this issue and whose args rebuild this contract's
+        // preimage. Applied to fresh acceptances AND idempotent replays.
+        if (brokerExecutedContract) {
+          const acceptedRunId = (verdict.acceptedReceipt as Record<string, unknown>).executionRunId;
+          const verification = await verifyBrokerReceiptExecution(dbOrTx, {
+            companyId: existing.companyId,
+            issueId: id,
+            contract: effectiveCompletionContract,
+            executionRunId: typeof acceptedRunId === "string" ? acceptedRunId : "",
+          });
+          if (!verification.ok) {
+            throw unprocessable("Issue done requires a receipt backed by a succeeded broker operation", {
+              rule: COMPLETION_CONTRACT_RECEIPT_RULE,
+              issueId: id,
+              reasons: verification.reasons,
+              fix: "The host broker must execute the approved operation and record a succeeded receipt; agent-authored receipts cannot substitute for the broker",
+            });
+          }
+        }
         // Accepted (or idempotent resubmit of the accepted receipt): persist
         // the server-stamped acceptance; a replay keeps the stored receipt so
         // resubmits have no duplicate effects.
@@ -6477,13 +6654,24 @@ export function issueService(db: Db) {
       }
 
       // Resolution disposition (ADR R2.12): recorded on terminal transitions.
-      // Defaults derive from the terminal status; explicit values are
-      // board/system-only (gated above) and constrained per status.
+      // Explicit values are board/system-only (gated above) and constrained
+      // per status. Without an explicit value the default derives, in order,
+      // from (stack-review G / Gemini C4):
+      //   1. the server acceptance stamp's disposition, when a server-side
+      //      acceptance path recorded one on the receipt;
+      //   2. the most recently released decision lease anchored on this issue,
+      //      via mapDecisionDispositionToResolutionDisposition (its table
+      //      documents the mapping — approved→status default, rejected→failed,
+      //      comment/staleness dispositions→superseded, …);
+      //   3. the flat status default (done→completed, cancelled→cancelled).
+      // Agent custody rules are unchanged: agents still never SET an explicit
+      // disposition; propagation is entirely server-derived.
       if (issueData.status === "done" || issueData.status === "cancelled") {
-        const defaultDisposition = issueData.status === "done" ? "completed" : "cancelled";
+        const terminalStatus = issueData.status;
+        const defaultDisposition = terminalStatus === "done" ? "completed" : "cancelled";
         const explicitDisposition = issueData.resolutionDisposition ?? null;
         if (explicitDisposition) {
-          const allowedDispositions = issueData.status === "done"
+          const allowedDispositions = terminalStatus === "done"
             ? ["completed", "superseded", "failed"]
             : ["cancelled", "superseded", "failed"];
           if (!allowedDispositions.includes(explicitDisposition)) {
@@ -6494,8 +6682,29 @@ export function issueService(db: Db) {
             });
           }
         }
+        let derivedDisposition: string | null = null;
+        if (!explicitDisposition && existing.status !== terminalStatus) {
+          const effectiveReceipt = issueData.completionReceipt !== undefined
+            ? issueData.completionReceipt
+            : existing.completionReceipt;
+          const acceptance = getCompletionReceiptAcceptance(effectiveReceipt);
+          if (acceptance?.disposition) {
+            derivedDisposition = acceptance.disposition;
+          } else {
+            const leaseDisposition = await findLatestReleasedLeaseDispositionForAnchor(
+              dbOrTx,
+              existing.companyId,
+              id,
+            );
+            if (leaseDisposition) {
+              derivedDisposition = mapDecisionDispositionToResolutionDisposition(leaseDisposition, terminalStatus);
+            }
+          }
+        }
         issueData.resolutionDisposition = explicitDisposition
-          ?? (existing.status === issueData.status ? existing.resolutionDisposition ?? defaultDisposition : defaultDisposition);
+          ?? (existing.status === terminalStatus
+            ? existing.resolutionDisposition ?? derivedDisposition ?? defaultDisposition
+            : derivedDisposition ?? defaultDisposition);
       } else if (issueData.resolutionDisposition != null) {
         // An explicit disposition without a terminal target is only valid as a
         // correction on an already-terminal issue.
@@ -6625,24 +6834,38 @@ export function issueService(db: Db) {
       }
 
       const runUpdate = async (tx: any) => {
-        // Edge-expansion gate + recompute hook for parent edges (R2.8, PR-2b):
-        // agent actors cannot re-parent an issue into or out of an active
-        // decision cone; board/user re-parenting INTO a cone triggers the
-        // union-only recompute in the same transaction (after the write below).
+        // Decision-freeze mutation gate INSIDE the write transaction (R2.2/
+        // R3.3, stack-review B): route-bypassing callers (plugins, MCP,
+        // internal services) hit the same agent gate the routes present, and
+        // the membership check shares the transaction with the write it
+        // protects. Keyed on ACTOR TYPE; the route-level gates stay in place
+        // for their friendlier 422 messages.
+        await assertDecisionFreezeMutationAllowed(tx, existing.companyId, id, {
+          type: gateActorType,
+          agentId: actorAgentId ?? null,
+        }, { revisingOwnerOperation: revisingOwnerOperation ?? null });
+
+        // Edge-expansion gate + recompute hook for parent edges (R2.8,
+        // stack-review D): agent actors cannot re-parent an issue into or out
+        // of an active decision cone — the check walks the NEW parent's
+        // ancestor chain (bounded), so a parent whose ancestor is a member
+        // still gates. Board/user re-parenting under any cone MEMBER (not
+        // just the anchor) triggers the union-only recompute in the same
+        // transaction (after the write below).
         const parentChanged =
           issueData.parentId !== undefined && issueData.parentId !== existing.parentId;
         let parentLeaseIdsToRecompute: string[] = [];
         if (parentChanged) {
-          const touchedParentIssueIds = [
-            id,
-            ...(typeof issueData.parentId === "string" && issueData.parentId ? [issueData.parentId] : []),
-          ];
+          const newParentChain = typeof issueData.parentId === "string" && issueData.parentId
+            ? await listIssueSelfAndAncestorIds(tx, existing.companyId, issueData.parentId)
+            : [];
+          const touchedParentIssueIds = [id, ...newParentChain];
           const parentFreezes = await listActiveDecisionFreezesForIssues(
             tx,
             existing.companyId,
             touchedParentIssueIds,
           );
-          if (parentFreezes.length > 0 && actorAgentId) {
+          if (parentFreezes.length > 0 && gateActorType === "agent") {
             const blocking = parentFreezes[0]!;
             throw unprocessable("Parent edges touching an active decision freeze cannot be changed by agents", {
               code: DECISION_FREEZE_ACTIVE_ERROR_CODE,
@@ -6652,9 +6875,10 @@ export function issueService(db: Db) {
               leaseState: blocking.state,
             });
           }
+          const newParentChainSet = new Set(newParentChain);
           parentLeaseIdsToRecompute = [...new Set(
             parentFreezes
-              .filter((freeze) => freeze.issueId === issueData.parentId)
+              .filter((freeze) => newParentChainSet.has(freeze.issueId))
               .map((freeze) => freeze.leaseId),
           )];
         }
@@ -6695,6 +6919,7 @@ export function issueService(db: Db) {
             {
               agentId: actorAgentId ?? null,
               userId: actorUserId ?? null,
+              actorType: gateActorType,
             },
             tx,
           );
@@ -6852,6 +7077,22 @@ export function issueService(db: Db) {
         });
       }
 
+      // Decision-freeze checkout gate (R2.2, stack-review B): checkout is an
+      // agent-actor mutation by definition — a frozen member can never be
+      // checked out or stamped in_progress. This pre-check gives the clear
+      // 422; the atomic UPDATEs below ALSO carry the SQL exclusion so a lease
+      // created between this check and the write can never land (race-free).
+      const activeDecisionFreeze = await getActiveDecisionFreeze(db, issueCompany.companyId, id);
+      if (activeDecisionFreeze) {
+        throw unprocessable("Issue checkout blocked by an active decision freeze", {
+          code: DECISION_FREEZE_ACTIVE_ERROR_CODE,
+          issueId: id,
+          leaseId: activeDecisionFreeze.leaseId,
+          anchorIssueId: activeDecisionFreeze.anchorIssueId,
+          leaseState: activeDecisionFreeze.state,
+        });
+      }
+
       await clearExecutionRunIfTerminal(id);
       await clearCheckoutRunIfTerminal(id);
 
@@ -6887,6 +7128,7 @@ export function issueService(db: Db) {
             inArray(issues.status, expectedStatuses),
             or(isNull(issues.assigneeAgentId), sameRunAssigneeCondition),
             executionLockCondition,
+            decisionFreezeExclusionSql(issues.id, issues.companyId),
           ),
         )
         .returning()
@@ -6932,6 +7174,7 @@ export function issueService(db: Db) {
               eq(issues.assigneeAgentId, agentId),
               isNull(issues.checkoutRunId),
               or(isNull(issues.executionRunId), eq(issues.executionRunId, checkoutRunId)),
+              decisionFreezeExclusionSql(issues.id, issues.companyId),
             ),
           )
           .returning()
@@ -6993,6 +7236,7 @@ export function issueService(db: Db) {
                 inArray(issues.status, expectedStatuses),
                 eq(issues.executionRunId, current.executionRunId),
                 or(isNull(issues.assigneeAgentId), eq(issues.assigneeAgentId, agentId)),
+                decisionFreezeExclusionSql(issues.id, issues.companyId),
               ),
             )
             .returning()
@@ -7181,6 +7425,13 @@ export function issueService(db: Db) {
           .then((rows) => rows[0] ?? null);
 
         if (!existing) return null;
+        // In-tx freeze gate (stack-review B): an agent release resets the
+        // status to todo and clears the assignee — a mutation a frozen member
+        // must refuse. Board/user releases stay exempt (deciders).
+        await assertDecisionFreezeMutationAllowed(tx as unknown as Db, existing.companyId, id, {
+          type: actorAgentId ? "agent" : "system",
+          agentId: actorAgentId ?? null,
+        });
         if (actorAgentId && existing.assigneeAgentId && existing.assigneeAgentId !== actorAgentId) {
           throw conflict("Only assignee can release issue");
         }
@@ -7473,13 +7724,15 @@ export function issueService(db: Db) {
     addComment: async (
       issueId: string,
       body: string,
-      actor: { agentId?: string; userId?: string; runId?: string | null },
+      actor: { agentId?: string; userId?: string; runId?: string | null; actorType?: string | null },
       options?: {
         authorType?: IssueCommentAuthorType | null;
         presentation?: IssueCommentPresentation | null;
         metadata?: IssueCommentMetadata | null;
         sourceTrust?: typeof issueComments.$inferInsert.sourceTrust;
         createdAt?: Date | string | null;
+        /** Revising-owner "comment" exemption, plumbed from the routes. */
+        revisingOwnerOperation?: DecisionFreezeRevisingOwnerOperation | null;
       },
       dbOrTx: any = db,
     ) => {
@@ -7490,6 +7743,19 @@ export function issueService(db: Db) {
         .then((rows: Array<{ companyId: string }>) => rows[0] ?? null);
 
       if (!issue) throw notFound("Issue not found");
+
+      // Service-level comment gate (R2.2/R3.3, stack-review B): agent-authored
+      // comments on frozen members are refused on the same handle as the
+      // insert; the revising-owner "comment" exemption applies only when the
+      // caller passes it (the two comment routes do for pure comments).
+      await assertDecisionFreezeMutationAllowed(dbOrTx, issue.companyId, issueId, {
+        type: deriveDecisionFreezeActorType({
+          actorType: actor.actorType ?? null,
+          actorAgentId: actor.agentId ?? null,
+          actorUserId: actor.userId ?? null,
+        }),
+        agentId: actor.agentId ?? null,
+      }, { revisingOwnerOperation: options?.revisingOwnerOperation ?? null });
 
       const currentUserRedactionOptions = {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
@@ -7539,6 +7805,7 @@ export function issueService(db: Db) {
       originalFilename?: string | null;
       createdByAgentId?: string | null;
       createdByUserId?: string | null;
+      actorType?: string | null;
     }) => {
       const issue = await db
         .select({ id: issues.id, companyId: issues.companyId })
@@ -7560,6 +7827,15 @@ export function issueService(db: Db) {
       }
 
       return db.transaction(async (tx) => {
+        // In-tx freeze gate for attachment creation (stack-review B).
+        await assertDecisionFreezeMutationAllowed(tx as unknown as Db, issue.companyId, issue.id, {
+          type: deriveDecisionFreezeActorType({
+            actorType: input.actorType ?? null,
+            actorAgentId: input.createdByAgentId ?? null,
+            actorUserId: input.createdByUserId ?? null,
+          }),
+          agentId: input.createdByAgentId ?? null,
+        });
         const [asset] = await tx
           .insert(assets)
           .values({
@@ -7653,7 +7929,10 @@ export function issueService(db: Db) {
         .where(eq(issueAttachments.id, id))
         .then((rows) => rows[0] ?? null),
 
-    removeAttachment: async (id: string) =>
+    removeAttachment: async (
+      id: string,
+      actor: { agentId?: string | null; userId?: string | null; actorType?: string | null } = {},
+    ) =>
       db.transaction(async (tx) => {
         const existing = await tx
           .select({
@@ -7678,6 +7957,17 @@ export function issueService(db: Db) {
           .where(eq(issueAttachments.id, id))
           .then((rows) => rows[0] ?? null);
         if (!existing) return null;
+
+        // In-tx freeze gate for attachment deletion (stack-review B):
+        // evidence removal from a frozen member is an agent mutation.
+        await assertDecisionFreezeMutationAllowed(tx as unknown as Db, existing.companyId, existing.issueId, {
+          type: deriveDecisionFreezeActorType({
+            actorType: actor.actorType ?? null,
+            actorAgentId: actor.agentId ?? null,
+            actorUserId: actor.userId ?? null,
+          }),
+          agentId: actor.agentId ?? null,
+        });
 
         await tx.delete(issueAttachments).where(eq(issueAttachments.id, id));
         await tx.delete(assets).where(eq(assets.id, existing.assetId));

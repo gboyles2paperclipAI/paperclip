@@ -2,8 +2,19 @@ import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issueWorkProducts } from "@paperclipai/db";
 import type { IssueWorkProduct } from "@paperclipai/shared";
+import {
+  assertDecisionFreezeMutationAllowed,
+  deriveDecisionFreezeActorType,
+} from "./decision-freeze.js";
 
 type IssueWorkProductRow = typeof issueWorkProducts.$inferSelect;
+
+/** Actor context for the in-transaction decision-freeze gate (stack-review B). */
+export type WorkProductActor = {
+  agentId?: string | null;
+  userId?: string | null;
+  actorType?: string | null;
+};
 
 function toIssueWorkProduct(row: IssueWorkProductRow): IssueWorkProduct {
   return {
@@ -32,6 +43,25 @@ function toIssueWorkProduct(row: IssueWorkProductRow): IssueWorkProduct {
 }
 
 export function workProductService(db: Db) {
+  // Service-level decision-freeze gate (R2.2/R3.3, stack-review B): every
+  // work-product write — create, mutate, delete — runs the agent gate inside
+  // the same transaction as the write, so route-bypassing callers are covered.
+  async function assertWorkProductMutationAllowed(
+    tx: Db,
+    companyId: string,
+    issueId: string,
+    actor: WorkProductActor | undefined,
+  ) {
+    await assertDecisionFreezeMutationAllowed(tx, companyId, issueId, {
+      type: deriveDecisionFreezeActorType({
+        actorType: actor?.actorType ?? null,
+        actorAgentId: actor?.agentId ?? null,
+        actorUserId: actor?.userId ?? null,
+      }),
+      agentId: actor?.agentId ?? null,
+    });
+  }
+
   return {
     listForIssue: async (issueId: string) => {
       const rows = await db
@@ -51,8 +81,14 @@ export function workProductService(db: Db) {
       return row ? toIssueWorkProduct(row) : null;
     },
 
-    createForIssue: async (issueId: string, companyId: string, data: Omit<typeof issueWorkProducts.$inferInsert, "issueId" | "companyId">) => {
+    createForIssue: async (
+      issueId: string,
+      companyId: string,
+      data: Omit<typeof issueWorkProducts.$inferInsert, "issueId" | "companyId">,
+      actor?: WorkProductActor,
+    ) => {
       const row = await db.transaction(async (tx) => {
+        await assertWorkProductMutationAllowed(tx as unknown as Db, companyId, issueId, actor);
         if (data.isPrimary) {
           await tx
             .update(issueWorkProducts)
@@ -78,7 +114,11 @@ export function workProductService(db: Db) {
       return row ? toIssueWorkProduct(row) : null;
     },
 
-    update: async (id: string, patch: Partial<typeof issueWorkProducts.$inferInsert>) => {
+    update: async (
+      id: string,
+      patch: Partial<typeof issueWorkProducts.$inferInsert>,
+      actor?: WorkProductActor,
+    ) => {
       const row = await db.transaction(async (tx) => {
         const existing = await tx
           .select()
@@ -86,6 +126,8 @@ export function workProductService(db: Db) {
           .where(eq(issueWorkProducts.id, id))
           .then((rows) => rows[0] ?? null);
         if (!existing) return null;
+
+        await assertWorkProductMutationAllowed(tx as unknown as Db, existing.companyId, existing.issueId, actor);
 
         if (patch.isPrimary === true) {
           await tx
@@ -110,12 +152,23 @@ export function workProductService(db: Db) {
       return row ? toIssueWorkProduct(row) : null;
     },
 
-    remove: async (id: string) => {
-      const row = await db
-        .delete(issueWorkProducts)
-        .where(eq(issueWorkProducts.id, id))
-        .returning()
-        .then((rows) => rows[0] ?? null);
+    remove: async (id: string, actor?: WorkProductActor) => {
+      const row = await db.transaction(async (tx) => {
+        const existing = await tx
+          .select()
+          .from(issueWorkProducts)
+          .where(eq(issueWorkProducts.id, id))
+          .then((rows) => rows[0] ?? null);
+        if (!existing) return null;
+
+        await assertWorkProductMutationAllowed(tx as unknown as Db, existing.companyId, existing.issueId, actor);
+
+        return await tx
+          .delete(issueWorkProducts)
+          .where(eq(issueWorkProducts.id, id))
+          .returning()
+          .then((rows) => rows[0] ?? null);
+      });
       return row ? toIssueWorkProduct(row) : null;
     },
   };

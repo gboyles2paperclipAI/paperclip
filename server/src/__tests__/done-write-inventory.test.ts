@@ -16,6 +16,11 @@ const testDir = path.dirname(fileURLToPath(import.meta.url));
 const serverSrcRoot = path.resolve(testDir, "..");
 const inventoryPath = path.join(serverSrcRoot, "services", "decision-freeze-inventory.md");
 const SANCTIONED_CHOKEPOINT = "services/issues.ts";
+/** issueService.update funnels every internal terminal write through
+ * assertTransition + the contract/freeze gates; its own `.set(patch)` writes
+ * carry no terminal literal, so the chokepoint FILE is scanned like any other
+ * (stack-review H — the previous whole-file exclusion left checkout/release
+ * unscanned). */
 
 const DONE_WRITE_CLASSIFICATIONS = new Set([
   "tree-control-cancel",
@@ -45,30 +50,55 @@ function listSourceFiles(root: string): string[] {
 }
 
 /**
- * `done:<relative-file>#<ordinal>` for every `update(issues)` site outside the
- * chokepoint whose set block (bounded by the following `.where(` or 600
- * characters) contains a terminal status literal.
+ * `done:<relative-file>#<ordinal>` for every `update(<issues-alias>)` site
+ * whose set block (bounded by the following `.where(` or 600 characters)
+ * contains a terminal status literal in ANY quote style (stack-review H):
+ *  - the table reference matches `issues` AND every file-local import alias
+ *    (`import { issues as X }`), so alias renames cannot evade the scan;
+ *  - `status: "done"`, `status: 'cancelled'`, and `` status: `done` `` all
+ *    match; and
+ *  - the sanctioned chokepoint FILE is scanned like every other file — its
+ *    own `.set(patch)` writes carry no terminal literal, so any literal
+ *    terminal write added there (checkout/release/etc.) surfaces here.
+ *
+ * Residual limits (documented in decision-freeze-inventory.md): a terminal
+ * status carried by an identifier (`status: DONE`), built inside a prebuilt
+ * patch object more than 600 characters before `.set(...)`, or written via a
+ * raw `sql` template is outside this matcher's sight; classification rows
+ * assert existence, not behavior — the behavioral guarantees live in the
+ * chokepoint's own gates and the replay suites.
  */
+const TERMINAL_STATUS_LITERAL = /status:\s*(["'`])(?:done|cancelled)\1/;
+
 function findTerminalDoneWriteIdentifiers(): string[] {
   const identifiers: string[] = [];
   for (const absolute of listSourceFiles(serverSrcRoot)) {
     const relative = path.relative(serverSrcRoot, absolute).split(path.sep).join("/");
-    if (relative === SANCTIONED_CHOKEPOINT) continue;
     const source = readFileSync(absolute, "utf8");
-    let ordinal = 0;
-    let searchFrom = 0;
-    for (;;) {
-      const found = source.indexOf("update(issues)", searchFrom);
-      if (found < 0) break;
-      searchFrom = found + 1;
-      const whereIndex = source.indexOf(".where(", found);
-      const windowEnd = Math.min(whereIndex >= 0 ? whereIndex : found + 600, found + 600);
-      const window = source.slice(found, windowEnd);
-      if (/status:\s*"(?:done|cancelled)"/.test(window)) {
-        ordinal += 1;
-        identifiers.push(`done:${relative}#${ordinal}`);
+    const tableAliases = new Set<string>(["issues"]);
+    for (const aliasMatch of source.matchAll(/\bissues\s+as\s+(\w+)/g)) {
+      tableAliases.add(aliasMatch[1]!);
+    }
+    const sites: number[] = [];
+    for (const alias of tableAliases) {
+      let searchFrom = 0;
+      const needle = `update(${alias})`;
+      for (;;) {
+        const found = source.indexOf(needle, searchFrom);
+        if (found < 0) break;
+        searchFrom = found + 1;
+        const whereIndex = source.indexOf(".where(", found);
+        const windowEnd = Math.min(whereIndex >= 0 ? whereIndex : found + 600, found + 600);
+        const window = source.slice(found, windowEnd);
+        if (TERMINAL_STATUS_LITERAL.test(window)) {
+          sites.push(found);
+        }
       }
     }
+    sites.sort((a, b) => a - b);
+    sites.forEach((_offset, index) => {
+      identifiers.push(`done:${relative}#${index + 1}`);
+    });
   }
   return identifiers;
 }

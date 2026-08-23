@@ -46,10 +46,26 @@ function listSourceFiles(root: string): string[] {
 }
 
 /**
- * `wake:<relative-file>#<ordinal>` for every `enqueueWakeup(` / `.wakeup(`
- * call site (source order within the file). The `enqueueWakeup` function
- * definition and comment lines are excluded.
+ * Broadened call matcher (stack-review H). Matches, per line:
+ *  - `enqueueWakeup(` on ANY receiver (`deps.enqueueWakeup(`, bare, spaced);
+ *  - `.wakeup(` on any receiver, with optional whitespace before `(`;
+ *  - bracket access `["wakeup"](` / `['wakeup'](`;
+ *  - a BARE `wakeup(` call (a destructured `const { wakeup } = heartbeat`
+ *    alias invokes exactly this shape).
+ *
+ * Residual limits (documented honestly in decision-freeze-inventory.md):
+ * a rename at the import/destructure/assignment boundary (`enqueueWakeup as
+ * x`, `{ wakeup: x } =`, `const x = heartbeat.wakeup`) would produce calls
+ * this matcher cannot see — so `findWakeAliasHazards` below FAILS the suite
+ * on any such aliasing line instead of letting it slip; a name-and-paren
+ * split across lines is also invisible to the per-line scan.
  */
+const WAKE_CALL_PATTERN =
+  /(?:\benqueueWakeup|\.\s*wakeup\b|\[\s*["']wakeup["']\s*\]|(?<![.\w$])wakeup\b)\s*\(/;
+/** Definition shapes (not calls): declarations, method/property definitions. */
+const WAKE_DEFINITION_PATTERN =
+  /(?:function\s+(?:enqueueWakeup|wakeup)\b|\b(?:enqueueWakeup|wakeup)\??\s*:\s|\b(?:enqueueWakeup|wakeup)\s*=\s*(?:async\b\s*)?\()/;
+
 function findWakeCallSiteIdentifiers(): string[] {
   const identifiers: string[] = [];
   for (const absolute of listSourceFiles(serverSrcRoot)) {
@@ -59,13 +75,44 @@ function findWakeCallSiteIdentifiers(): string[] {
       const stripped = line.trim();
       if (stripped.startsWith("//") || stripped.startsWith("*") || stripped.startsWith("/*")) continue;
       if (/function enqueueWakeup/.test(line)) continue;
-      if (/(?:enqueueWakeup|\.wakeup)\(/.test(line)) {
+      if (WAKE_CALL_PATTERN.test(line) && !WAKE_DEFINITION_PATTERN.test(line)) {
         ordinal += 1;
         identifiers.push(`wake:${relative}#${ordinal}`);
       }
     }
   }
   return identifiers;
+}
+
+/**
+ * Aliasing that would take future calls OUT of the matcher's sight fails the
+ * suite loudly instead of walking around the inventory (stack-review H):
+ *  - import/export renames of `enqueueWakeup`/`wakeup`;
+ *  - destructure renames (`{ wakeup: other } = …`);
+ *  - method-reference assignments (`const other = heartbeat.wakeup`).
+ */
+function findWakeAliasHazards(): string[] {
+  const hazards: string[] = [];
+  const aliasPatterns: RegExp[] = [
+    /\b(?:enqueueWakeup|wakeup)\s+as\s+\w+/,
+    /\bwakeup\s*:\s*\w+\s*[,}][^)]*\}\s*=/,
+    /=\s*[\w$.]+\.\s*wakeup\s*(?:[,;)\]]|$)/,
+    /=\s*enqueueWakeup\s*(?:[,;)\]]|$)/,
+  ];
+  for (const absolute of listSourceFiles(serverSrcRoot)) {
+    const relative = path.relative(serverSrcRoot, absolute).split(path.sep).join("/");
+    let lineNumber = 0;
+    for (const line of readFileSync(absolute, "utf8").split("\n")) {
+      lineNumber += 1;
+      const stripped = line.trim();
+      if (stripped.startsWith("//") || stripped.startsWith("*") || stripped.startsWith("/*")) continue;
+      if (WAKE_CALL_PATTERN.test(line)) continue; // direct calls are inventoried above
+      if (aliasPatterns.some((pattern) => pattern.test(line))) {
+        hazards.push(`${relative}:${lineNumber}: ${stripped.slice(0, 120)}`);
+      }
+    }
+  }
+  return hazards;
 }
 
 function readInventoryRows(prefix: string): Map<string, string> {
@@ -99,6 +146,14 @@ describe("wake call-site inventory (R2.4)", () => {
     expect(
       stale,
       "Inventory rows without a matching live call site must be removed from services/decision-freeze-inventory.md",
+    ).toEqual([]);
+  });
+
+  it("refuses wake-helper aliasing that would evade the call matcher", () => {
+    expect(
+      findWakeAliasHazards(),
+      "Renaming/aliasing enqueueWakeup or .wakeup takes future call sites out of this inventory's "
+      + "sight. Call the helper directly (any receiver is matched) instead of binding it to a new name.",
     ).toEqual([]);
   });
 

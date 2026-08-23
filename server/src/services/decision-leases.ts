@@ -1035,6 +1035,78 @@ export async function enforceDecisionFreezeKillSwitch(
   return { state: "bulk_resolved", resolvedLeaseIds };
 }
 
+/**
+ * Disposition propagation (Gemini C4): when an issue closes off a resolved
+ * decision lease, the lease's disposition maps into the issue's
+ * `resolutionDisposition` instead of the flat status default. Documented
+ * mapping (constrained to the per-status allowed sets — done ∈ {completed,
+ * superseded, failed}, cancelled ∈ {cancelled, superseded, failed}):
+ *
+ * | lease disposition        | status=done | status=cancelled |
+ * |--------------------------|-------------|------------------|
+ * | approved                 | completed   | cancelled        |
+ * | operator_override        | completed   | cancelled        |
+ * | rejected                 | failed      | failed           |
+ * | expired                  | failed      | cancelled        |
+ * | cancelled                | failed      | cancelled        |
+ * | dismissed                | superseded  | cancelled        |
+ * | stale_target             | superseded  | superseded       |
+ * | superseded_by_comment    | superseded  | superseded       |
+ *
+ * `approved`/`operator_override` carry no failure signal, so they keep the
+ * status default. A rejected decision closing as `done` is recorded `failed`
+ * (the work never got its approval); the comment/staleness dispositions mean
+ * the decision was overtaken, so the close records `superseded`.
+ */
+export function mapDecisionDispositionToResolutionDisposition(
+  disposition: string,
+  terminalStatus: "done" | "cancelled",
+): "completed" | "cancelled" | "superseded" | "failed" {
+  const statusDefault = terminalStatus === "done" ? "completed" : "cancelled";
+  switch (disposition) {
+    case "approved":
+    case "operator_override":
+      return statusDefault;
+    case "rejected":
+      return "failed";
+    case "expired":
+    case "cancelled":
+      return terminalStatus === "done" ? "failed" : "cancelled";
+    case "dismissed":
+      return terminalStatus === "done" ? "superseded" : "cancelled";
+    case "stale_target":
+    case "superseded_by_comment":
+      return "superseded";
+    default:
+      return statusDefault;
+  }
+}
+
+/**
+ * The most recently released lease anchored on this issue, if any — the
+ * decision an agent-driven terminal close is "closing off". Used only to
+ * derive a DEFAULT `resolutionDisposition`; explicit board/system values and
+ * a server acceptance-stamp disposition always win.
+ */
+export async function findLatestReleasedLeaseDispositionForAnchor(
+  dbOrTx: DbLike,
+  companyId: string,
+  anchorIssueId: string,
+): Promise<string | null> {
+  const row = await dbOrTx
+    .select({ disposition: decisionLeases.disposition })
+    .from(decisionLeases)
+    .where(and(
+      eq(decisionLeases.companyId, companyId),
+      eq(decisionLeases.anchorIssueId, anchorIssueId),
+      eq(decisionLeases.state, "released"),
+    ))
+    .orderBy(sql`${decisionLeases.releasedAt} desc nulls last`, sql`${decisionLeases.createdAt} desc`)
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  return row?.disposition ?? null;
+}
+
 function isEquivalentApprovalCreate(
   existing: typeof approvals.$inferSelect,
   input: {

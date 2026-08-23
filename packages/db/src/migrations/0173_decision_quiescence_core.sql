@@ -123,6 +123,10 @@ WHERE awr."id" = "ranked"."id"
 -- paperclip:migration-safety-ignore large-create-index-not-concurrently: partial index over the small pending-status subset; the migration runner applies migrations inside a transaction where CREATE INDEX CONCURRENTLY is not allowed
 CREATE UNIQUE INDEX IF NOT EXISTS "agent_wakeup_requests_pending_idem_uq" ON "agent_wakeup_requests" USING btree ("idempotency_key") WHERE "agent_wakeup_requests"."idempotency_key" is not null
           and "agent_wakeup_requests"."status" in ('queued', 'claimed', 'deferred_issue_execution');--> statement-breakpoint
+-- paperclip:migration-safety-ignore large-create-index-not-concurrently: partial expression index over the small pending-status subset (decision-lease drain by payload issueId); the migration runner applies migrations inside a transaction where CREATE INDEX CONCURRENTLY is not allowed
+CREATE INDEX IF NOT EXISTS "agent_wakeup_requests_pending_payload_issue_idx" ON "agent_wakeup_requests" USING btree ((("payload" ->> 'issueId'))) WHERE "agent_wakeup_requests"."status" in ('queued', 'deferred_issue_execution')
+          and "agent_wakeup_requests"."run_id" is null
+          and ("agent_wakeup_requests"."payload" ->> 'issueId') is not null;--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "notification_transitions" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "company_id" uuid NOT NULL,

@@ -9,6 +9,7 @@ import {
   companies,
   companySkills,
   createDb,
+  decisionContinuations,
   decisionLeaseMembers,
   decisionLeases,
   environmentLeases,
@@ -37,6 +38,7 @@ import {
   getActiveDecisionFreeze,
 } from "../services/decision-freeze.ts";
 import { getAutomaticRecoverySuppressionReason } from "../services/recovery/pause-hold-guard.ts";
+import { dispatchDecisionContinuations } from "../services/decision-leases.ts";
 import { recoveryService } from "../services/recovery/service.ts";
 import { HttpError } from "../errors.ts";
 import { runningProcesses } from "../adapters/index.ts";
@@ -94,6 +96,7 @@ describeEmbeddedPostgres("decision freeze guards", () => {
     runningProcesses.clear();
     for (let attempt = 0; ; attempt += 1) {
       try {
+        await db.delete(decisionContinuations);
         await db.delete(decisionLeaseMembers);
         await db.delete(decisionLeases);
         await db.delete(environmentLeases);
@@ -963,6 +966,131 @@ describeEmbeddedPostgres("decision freeze guards", () => {
       expect(keyRows).toHaveLength(1);
       expect(keyRows[0]!.id).toBe(winnerWakeupId);
       expect(keyRows[0]!.status).toBe("queued");
+    });
+  });
+
+  describe("continuation redelivery collapse (stack-review J / Gemini C5)", () => {
+    it("re-dispatch after a crash between enqueue and consume produces NO second run (pending-key unique collapses it)", async () => {
+      const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+
+      // Saturate the agent's single run slot so the winner's queued wake run
+      // stays pending for the whole test.
+      await db.insert(heartbeatRuns).values({
+        id: randomUUID(),
+        companyId,
+        agentId,
+        invocationSource: "automation",
+        triggerDetail: "system",
+        status: "running",
+        responsibleUserId: "responsible-user",
+        contextSnapshot: { taskKey: "occupied-slot" },
+        startedAt: new Date(),
+      });
+
+      // A RELEASED lease whose continuation was written but never consumed —
+      // and whose wake WAS already enqueued (the crash landed between
+      // enqueueWakeup and the consumedAt CAS).
+      const leaseId = randomUUID();
+      await db.insert(decisionLeases).values({
+        id: leaseId,
+        companyId,
+        decisionKind: "approval",
+        decisionId: randomUUID(),
+        decisionIdempotencyKey: `decision:${issueId}:redelivery:1`,
+        anchorIssueId: issueId,
+        state: "released",
+        disposition: "approved",
+        releasedAt: new Date(),
+      });
+      await db.insert(decisionContinuations).values({
+        leaseId,
+        disposition: "approved",
+        payload: {
+          wakeAgentId: agentId,
+          issueId,
+          issueIds: [issueId],
+          leaseId,
+          disposition: "approved",
+        },
+      });
+      const outboxKey = `decision:${leaseId}:approved`;
+      const winnerWakeupId = randomUUID();
+      const winnerRunId = randomUUID();
+      await db.insert(agentWakeupRequests).values({
+        id: winnerWakeupId,
+        companyId,
+        agentId,
+        source: "automation",
+        triggerDetail: "system",
+        reason: "approval_approved",
+        payload: { issueId, revalidate: true },
+        status: "queued",
+        idempotencyKey: outboxKey,
+        runId: winnerRunId,
+        requestedByActorType: "system",
+        requestedByActorId: "decision_outbox",
+      });
+      await db.insert(heartbeatRuns).values({
+        id: winnerRunId,
+        companyId,
+        agentId,
+        invocationSource: "automation",
+        triggerDetail: "system",
+        status: "queued",
+        wakeupRequestId: winnerWakeupId,
+        responsibleUserId: "responsible-user",
+        contextSnapshot: { issueId, wakeReason: "approval_approved" },
+      });
+
+      // Sweep redelivery: the dispatcher retries the unconsumed continuation.
+      // The pending-key unique collapses the wake onto the existing pending
+      // row — no second wake, no second run — and the continuation consumes.
+      const result = await dispatchDecisionContinuations(db, { enqueueWakeup: heartbeat.wakeup });
+      expect(result.scanned).toBe(1);
+      expect(result.delivered).toBe(1);
+      expect(result.failed).toBe(0);
+
+      const keyRows = await db
+        .select({ id: agentWakeupRequests.id, status: agentWakeupRequests.status, runId: agentWakeupRequests.runId })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.idempotencyKey, outboxKey));
+      // Exactly one PENDING row for the key (the original winner); the
+      // redelivery leaves at most a terminal "coalesced" marker that points
+      // at the SAME run — never a second deliverable wake.
+      const pendingKeyRows = keyRows.filter((row) =>
+        row.status === "queued" || row.status === "claimed" || row.status === "deferred_issue_execution");
+      expect(pendingKeyRows, JSON.stringify(keyRows)).toHaveLength(1);
+      expect(pendingKeyRows[0]!.id).toBe(winnerWakeupId);
+      for (const marker of keyRows.filter((row) => row.id !== winnerWakeupId)) {
+        expect(marker.status, JSON.stringify(marker)).toBe("coalesced");
+        expect(marker.runId).toBe(winnerRunId);
+      }
+
+      const runs = await db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]));
+      // Exactly the saturating run + the ORIGINAL winner run; no redelivery run.
+      expect(runs.map((run) => run.id)).toContain(winnerRunId);
+      expect(runs).toHaveLength(2);
+
+      const continuation = await db
+        .select({ consumedAt: decisionContinuations.consumedAt })
+        .from(decisionContinuations)
+        .where(eq(decisionContinuations.leaseId, leaseId))
+        .then((rows) => rows[0] ?? null);
+      expect(continuation?.consumedAt).not.toBeNull();
+
+      // A second sweep pass scans nothing (consumed).
+      const second = await dispatchDecisionContinuations(db, { enqueueWakeup: heartbeat.wakeup });
+      expect(second.scanned).toBe(0);
+
+      for (const liveRun of runs) {
+        await db
+          .update(heartbeatRuns)
+          .set({ status: "cancelled", finishedAt: new Date(), updatedAt: new Date() })
+          .where(eq(heartbeatRuns.id, liveRun.id));
+      }
     });
   });
 

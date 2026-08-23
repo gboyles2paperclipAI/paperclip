@@ -250,6 +250,105 @@ export async function listActiveDecisionFreezesForIssues(
 }
 
 /**
+ * Derive the actor type the freeze gates key on. The gate keys on ACTOR TYPE
+ * (agent → gated; board/user/system exempt). Service-layer callers that only
+ * carry actor ids use this: an explicit `actorType` wins; otherwise an
+ * attributed agent id means "agent" and an attributed user id means "user".
+ * Callers in an agent context MUST pass `actorType: "agent"` explicitly when
+ * they can omit the agent id — an absent id never downgrades a known agent
+ * context to "system" (stack-review blocker: identity-optional gates).
+ */
+export function deriveDecisionFreezeActorType(input: {
+  actorType?: string | null;
+  actorAgentId?: string | null;
+  actorUserId?: string | null;
+}): string {
+  if (typeof input.actorType === "string" && input.actorType.length > 0) return input.actorType;
+  if (input.actorAgentId) return "agent";
+  if (input.actorUserId) return "user";
+  return "system";
+}
+
+/** Bound for the parent-chain walk used by the edge-expansion gates (R2.8). */
+export const DECISION_FREEZE_ANCESTOR_WALK_MAX_DEPTH = 64;
+
+/**
+ * The issue plus its parent chain (bounded, cycle-safe, company-scoped),
+ * nearest first. Used by create/reparent gates so a parent whose ANCESTOR is
+ * inside a cone still gates/absorbs — the direct-parent-only check was the
+ * stack-review edge-expansion hole.
+ */
+export async function listIssueSelfAndAncestorIds(
+  dbOrTx: DbOrTx,
+  companyId: string,
+  issueId: string,
+  maxDepth: number = DECISION_FREEZE_ANCESTOR_WALK_MAX_DEPTH,
+): Promise<string[]> {
+  if (!isUuidLike(issueId)) return [];
+  const chain: string[] = [];
+  const seen = new Set<string>();
+  let currentId: string | null = issueId;
+  for (let depth = 0; currentId && depth < maxDepth; depth += 1) {
+    if (seen.has(currentId)) break;
+    seen.add(currentId);
+    chain.push(currentId);
+    const row: { parentId: string | null } | null = await dbOrTx
+      .select({ parentId: issues.parentId })
+      .from(issues)
+      .where(and(eq(issues.id, currentId), eq(issues.companyId, companyId)))
+      .then((rows) => (rows[0] as { parentId: string | null } | undefined) ?? null);
+    currentId = row?.parentId ?? null;
+  }
+  return chain;
+}
+
+/**
+ * Gate for `POST /issues/:id/interactions` (R2.2): an agent may NOT open a new
+ * human-gated decision on a frozen member — except when the request carries a
+ * `decisionLease` block whose idempotency key equals the decision idempotency
+ * key of EVERY lease freezing the issue (the revision-resubmit path re-posting
+ * the SAME decision). Board/user/system actors are exempt.
+ */
+export async function assertDecisionFreezeInteractionCreateAllowed(
+  dbOrTx: DbOrTx,
+  companyId: string,
+  issueId: string,
+  actor: { type: string | null | undefined; agentId?: string | null },
+  opts: { decisionIdempotencyKey?: string | null } = {},
+): Promise<void> {
+  if (actor.type !== "agent") return;
+  const freezes = await listActiveDecisionFreezesForIssues(dbOrTx, companyId, [issueId]);
+  if (freezes.length === 0) return;
+
+  const requestedKey = typeof opts.decisionIdempotencyKey === "string" && opts.decisionIdempotencyKey.length > 0
+    ? opts.decisionIdempotencyKey
+    : null;
+  if (requestedKey) {
+    const leaseIds = [...new Set(freezes.map((freeze) => freeze.leaseId))];
+    const leaseRows = await dbOrTx
+      .select({ id: decisionLeases.id, decisionIdempotencyKey: decisionLeases.decisionIdempotencyKey })
+      .from(decisionLeases)
+      .where(inArray(decisionLeases.id, leaseIds));
+    if (
+      leaseRows.length === leaseIds.length
+      && leaseRows.every((lease) => lease.decisionIdempotencyKey === requestedKey)
+    ) {
+      return;
+    }
+  }
+
+  const blocking = freezes[0]!;
+  throw unprocessable("Agents cannot open new interactions on an issue inside an active decision freeze", {
+    code: DECISION_FREEZE_ACTIVE_ERROR_CODE,
+    issueId,
+    leaseId: blocking.leaseId,
+    anchorIssueId: blocking.anchorIssueId,
+    leaseState: blocking.state,
+    fix: "Resubmit the SAME decision (matching decisionLease.idempotencyKey) or wait for the freezing decision to resolve",
+  });
+}
+
+/**
  * Operations the anchor's assignee agent may perform ON THE ANCHOR ONLY while
  * the lease is in the `revising` substate (R3.1): comment, document PUT, and
  * resubmitting the same decision. All other members stay fully gated.

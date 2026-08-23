@@ -83,10 +83,45 @@ claim-time re-check (`claim-recheck`, R3.9) and the deferred-promotion /
 retry-gate membership checks; they are not `enqueueWakeup(`/`.wakeup(` call
 sites and so are outside this grep inventory's match set.
 
+### Wake matcher scope and honest residual limits
+
+The scanner matches `enqueueWakeup(` on ANY receiver, `.wakeup(` with optional
+whitespace, bracket access (`["wakeup"](`), and bare destructured `wakeup(`
+calls. Separately, it FAILS the build on aliasing shapes that would take
+future calls out of its sight (`enqueueWakeup as x`, `{ wakeup: x } = …`,
+`const x = heartbeat.wakeup`), so a rename cannot silently evade the
+inventory — it trips the alias check instead.
+
+What the grep still cannot see, honestly stated:
+
+- a call whose name and `(` are split across lines (the per-line scan misses
+  it; no such call style exists in this tree and review should reject one);
+- an alias created through an intermediate object property and invoked under
+  a different name (`deps.go = heartbeat.wakeup; deps.go(…)`) — the alias
+  check catches the common assignment shapes, not every possible indirection;
+- classification rows assert a site EXISTS and was reviewed, not that its
+  guard behaves — behavioral proof lives in the freeze-guard and replay
+  suites, not in this table.
+
 ## Done-write classifications
 
 `issueService.update` (`server/src/services/issues.ts`) is the sanctioned
-chokepoint for terminal status writes and is excluded from the scan (R2.13).
+chokepoint for terminal status writes (R2.13). The FILE is scanned like every
+other file (its own `.set(patch)` writes carry no terminal literal); the
+scanner matches `update(issues)` AND every file-local `issues as <alias>`
+import rename, with terminal literals in any quote style (`"done"`, `'done'`,
+`` `done` ``).
+
+### Done-write matcher residual limits, honestly stated
+
+- a terminal status carried by an identifier or constant (`status: DONE`),
+  assembled in a patch object built more than 600 characters before the
+  `.set(...)`, or written through a raw `sql` template is outside this
+  matcher's sight;
+- classification rows assert a site exists and was reviewed, not that it is
+  gated — `tree-control-cancel` and `pipeline-cancel` intentionally CAN write
+  `cancelled` (contracts gate `done` only, R2.13); the behavioral guarantees
+  live in issueService.update's gates and the replay suites.
 
 - `tree-control-cancel` — `issue_tree_holds` cancel writes disposition
   `cancelled`; completion contracts gate `done` only (R2.13).
