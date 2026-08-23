@@ -68,7 +68,10 @@ import {
   recoveryAssigneeAdapterOverrides,
   withRecoveryModelProfileHint,
 } from "./model-profile-hint.js";
-import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
+import {
+  getAutomaticRecoverySuppressionReason,
+  isAutomaticRecoverySuppressed,
+} from "./pause-hold-guard.js";
 import { getActiveDecisionFreeze } from "../decision-freeze.js";
 
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
@@ -3174,7 +3177,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         continue;
       }
 
-      if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) {
+      if (await isAutomaticRecoverySuppressed(db, issue.companyId, issue.id, treeControlSvc)) {
         result.skipped += 1;
         continue;
       }
@@ -4240,7 +4243,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       .where(eq(issues.id, input.finding.issueId))
       .then((rows) => rows[0] ?? null);
     if (!issue || issue.companyId !== input.finding.companyId) return { kind: "skipped" as const };
-    if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) {
+    if (await isAutomaticRecoverySuppressed(db, issue.companyId, issue.id, treeControlSvc)) {
       return { kind: "skipped" as const };
     }
 
@@ -4405,6 +4408,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       livePathSkipped: 0,
       interactionSkipped: 0,
       pauseHoldSkipped: 0,
+      decisionFreezeSkipped: 0,
       notReadySkipped: 0,
       candidateLimitSkipped: 0,
       deferredOrFailed: 0,
@@ -4555,8 +4559,18 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           continue;
         }
 
-        if (await isAutomaticRecoverySuppressedByPauseHold(db, companyId, candidate.id, treeControlSvc)) {
-          result.pauseHoldSkipped += 1;
+        const recoverySuppressionReason = await getAutomaticRecoverySuppressionReason(
+          db,
+          companyId,
+          candidate.id,
+          treeControlSvc,
+        );
+        if (recoverySuppressionReason) {
+          if (recoverySuppressionReason === "decision_freeze") {
+            result.decisionFreezeSkipped += 1;
+          } else {
+            result.pauseHoldSkipped += 1;
+          }
           continue;
         }
 
@@ -4688,6 +4702,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       dependencyWakeLivePathSkipped: 0,
       dependencyWakeInteractionSkipped: 0,
       dependencyWakePauseHoldSkipped: 0,
+      dependencyWakeDecisionFreezeSkipped: 0,
       dependencyWakeNotReadySkipped: 0,
       dependencyWakeCandidateLimitSkipped: 0,
       dependencyWakeDeferredOrFailed: 0,
@@ -4707,6 +4722,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     result.dependencyWakeLivePathSkipped = dependencyWakeBackstop.livePathSkipped;
     result.dependencyWakeInteractionSkipped = dependencyWakeBackstop.interactionSkipped;
     result.dependencyWakePauseHoldSkipped = dependencyWakeBackstop.pauseHoldSkipped;
+    result.dependencyWakeDecisionFreezeSkipped = dependencyWakeBackstop.decisionFreezeSkipped;
     result.dependencyWakeNotReadySkipped = dependencyWakeBackstop.notReadySkipped;
     result.dependencyWakeCandidateLimitSkipped = dependencyWakeBackstop.candidateLimitSkipped;
     result.dependencyWakeDeferredOrFailed = dependencyWakeBackstop.deferredOrFailed;

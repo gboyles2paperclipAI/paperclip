@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -30,11 +30,12 @@ import {
 } from "../services/heartbeat.ts";
 import {
   DECISION_FREEZE_ACTIVE_ERROR_CODE,
+  DECISION_FREEZE_BYPASS_CONTEXT_KEY,
   assertNotDecisionFrozen,
   evaluateDecisionFreezeWakeBypass,
   getActiveDecisionFreeze,
 } from "../services/decision-freeze.ts";
-import { isAutomaticRecoverySuppressedByPauseHold } from "../services/recovery/pause-hold-guard.ts";
+import { getAutomaticRecoverySuppressionReason } from "../services/recovery/pause-hold-guard.ts";
 import { recoveryService } from "../services/recovery/service.ts";
 import { HttpError } from "../errors.ts";
 import { runningProcesses } from "../adapters/index.ts";
@@ -185,7 +186,12 @@ describeEmbeddedPostgres("decision freeze guards", () => {
     return leaseId;
   }
 
-  function assignmentWake(agentId: string, issueId: string, contextExtras: Record<string, unknown> = {}) {
+  function assignmentWake(
+    agentId: string,
+    issueId: string,
+    contextExtras: Record<string, unknown> = {},
+    wakeOpts: Partial<Parameters<typeof heartbeat.wakeup>[1]> = {},
+  ) {
     return heartbeat.wakeup(agentId, {
       source: "assignment",
       triggerDetail: "system",
@@ -194,6 +200,7 @@ describeEmbeddedPostgres("decision freeze guards", () => {
       contextSnapshot: { issueId, wakeReason: "issue_assigned", ...contextExtras },
       requestedByActorType: "system",
       requestedByActorId: "test",
+      ...wakeOpts,
     });
   }
 
@@ -275,11 +282,26 @@ describeEmbeddedPostgres("decision freeze guards", () => {
       const { companyId, issueId } = await seedCompanyAgentIssue();
       expect(await getActiveDecisionFreeze(db, companyId, issueId)).toBeNull();
       expect(await getActiveDecisionFreeze(db, companyId, "ENV-13")).toBeNull();
-      expect(await isAutomaticRecoverySuppressedByPauseHold(db, companyId, issueId)).toBe(false);
+      expect(await getAutomaticRecoverySuppressionReason(db, companyId, issueId)).toBeNull();
     });
 
     it("issue-bound wake, claim, and retry promotion behave exactly as today", async () => {
       const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+
+      // Slow the adapter down enough to observe the claim-time stamp while
+      // the run is live.
+      mockAdapterExecute.mockImplementationOnce(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          errorMessage: null,
+          summary: "Decision freeze guard test run.",
+          provider: "test",
+          model: "test-model",
+        };
+      });
 
       const wake = await assignmentWake(agentId, issueId);
       expect(wake).not.toBeNull();
@@ -288,14 +310,25 @@ describeEmbeddedPostgres("decision freeze guards", () => {
       expect(latest?.reason).not.toBe(DECISION_FREEZE_ACTIVE_ERROR_CODE);
 
       // Let the queued run claim + execute; the claim stamp transaction must
-      // admit and stamp exactly as before (no freeze cancellation artifacts).
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        const run = await getRunRow(wake!.id);
+      // admit and stamp exactly as before (no freeze cancellation artifacts),
+      // and the run must actually complete successfully.
+      let stampedDuringRun = false;
+      for (let attempt = 0; attempt < 400; attempt += 1) {
+        const [run, issueRow] = await Promise.all([
+          getRunRow(wake!.id),
+          db
+            .select({ executionRunId: issues.executionRunId })
+            .from(issues)
+            .where(eq(issues.id, issueId))
+            .then((rows) => rows[0] ?? null),
+        ]);
+        if (issueRow?.executionRunId === wake!.id) stampedDuringRun = true;
         if (run && run.status !== "queued" && run.status !== "running") break;
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 25));
       }
+      expect(stampedDuringRun).toBe(true);
       const settledRun = await getRunRow(wake!.id);
-      expect(settledRun?.status).not.toBe("cancelled");
+      expect(settledRun?.status).toBe("succeeded");
       const freezeActivity = await db
         .select({ id: activityLog.id, action: activityLog.action })
         .from(activityLog)
@@ -359,6 +392,7 @@ describeEmbeddedPostgres("decision freeze guards", () => {
       const run = await getRunRow(runId);
       expect(run?.status).toBe("cancelled");
       expect(run?.error).toContain("decision freeze");
+      expect(run?.errorCode).toBe("issue_decision_frozen");
 
       const issue = await db
         .select({ executionRunId: issues.executionRunId })
@@ -466,7 +500,7 @@ describeEmbeddedPostgres("decision freeze guards", () => {
       });
       await seedLease({ companyId, anchorIssueId: issueId, memberIssueIds: [issueId] });
 
-      expect(await isAutomaticRecoverySuppressedByPauseHold(db, companyId, issueId)).toBe(true);
+      expect(await getAutomaticRecoverySuppressionReason(db, companyId, issueId)).toBe("decision_freeze");
 
       const recoveryWake = vi.fn();
       const recovery = recoveryService(db, { enqueueWakeup: recoveryWake });
@@ -482,28 +516,55 @@ describeEmbeddedPostgres("decision freeze guards", () => {
     });
   });
 
-  describe("bypass flags (R3.1)", () => {
-    it("decisionContinuation always passes the wake guard", async () => {
+  describe("bypass option (R3.1, internal only)", () => {
+    it("snapshot-stuffed flags never pierce a freeze", async () => {
       const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
       await seedLease({ companyId, anchorIssueId: issueId, memberIssueIds: [issueId] });
 
-      const wake = await assignmentWake(agentId, issueId, { decisionContinuation: true });
+      // Legacy flags AND the server-side marker key stuffed straight into the
+      // caller-provided snapshot must all be inert.
+      const wake = await assignmentWake(agentId, issueId, {
+        decisionContinuation: true,
+        decisionRevisionWake: true,
+        [DECISION_FREEZE_BYPASS_CONTEXT_KEY]: "continuation",
+      });
+      expect(wake).toBeNull();
+      const latest = await latestWakeRequest(agentId);
+      expect(latest?.status).toBe("skipped");
+      expect(latest?.reason).toBe(DECISION_FREEZE_ACTIVE_ERROR_CODE);
+    });
+
+    it("the internal continuation option passes the wake guard and stamps the server marker", async () => {
+      const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+      await seedLease({ companyId, anchorIssueId: issueId, memberIssueIds: [issueId] });
+
+      const wake = await assignmentWake(agentId, issueId, {}, {
+        decisionFreezeBypass: { kind: "continuation" },
+      });
       expect(wake).not.toBeNull();
       const latest = await latestWakeRequest(agentId);
       expect(latest?.reason).not.toBe(DECISION_FREEZE_ACTIVE_ERROR_CODE);
+
+      // The accepted kind is persisted server-side so claim-time honors it.
+      const run = await getRunRow(wake!.id);
+      expect(
+        (run?.contextSnapshot as Record<string, unknown>)?.[DECISION_FREEZE_BYPASS_CONTEXT_KEY],
+      ).toBe("continuation");
     });
 
-    it("decisionRevisionWake passes only while revising and only for the anchor assignee", async () => {
+    it("the internal revision option passes only while revising and only for the anchor assignee", async () => {
       const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
 
-      // Active (non-revising) lease: revision flag does NOT bypass.
+      // Active (non-revising) lease: revision intent does NOT bypass.
       const activeLeaseId = await seedLease({
         companyId,
         anchorIssueId: issueId,
         memberIssueIds: [issueId],
         state: "active",
       });
-      const refusedWhileActive = await assignmentWake(agentId, issueId, { decisionRevisionWake: true });
+      const refusedWhileActive = await assignmentWake(agentId, issueId, {}, {
+        decisionFreezeBypass: { kind: "revision" },
+      });
       expect(refusedWhileActive).toBeNull();
       expect((await latestWakeRequest(agentId))?.reason).toBe(DECISION_FREEZE_ACTIVE_ERROR_CODE);
 
@@ -512,10 +573,13 @@ describeEmbeddedPostgres("decision freeze guards", () => {
         .update(decisionLeases)
         .set({ state: "revising" })
         .where(eq(decisionLeases.id, activeLeaseId));
-      const admitted = await assignmentWake(agentId, issueId, { decisionRevisionWake: true });
+      const admitted = await assignmentWake(agentId, issueId, {}, {
+        decisionFreezeBypass: { kind: "revision" },
+      });
       expect(admitted).not.toBeNull();
 
-      // A different agent (not the anchor assignee) stays gated even while revising.
+      // A different agent (not the anchor assignee) stays gated even while
+      // revising, even with the internal option set.
       const otherAgentId = randomUUID();
       await db.insert(agents).values({
         id: otherAgentId,
@@ -528,7 +592,9 @@ describeEmbeddedPostgres("decision freeze guards", () => {
         runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
         permissions: {},
       });
-      const refusedOtherAgent = await assignmentWake(otherAgentId, issueId, { decisionRevisionWake: true });
+      const refusedOtherAgent = await assignmentWake(otherAgentId, issueId, {}, {
+        decisionFreezeBypass: { kind: "revision" },
+      });
       expect(refusedOtherAgent).toBeNull();
       expect((await latestWakeRequest(otherAgentId))?.reason).toBe(DECISION_FREEZE_ACTIVE_ERROR_CODE);
     });
@@ -546,25 +612,25 @@ describeEmbeddedPostgres("decision freeze guards", () => {
 
       expect(
         await evaluateDecisionFreezeWakeBypass(db, companyId, freeze!, {
-          contextSnapshot: { decisionContinuation: true },
+          bypass: { kind: "continuation" },
           agentId: null,
         }),
       ).toBe(true);
       expect(
         await evaluateDecisionFreezeWakeBypass(db, companyId, freeze!, {
-          contextSnapshot: { decisionRevisionWake: true },
+          bypass: { kind: "revision" },
           agentId,
         }),
       ).toBe(true);
       expect(
         await evaluateDecisionFreezeWakeBypass(db, companyId, freeze!, {
-          contextSnapshot: { decisionRevisionWake: true },
+          bypass: { kind: "revision" },
           agentId: randomUUID(),
         }),
       ).toBe(false);
       expect(
         await evaluateDecisionFreezeWakeBypass(db, companyId, freeze!, {
-          contextSnapshot: {},
+          bypass: null,
           agentId,
         }),
       ).toBe(false);
@@ -573,9 +639,167 @@ describeEmbeddedPostgres("decision freeze guards", () => {
           db,
           companyId,
           { ...freeze!, state: "active" },
-          { contextSnapshot: { decisionRevisionWake: true }, agentId },
+          { bypass: { kind: "revision" }, agentId },
         ),
       ).toBe(false);
+    });
+  });
+
+  describe("pending idempotency unique (0173)", () => {
+    it("a keyed enqueue reuses an existing pending row for the same key instead of throwing", async () => {
+      const { companyId, agentId } = await seedCompanyAgentIssue();
+
+      // A different agent already owns a pending keyed wake with a queued run.
+      const otherAgentId = randomUUID();
+      await db.insert(agents).values({
+        id: otherAgentId,
+        companyId,
+        name: "KeyOwner",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+        permissions: {},
+      });
+      // Occupy the owner's run slot so its queued winner run cannot claim
+      // (and leave the pending set) mid-test.
+      await db.insert(heartbeatRuns).values({
+        id: randomUUID(),
+        companyId,
+        agentId: otherAgentId,
+        invocationSource: "automation",
+        triggerDetail: "system",
+        status: "running",
+        responsibleUserId: "responsible-user",
+        contextSnapshot: { taskKey: "owner-busy" },
+        startedAt: new Date(),
+      });
+      const idempotencyKey = `pending-idem-${randomUUID()}`;
+      const winnerWakeupId = randomUUID();
+      const winnerRunId = randomUUID();
+      await db.insert(agentWakeupRequests).values({
+        id: winnerWakeupId,
+        companyId,
+        agentId: otherAgentId,
+        source: "automation",
+        triggerDetail: "system",
+        reason: "monitor_check",
+        status: "queued",
+        idempotencyKey,
+        runId: winnerRunId,
+        requestedByActorType: "system",
+        requestedByActorId: "test",
+      });
+      await db.insert(heartbeatRuns).values({
+        id: winnerRunId,
+        companyId,
+        agentId: otherAgentId,
+        invocationSource: "automation",
+        triggerDetail: "system",
+        status: "queued",
+        wakeupRequestId: winnerWakeupId,
+        responsibleUserId: "responsible-user",
+        contextSnapshot: { taskKey: "winner-scope" },
+      });
+
+      // Pre-0173-recovery code did a raw INSERT here and threw 23505; the
+      // enqueue must instead reuse the winning pending row's run.
+      const result = await heartbeat.wakeup(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "monitor_check",
+        idempotencyKey,
+        contextSnapshot: { taskKey: "keyed-scope" },
+        requestedByActorType: "system",
+        requestedByActorId: "test",
+      });
+      expect(result).not.toBeNull();
+      expect(result!.id).toBe(winnerRunId);
+
+      const pendingRows = await db
+        .select({ id: agentWakeupRequests.id })
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
+            inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution"]),
+          ),
+        );
+      expect(pendingRows).toHaveLength(1);
+      expect(pendingRows[0]!.id).toBe(winnerWakeupId);
+
+      const liveRuns = await db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]));
+      for (const liveRun of liveRuns) {
+        await db
+          .update(heartbeatRuns)
+          .set({ status: "cancelled", finishedAt: new Date(), updatedAt: new Date() })
+          .where(eq(heartbeatRuns.id, liveRun.id));
+      }
+    });
+
+    it("two concurrent keyed enqueues coalesce onto one pending row without throwing", async () => {
+      const { companyId, agentId } = await seedCompanyAgentIssue();
+
+      // Saturate the agent's single run slot so the winning keyed wake stays
+      // queued (pending) instead of racing to a terminal status.
+      await db.insert(heartbeatRuns).values({
+        id: randomUUID(),
+        companyId,
+        agentId,
+        invocationSource: "automation",
+        triggerDetail: "system",
+        status: "running",
+        responsibleUserId: "responsible-user",
+        contextSnapshot: { taskKey: "occupied-slot" },
+        startedAt: new Date(),
+      });
+
+      const idempotencyKey = `pending-idem-${randomUUID()}`;
+      const keyedWake = () =>
+        heartbeat.wakeup(agentId, {
+          source: "automation",
+          triggerDetail: "system",
+          reason: "monitor_check",
+          idempotencyKey,
+          contextSnapshot: { taskKey: "keyed-scope" },
+          requestedByActorType: "system",
+          requestedByActorId: "test",
+        });
+
+      // Neither call may throw (pre-0173 both inserted; the partial unique
+      // must now coalesce, not 500).
+      const [first, second] = await Promise.all([keyedWake(), keyedWake()]);
+      expect(first).not.toBeNull();
+      expect(second).not.toBeNull();
+      expect(second!.id).toBe(first!.id);
+
+      const pendingRows = await db
+        .select({ id: agentWakeupRequests.id, status: agentWakeupRequests.status })
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
+            inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution"]),
+          ),
+        );
+      expect(pendingRows).toHaveLength(1);
+
+      // Cancel everything so teardown does not wait on the fake running run
+      // or the parked queued run.
+      const liveRuns = await db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]));
+      for (const liveRun of liveRuns) {
+        await db
+          .update(heartbeatRuns)
+          .set({ status: "cancelled", finishedAt: new Date(), updatedAt: new Date() })
+          .where(eq(heartbeatRuns.id, liveRun.id));
+      }
     });
   });
 

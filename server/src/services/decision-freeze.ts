@@ -92,23 +92,48 @@ export function decisionFreezeExclusionSql(issueIdExpr: SQLWrapper): SQL {
 }
 
 /**
- * Context bypass flags recognized by the wake guard (R3.1):
- * - `decisionContinuation: true` — outbox continuation delivery, always passes.
- * - `decisionRevisionWake: true` — passes only while the lease state is
- *   `revising` AND the wake target is the anchor issue's assignee agent.
+ * Internal freeze-bypass intent (R3.1). This is an explicit server-side option
+ * on `enqueueWakeup` — it is NEVER read from a caller-supplied
+ * `contextSnapshot`, so snapshot-stuffed JSON (routes, plugins, copied
+ * payloads) cannot pierce a freeze:
+ * - `kind: "continuation"` — outbox continuation delivery, always passes.
+ * - `kind: "revision"` — passes only while the lease state is `revising` AND
+ *   the wake target is the anchor issue's assignee agent.
  */
+export type DecisionFreezeWakeBypass = {
+  kind: "continuation" | "revision";
+};
+
+/**
+ * Context key under which enqueueWakeup persists an ACCEPTED bypass kind so
+ * claim-time / promotion-time re-checks can honor it. enqueueWakeup strips
+ * this key from every caller-provided snapshot before stamping it, so its
+ * presence in a run's contextSnapshot always means the server validated the
+ * internal option — it can never originate from external JSON.
+ */
+export const DECISION_FREEZE_BYPASS_CONTEXT_KEY = "decisionFreezeBypassAccepted";
+
+/** Parse the server-stamped bypass marker from a run/deferred context snapshot. */
+export function readAcceptedDecisionFreezeBypass(
+  contextSnapshot: Record<string, unknown> | null | undefined,
+): DecisionFreezeWakeBypass | null {
+  const value = contextSnapshot?.[DECISION_FREEZE_BYPASS_CONTEXT_KEY];
+  if (value === "continuation" || value === "revision") return { kind: value };
+  return null;
+}
+
 export async function evaluateDecisionFreezeWakeBypass(
   dbOrTx: DbOrTx,
   companyId: string,
   freeze: ActiveDecisionFreeze,
   input: {
-    contextSnapshot: Record<string, unknown> | null | undefined;
+    bypass: DecisionFreezeWakeBypass | null | undefined;
     agentId?: string | null;
   },
 ): Promise<boolean> {
-  const contextSnapshot = input.contextSnapshot ?? {};
-  if (contextSnapshot.decisionContinuation === true) return true;
-  if (contextSnapshot.decisionRevisionWake !== true) return false;
+  const kind = input.bypass?.kind;
+  if (kind === "continuation") return true;
+  if (kind !== "revision") return false;
   if (freeze.state !== "revising") return false;
   const agentId = typeof input.agentId === "string" && input.agentId.length > 0 ? input.agentId : null;
   if (!agentId) return false;

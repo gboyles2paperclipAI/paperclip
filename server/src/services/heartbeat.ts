@@ -201,12 +201,17 @@ import {
   SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY,
   readContinuationAttempt,
 } from "./recovery/index.js";
-import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-guard.js";
+import { isAutomaticRecoverySuppressed } from "./recovery/pause-hold-guard.js";
 import {
   DECISION_FREEZE_ACTIVE_ERROR_CODE,
+  DECISION_FREEZE_BYPASS_CONTEXT_KEY,
+  ISSUE_DECISION_FROZEN_ERROR_CODE,
+  type ActiveDecisionFreeze,
+  type DecisionFreezeWakeBypass,
   decisionFreezeExclusionSql,
   evaluateDecisionFreezeWakeBypass,
   getActiveDecisionFreeze,
+  readAcceptedDecisionFreezeBypass,
 } from "./decision-freeze.js";
 import {
   recoveryAssigneeAdapterOverrides,
@@ -332,6 +337,23 @@ const execFile = promisify(execFileCallback);
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const CANCELLABLE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const HEARTBEAT_RUN_TERMINAL_STATUSES = ["succeeded", "interrupted", "failed", "cancelled", "timed_out"] as const;
+
+/**
+ * Thrown inside a retry-enqueue transaction when the freeze-conditional
+ * executionRunId stamp matched zero rows because the issue became a member of
+ * an active decision-freeze cone after the pre-check (R2.3c). Rolls back the
+ * whole retry enqueue; callers convert it into the same suppression shape as
+ * the pre-check path.
+ */
+class DecisionFreezeStampConflictError extends Error {
+  readonly freeze: ActiveDecisionFreeze;
+
+  constructor(freeze: ActiveDecisionFreeze) {
+    super("Issue became a decision-freeze member before the execution stamp");
+    this.name = "DecisionFreezeStampConflictError";
+    this.freeze = freeze;
+  }
+}
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["failed", "cancelled", "timed_out"] as const;
 const TIMER_ACTIONABLE_ISSUE_STATUSES = ["todo", "in_progress"] as const;
 export {
@@ -2315,6 +2337,14 @@ interface WakeupOptions {
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   contextSnapshot?: Record<string, unknown>;
+  /**
+   * INTERNAL ONLY (R3.1): decision-freeze bypass intent for continuation /
+   * revision delivery. Must be set explicitly by server-side callers (the
+   * continuation outbox); it is never derived from request payloads or
+   * contextSnapshot JSON, and enqueueWakeup strips the persisted marker key
+   * from caller-provided snapshots before stamping the validated option.
+   */
+  decisionFreezeBypass?: DecisionFreezeWakeBypass | null;
 }
 
 type UsageTotals = {
@@ -8678,7 +8708,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         })
         .where(eq(agentWakeupRequests.id, wakeupRequest.id));
 
-      await tx
+      // R2.3c: the stamp statement re-verifies freeze membership itself; the
+      // pre-check above ran outside this transaction and a lease can commit
+      // in between.
+      const stamped = await tx
         .update(issues)
         .set({
           executionRunId: queuedRun.id,
@@ -8686,7 +8719,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           executionLockedAt: now,
           updatedAt: now,
         })
-        .where(eq(issues.id, issue.id));
+        .where(and(eq(issues.id, issue.id), decisionFreezeExclusionSql(issues.id)))
+        .returning({ id: issues.id });
+      if (stamped.length === 0) {
+        // The issue row is locked FOR UPDATE in this transaction, so zero rows
+        // means the freeze exclusion blocked the stamp: roll back the retry
+        // enqueue instead of queueing a run into a frozen cone.
+        const lateFreeze = await getActiveDecisionFreeze(tx, run.companyId, issue.id);
+        if (lateFreeze) throw new DecisionFreezeStampConflictError(lateFreeze);
+        // Freeze released between the two statements: stamp normally.
+        await tx
+          .update(issues)
+          .set({
+            executionRunId: queuedRun.id,
+            executionAgentNameKey: normalizeAgentNameKey(agent.name),
+            executionLockedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(issues.id, issue.id));
+      }
 
       await tx
         .update(heartbeatRuns)
@@ -8698,6 +8749,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .where(eq(heartbeatRuns.id, run.id));
 
       return queuedRun;
+    }).catch(async (error: unknown) => {
+      if (error instanceof DecisionFreezeStampConflictError) {
+        await appendRunEvent(run, await nextRunEventSeq(run.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "warn",
+          message: "Missing-comment retry suppressed because the issue is inside an active decision freeze",
+          payload: {
+            issueId,
+            leaseId: error.freeze.leaseId,
+            anchorIssueId: error.freeze.anchorIssueId,
+          },
+        });
+        return null;
+      }
+      throw error;
     });
 
     if (!retryRun) return null;
@@ -8944,7 +9011,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .where(eq(agentWakeupRequests.id, wakeupRequest.id));
 
       if (issueId) {
-        await tx
+        // R2.3c: the stamp statement re-verifies freeze membership itself;
+        // the pre-check above ran outside this transaction.
+        const stamped = await tx
           .update(issues)
           .set({
             checkoutRunId: null,
@@ -8953,11 +9022,53 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             executionLockedAt: now,
             updatedAt: now,
           })
-          .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId), eq(issues.executionRunId, run.id)));
+          .where(
+            and(
+              eq(issues.id, issueId),
+              eq(issues.companyId, run.companyId),
+              eq(issues.executionRunId, run.id),
+              decisionFreezeExclusionSql(issues.id),
+            ),
+          )
+          .returning({ id: issues.id });
+        if (stamped.length === 0) {
+          // Zero rows is benign when the lock moved off this run; only a
+          // freeze that blocked an otherwise-matching stamp cancels the retry.
+          const lateFreeze = await getActiveDecisionFreeze(tx, run.companyId, issueId);
+          if (lateFreeze) {
+            const lockHolder = await tx
+              .select({ executionRunId: issues.executionRunId })
+              .from(issues)
+              .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
+              .then((rows) => rows[0] ?? null);
+            if (lockHolder?.executionRunId === run.id) {
+              throw new DecisionFreezeStampConflictError(lateFreeze);
+            }
+          }
+        }
       }
 
       return retryRun;
+    }).catch(async (error: unknown) => {
+      if (error instanceof DecisionFreezeStampConflictError) {
+        await appendRunEvent(run, await nextRunEventSeq(run.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "warn",
+          message: "Process-loss retry suppressed because the issue is inside an active decision freeze",
+          payload: {
+            issueId,
+            leaseId: error.freeze.leaseId,
+            anchorIssueId: error.freeze.anchorIssueId,
+          },
+        });
+        await releaseIssueExecutionAndPromote(run);
+        return null;
+      }
+      throw error;
     });
+
+    if (!queued) return null;
 
     publishLiveEvent({
       companyId: queued.companyId,
@@ -9099,7 +9210,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           | "issue_review_participant_changed"
           | "issue_paused"
           | "issue_decision_frozen"
-          | "issue_dependencies_blocked";
+          | "issue_dependencies_blocked"
+          | "wake_idempotency_conflict";
         issueId: string | null;
         details: Record<string, unknown>;
       };
@@ -9865,36 +9977,57 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
       }
 
-      const wakeupRequest = await tx
-        .insert(agentWakeupRequests)
-        .values({
-          companyId: run.companyId,
-          agentId: run.agentId,
-          source: "automation",
-          triggerDetail: "system",
-          reason: wakeReason,
-          payload: withRecoveryModelProfileHint({
-            ...(issueId ? { issueId } : {}),
-            retryOfRunId: run.id,
-            ...interactionContinuationPayload,
-            retryReason,
-            ...(transientRecovery ? { errorFamily: transientRecovery.errorFamily } : {}),
-            scheduledRetryAttempt: schedule.attempt,
-            scheduledRetryAt: schedule.dueAt.toISOString(),
-            ...(transientRetryNotBefore ? { transientRetryNotBefore: transientRetryNotBefore.toISOString() } : {}),
-            ...(transientRecovery?.errorFamily === "provider_quota" && transientRetryNotBefore
-              ? { providerQuotaRetryNotBefore: transientRetryNotBefore.toISOString() }
-              : {}),
-            ...(codexTransientFallbackMode ? { codexTransientFallbackMode } : {}),
-          }, "normal_model"),
-          status: "queued",
-          requestedByActorType: "system",
-          requestedByActorId: null,
-          idempotencyKey: continuationRetryIdempotencyKey,
-          updatedAt: now,
-        })
-        .returning()
-        .then((rows) => rows[0]);
+      const { row: wakeupRequest, inserted: wakeupInserted } = await insertPendingWakeupRequest(tx, {
+        companyId: run.companyId,
+        agentId: run.agentId,
+        source: "automation",
+        triggerDetail: "system",
+        reason: wakeReason,
+        payload: withRecoveryModelProfileHint({
+          ...(issueId ? { issueId } : {}),
+          retryOfRunId: run.id,
+          ...interactionContinuationPayload,
+          retryReason,
+          ...(transientRecovery ? { errorFamily: transientRecovery.errorFamily } : {}),
+          scheduledRetryAttempt: schedule.attempt,
+          scheduledRetryAt: schedule.dueAt.toISOString(),
+          ...(transientRetryNotBefore ? { transientRetryNotBefore: transientRetryNotBefore.toISOString() } : {}),
+          ...(transientRecovery?.errorFamily === "provider_quota" && transientRetryNotBefore
+            ? { providerQuotaRetryNotBefore: transientRetryNotBefore.toISOString() }
+            : {}),
+          ...(codexTransientFallbackMode ? { codexTransientFallbackMode } : {}),
+        }, "normal_model"),
+        status: "queued",
+        requestedByActorType: "system",
+        requestedByActorId: null,
+        idempotencyKey: continuationRetryIdempotencyKey,
+        updatedAt: now,
+      });
+      if (!wakeupInserted) {
+        // A pending wake for this continuation key already exists (0173
+        // pending-idempotency unique): reuse its run instead of throwing.
+        const winnerRun = wakeupRequest.runId
+          ? await tx
+            .select()
+            .from(heartbeatRuns)
+            .where(eq(heartbeatRuns.id, wakeupRequest.runId))
+            .then((rows) => rows[0] ?? null)
+          : null;
+        if (winnerRun) {
+          return {
+            outcome: "scheduled",
+            run: winnerRun,
+            reusedExisting: true,
+          };
+        }
+        return {
+          outcome: "not_scheduled",
+          reason: "Scheduled retry suppressed because a pending wake with the same idempotency key already exists",
+          errorCode: "wake_idempotency_conflict",
+          issueId: issueId ?? null,
+          details: { idempotencyKey: continuationRetryIdempotencyKey },
+        };
+      }
 
       const scheduledRun = await tx
         .insert(heartbeatRuns)
@@ -10920,18 +11053,26 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       // R3.9: the decision-freeze membership re-check and the executionRunId
       // stamp commit in ONE transaction, closing the check-then-stamp race
       // (R2.3c). Frozen without a bypass flag → zero stamp, cancel the run.
-      const claimDecisionFreeze = await db.transaction(async (tx) => {
+      const claimDecisionFreezeBypass = readAcceptedDecisionFreezeBypass(claimedContext);
+      const claimDecisionFreeze = await db.transaction(async (tx): Promise<ActiveDecisionFreeze | null> => {
         const activeDecisionFreeze = await getActiveDecisionFreeze(tx, claimed.companyId, claimedIssueId);
+        let bypassAccepted = false;
         if (activeDecisionFreeze) {
-          const decisionFreezeBypassWake = await evaluateDecisionFreezeWakeBypass(
+          bypassAccepted = await evaluateDecisionFreezeWakeBypass(
             tx,
             claimed.companyId,
             activeDecisionFreeze,
-            { contextSnapshot: claimedContext, agentId: claimed.agentId },
+            { bypass: claimDecisionFreezeBypass, agentId: claimed.agentId },
           );
-          if (!decisionFreezeBypassWake) return activeDecisionFreeze;
+          if (!bypassAccepted) return activeDecisionFreeze;
         }
-        await tx
+        // R2.3c / R3.9: the stamp statement itself re-verifies freeze
+        // membership (`AND NOT EXISTS` over active/revising lease members),
+        // so a lease committed between the SELECT above and this UPDATE can
+        // never be stamped over. When the bypass was accepted the exclusion
+        // is intentionally omitted — the delivery is allowed to hold the lock
+        // inside the frozen cone.
+        const stamped = await tx
           .update(issues)
           .set({
             executionRunId: claimed.id,
@@ -10947,12 +11088,31 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               // owns the issue execution lock shown as the active run.
               eq(issues.assigneeAgentId, claimed.agentId),
               or(isNull(issues.executionRunId), eq(issues.executionRunId, claimed.id)),
+              ...(bypassAccepted ? [] : [decisionFreezeExclusionSql(issues.id)]),
             ),
-          );
+          )
+          .returning({ id: issues.id });
+        if (stamped.length === 0 && !bypassAccepted) {
+          // Zero rows is usually benign (non-assignee mention run, or the lock
+          // is held by another run). Only a freeze that appeared after the
+          // membership SELECT turns it into the cancel path.
+          const lateFreeze = await getActiveDecisionFreeze(tx, claimed.companyId, claimedIssueId);
+          if (lateFreeze) {
+            const lateBypassAccepted = await evaluateDecisionFreezeWakeBypass(
+              tx,
+              claimed.companyId,
+              lateFreeze,
+              { bypass: claimDecisionFreezeBypass, agentId: claimed.agentId },
+            );
+            if (!lateBypassAccepted) return lateFreeze;
+          }
+        }
         return null;
       });
       if (claimDecisionFreeze) {
-        await cancelRunInternal(claimed.id, "Cancelled because issue is inside an active decision freeze");
+        await cancelRunInternal(claimed.id, "Cancelled because issue is inside an active decision freeze", {
+          errorCode: ISSUE_DECISION_FROZEN_ERROR_CODE,
+        });
         await logActivity(db, {
           companyId: claimed.companyId,
           actorType: "system",
@@ -14892,14 +15052,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
 
         // Decision-freeze membership gate (R2.1): separate boolean from the
-        // pause-hold gate above; only the R3.1 context bypass flags pass.
+        // pause-hold gate above; only a server-stamped R3.1 bypass marker
+        // (written by enqueueWakeup after validating the internal option)
+        // passes — stuffed snapshot flags are inert.
         const activeDecisionFreeze = await getActiveDecisionFreeze(tx, issue.companyId, issue.id);
         if (activeDecisionFreeze) {
           const decisionFreezeBypassWake = await evaluateDecisionFreezeWakeBypass(
             tx,
             issue.companyId,
             activeDecisionFreeze,
-            { contextSnapshot: deferredContextSeed, agentId: deferred.agentId },
+            { bypass: readAcceptedDecisionFreezeBypass(deferredContextSeed), agentId: deferred.agentId },
           );
           if (!decisionFreezeBypassWake) {
             await tx
@@ -15152,7 +15314,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           options.suppressImmediateRecovery ||
           existingReviewParticipantExecutionPath ||
           issueHasPersistedMonitor ||
-          await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)
+          await isAutomaticRecoverySuppressed(db, issue.companyId, issue.id, treeControlSvc)
         ) {
           return { kind: "released" as const };
         }
@@ -15279,7 +15441,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         return { kind: "released" as const };
       }
 
-      if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) {
+      if (await isAutomaticRecoverySuppressed(db, issue.companyId, issue.id, treeControlSvc)) {
         return { kind: "released" as const };
       }
 
@@ -15527,6 +15689,55 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     await startNextQueuedRuns();
   }
 
+  /**
+   * Insert a pending-status wakeup row, absorbing the 0173 partial unique
+   * `agent_wakeup_requests_pending_idem_uq` (idempotency_key over statuses
+   * queued/claimed/deferred_issue_execution). Drizzle cannot name a
+   * partial-index conflict target, so a bare onConflictDoNothing() is used;
+   * on conflict the winning pending row is fetched and returned so callers
+   * coalesce onto it instead of throwing a 23505 out of the wake transaction.
+   */
+  async function insertPendingWakeupRequest(
+    executor: Pick<Db, "insert" | "select">,
+    values: typeof agentWakeupRequests.$inferInsert,
+  ): Promise<{ row: typeof agentWakeupRequests.$inferSelect; inserted: boolean }> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const insertedRow = await executor
+        .insert(agentWakeupRequests)
+        .values(values)
+        .onConflictDoNothing()
+        .returning()
+        .then((rows) => rows[0] ?? null);
+      if (insertedRow) return { row: insertedRow, inserted: true };
+      const idempotencyKey = values.idempotencyKey ?? null;
+      if (!idempotencyKey) {
+        throw new Error("agent_wakeup_requests insert conflicted without an idempotency key");
+      }
+      const winner = await executor
+        .select()
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
+            inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution"]),
+          ),
+        )
+        .orderBy(
+          asc(agentWakeupRequests.requestedAt),
+          asc(agentWakeupRequests.createdAt),
+          asc(agentWakeupRequests.id),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (winner) return { row: winner, inserted: false };
+      // The winner left the pending set between the conflict and the read;
+      // retry the insert once before giving up.
+    }
+    throw new Error(
+      `Unable to insert or reuse a pending wakeup request for idempotency key ${values.idempotencyKey ?? "<none>"}`,
+    );
+  }
+
   async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}) {
     const source = opts.source ?? "on_demand";
     const triggerDetail = opts.triggerDetail ?? null;
@@ -15546,6 +15757,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       payload,
     });
     let issueId = readNonEmptyString(enrichedContextSnapshot.issueId) ?? issueIdFromPayload;
+
+    // The freeze-bypass marker is server-authored ONLY: strip any value a
+    // caller stuffed into the snapshot, then stamp the explicit internal
+    // option (opts.decisionFreezeBypass) so claim-time / promotion-time
+    // re-checks can honor the validated intent. Snapshot JSON can never
+    // pierce a decision freeze.
+    delete enrichedContextSnapshot[DECISION_FREEZE_BYPASS_CONTEXT_KEY];
+    const decisionFreezeBypass: DecisionFreezeWakeBypass | null =
+      opts.decisionFreezeBypass?.kind === "continuation" || opts.decisionFreezeBypass?.kind === "revision"
+        ? { kind: opts.decisionFreezeBypass.kind }
+        : null;
+    if (decisionFreezeBypass) {
+      enrichedContextSnapshot[DECISION_FREEZE_BYPASS_CONTEXT_KEY] = decisionFreezeBypass.kind;
+    }
 
     const agent = await getAgent(agentId);
     if (!agent) throw notFound("Agent not found");
@@ -15827,7 +16052,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           db,
           agent.companyId,
           activeDecisionFreeze,
-          { contextSnapshot: enrichedContextSnapshot, agentId },
+          { bypass: decisionFreezeBypass, agentId },
         );
         if (!decisionFreezeBypassWake) {
           await writeSkippedRequest(DECISION_FREEZE_ACTIVE_ERROR_CODE);
@@ -16462,7 +16687,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               return { kind: "deferred" as const };
             }
 
-            await tx.insert(agentWakeupRequests).values({
+            // On a pending-idempotency conflict the winning pending row
+            // already covers this key, which is exactly the deferred
+            // semantics — report deferred either way.
+            await insertPendingWakeupRequest(tx, {
               companyId: agent.companyId,
               agentId,
               source,
@@ -16621,22 +16849,40 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           return { kind: "skipped" as const };
         }
 
-        const wakeupRequest = await tx
-          .insert(agentWakeupRequests)
-          .values({
-            companyId: agent.companyId,
-            agentId,
-            source,
-            triggerDetail,
-            reason,
-            payload,
-            status: "queued",
-            requestedByActorType: opts.requestedByActorType ?? null,
-            requestedByActorId: opts.requestedByActorId ?? null,
-            idempotencyKey: opts.idempotencyKey ?? null,
-          })
-          .returning()
-          .then((rows) => rows[0]);
+        const { row: wakeupRequest, inserted: wakeupInserted } = await insertPendingWakeupRequest(tx, {
+          companyId: agent.companyId,
+          agentId,
+          source,
+          triggerDetail,
+          reason,
+          payload,
+          status: "queued",
+          requestedByActorType: opts.requestedByActorType ?? null,
+          requestedByActorId: opts.requestedByActorId ?? null,
+          idempotencyKey: opts.idempotencyKey ?? null,
+        });
+        if (!wakeupInserted) {
+          // A concurrent keyed enqueue won the 0173 pending-idempotency
+          // unique. Reuse the winner's run instead of creating a duplicate.
+          const winnerRun = wakeupRequest.runId
+            ? await tx
+              .select()
+              .from(heartbeatRuns)
+              .where(eq(heartbeatRuns.id, wakeupRequest.runId))
+              .then((rows) => rows[0] ?? null)
+            : null;
+          if (
+            winnerRun &&
+            EXECUTION_PATH_HEARTBEAT_RUN_STATUSES.includes(
+              winnerRun.status as (typeof EXECUTION_PATH_HEARTBEAT_RUN_STATUSES)[number],
+            )
+          ) {
+            return { kind: "coalesced" as const, run: winnerRun };
+          }
+          // Winner is a pending deferred wake (or its run is not live):
+          // nothing new to start for this key.
+          return { kind: "skipped" as const };
+        }
 
         const newRun = await tx
           .insert(heartbeatRuns)
@@ -16772,7 +17018,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           db,
           agent.companyId,
           activeDecisionFreeze,
-          { contextSnapshot: enrichedContextSnapshot, agentId },
+          { bypass: decisionFreezeBypass, agentId },
         );
         if (!decisionFreezeBypassWake) {
           await writeSkippedRequest(DECISION_FREEZE_ACTIVE_ERROR_CODE);
@@ -16821,22 +17067,38 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         return { kind: "skipped" as const };
       }
 
-      const wakeupRequest = await tx
-        .insert(agentWakeupRequests)
-        .values({
-          companyId: agent.companyId,
-          agentId,
-          source,
-          triggerDetail,
-          reason,
-          payload,
-          status: "queued",
-          requestedByActorType: opts.requestedByActorType ?? null,
-          requestedByActorId: opts.requestedByActorId ?? null,
-          idempotencyKey: opts.idempotencyKey ?? null,
-        })
-        .returning()
-        .then((rows) => rows[0]);
+      const { row: wakeupRequest, inserted: wakeupInserted } = await insertPendingWakeupRequest(tx, {
+        companyId: agent.companyId,
+        agentId,
+        source,
+        triggerDetail,
+        reason,
+        payload,
+        status: "queued",
+        requestedByActorType: opts.requestedByActorType ?? null,
+        requestedByActorId: opts.requestedByActorId ?? null,
+        idempotencyKey: opts.idempotencyKey ?? null,
+      });
+      if (!wakeupInserted) {
+        // A concurrent keyed enqueue won the 0173 pending-idempotency unique.
+        // Reuse the winner's run instead of creating a duplicate.
+        const winnerRun = wakeupRequest.runId
+          ? await tx
+            .select()
+            .from(heartbeatRuns)
+            .where(eq(heartbeatRuns.id, wakeupRequest.runId))
+            .then((rows) => rows[0] ?? null)
+          : null;
+        if (
+          winnerRun &&
+          EXECUTION_PATH_HEARTBEAT_RUN_STATUSES.includes(
+            winnerRun.status as (typeof EXECUTION_PATH_HEARTBEAT_RUN_STATUSES)[number],
+          )
+        ) {
+          return { kind: "coalesced" as const, run: winnerRun };
+        }
+        return { kind: "skipped" as const };
+      }
 
       const newRun = await tx
         .insert(heartbeatRuns)
@@ -16867,6 +17129,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
 
     if (queueOutcome.kind === "skipped") return null;
+    if (queueOutcome.kind === "coalesced") {
+      await startNextQueuedRuns();
+      return queueOutcome.run;
+    }
     const newRun = queueOutcome.run;
 
     publishLiveEvent({

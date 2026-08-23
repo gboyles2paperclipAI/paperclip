@@ -118,6 +118,19 @@ export const issues = pgTable(
           and ${table.executionRunId} is not null
           and ${table.status} in ('backlog', 'todo', 'in_progress', 'in_review', 'blocked')`,
       ),
+    // Sibling of issues_open_routine_execution_uq for HIDDEN open execution
+    // issues (run_only / issue_on_failure tracking modes): the shipped unique
+    // above is scoped to hidden_at IS NULL, so hidden live executions need
+    // their own mirror predicate to keep one open execution per routine.
+    openRoutineExecutionHiddenIdx: uniqueIndex("issues_open_routine_execution_hidden_uq")
+      .on(table.companyId, table.originKind, table.originId, table.originFingerprint)
+      .where(
+        sql`${table.originKind} = 'routine_execution'
+          and ${table.originId} is not null
+          and ${table.hiddenAt} is not null
+          and ${table.executionRunId} is not null
+          and ${table.status} in ('backlog', 'todo', 'in_progress', 'in_review', 'blocked')`,
+      ),
     openRoutineFailureEpisodeIdx: uniqueIndex("issues_open_routine_failure_episode_uq")
       .on(table.companyId, table.originKind, table.originId)
       .where(

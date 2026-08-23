@@ -93,6 +93,11 @@ ALTER TABLE "routines" ADD COLUMN IF NOT EXISTS "tracking_mode" text DEFAULT 'is
 ALTER TABLE "issues" ADD COLUMN IF NOT EXISTS "completion_contract" jsonb;--> statement-breakpoint
 ALTER TABLE "issues" ADD COLUMN IF NOT EXISTS "completion_receipt" jsonb;--> statement-breakpoint
 ALTER TABLE "issues" ADD COLUMN IF NOT EXISTS "resolution_disposition" text;--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "issues_open_routine_execution_hidden_uq" ON "issues" USING btree ("company_id","origin_kind","origin_id","origin_fingerprint") WHERE "issues"."origin_kind" = 'routine_execution'
+          and "issues"."origin_id" is not null
+          and "issues"."hidden_at" is not null
+          and "issues"."execution_run_id" is not null
+          and "issues"."status" in ('backlog', 'todo', 'in_progress', 'in_review', 'blocked');--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "issues_open_routine_failure_episode_uq" ON "issues" USING btree ("company_id","origin_kind","origin_id") WHERE "issues"."origin_kind" = 'routine_failure_episode'
           and "issues"."origin_id" is not null
           and "issues"."hidden_at" is null

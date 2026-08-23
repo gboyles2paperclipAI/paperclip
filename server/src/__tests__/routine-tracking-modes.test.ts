@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
@@ -261,6 +261,74 @@ describeEmbeddedPostgres("routine tracking modes", () => {
     expect(executionIssues).toHaveLength(1);
   });
 
+  it("two concurrent first ticks of a run_only routine produce exactly one hidden execution issue", async () => {
+    const fixture = await seedFixture();
+    await setTrackingMode(fixture.routine.id, "run_only");
+
+    const [first, second] = await Promise.all([
+      fixture.svc.runRoutine(fixture.routine.id, { source: "manual" }, {}),
+      fixture.svc.runRoutine(fixture.routine.id, { source: "manual" }, {}),
+    ]);
+
+    expect([first.status, second.status].sort()).toEqual(["coalesced", "issue_created"]);
+    const created = first.status === "issue_created" ? first : second;
+    const coalesced = first.status === "issue_created" ? second : first;
+    expect(coalesced.linkedIssueId).toBe(created.linkedIssueId);
+
+    const executionIssues = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, fixture.companyId), eq(issues.originKind, "routine_execution")));
+    expect(executionIssues).toHaveLength(1);
+    expect(executionIssues[0]!.hiddenAt).not.toBeNull();
+  });
+
+  it("hidden open execution issues are backstopped by issues_open_routine_execution_hidden_uq", async () => {
+    const fixture = await seedFixture();
+    const seedRun = async () => {
+      const runId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: runId,
+        companyId: fixture.companyId,
+        agentId: fixture.agentId,
+        invocationSource: "automation",
+        triggerDetail: "system",
+        status: "running",
+        responsibleUserId: fixture.defaultResponsibleUserId,
+        contextSnapshot: {},
+      });
+      return runId;
+    };
+    const insertHiddenExecutionIssue = async () =>
+      db.insert(issues).values({
+        id: randomUUID(),
+        companyId: fixture.companyId,
+        title: "hidden execution",
+        status: "todo",
+        priority: "medium",
+        assigneeAgentId: fixture.agentId,
+        originKind: "routine_execution",
+        originId: fixture.routine.id,
+        originFingerprint: "default",
+        originRunId: randomUUID(),
+        executionRunId: await seedRun(),
+        hiddenAt: new Date(),
+        responsibleUserId: fixture.defaultResponsibleUserId,
+      });
+
+    await insertHiddenExecutionIssue();
+    const error = await insertHiddenExecutionIssue().then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(error).not.toBeNull();
+    expect(JSON.stringify(error) + String((error as Error).message)).toContain(
+      "issues_open_routine_execution_hidden_uq",
+    );
+    // Cancel the seeded runs so teardown does not treat them as live work.
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.status, "running"));
+  });
+
   it("skip_if_active stays unaffected for issue_always routines", async () => {
     const fixture = await seedFixture();
     await db
@@ -336,6 +404,86 @@ describeEmbeddedPostgres("routine tracking modes", () => {
     expect(await listFailureEpisodes(fixture.companyId)).toHaveLength(1);
     const visibleAfterRecovery = await fixture.issueSvc.list(fixture.companyId);
     expect(visibleAfterRecovery.map((row) => row.id)).toEqual([episode.id]);
+  });
+
+  it("a healthy-cycle resolve waits for an in-flight episode open instead of missing it", async () => {
+    const fixture = await seedFixture();
+    await setTrackingMode(fixture.routine.id, "issue_on_failure");
+
+    // Failing cycle: terminalize manually WITHOUT syncing, so no episode
+    // exists yet.
+    const failingRun = await fixture.svc.runRoutine(fixture.routine.id, { source: "manual" }, {});
+    expect(failingRun.status).toBe("issue_created");
+    const failingIssue = await getIssue(failingRun.linkedIssueId!);
+    if (failingIssue.executionRunId) {
+      await db
+        .update(heartbeatRuns)
+        .set({ status: "failed" })
+        .where(eq(heartbeatRuns.id, failingIssue.executionRunId));
+    }
+    await fixture.issueSvc.update(failingIssue.id, { status: "blocked" });
+
+    // Healthy cycle: dispatch + terminalize, also without syncing yet.
+    const healthyRun = await fixture.svc.runRoutine(fixture.routine.id, { source: "manual" }, {});
+    expect(healthyRun.status).toBe("issue_created");
+    const healthyIssue = await getIssue(healthyRun.linkedIssueId!);
+    if (healthyIssue.executionRunId) {
+      await db
+        .update(heartbeatRuns)
+        .set({ status: "completed" })
+        .where(eq(heartbeatRuns.id, healthyIssue.executionRunId));
+    }
+    await fixture.issueSvc.update(healthyIssue.id, { status: "done" });
+
+    // Simulate an in-flight episode open: hold the routine-row lock in a
+    // transaction, insert the episode issue inside it, and keep the
+    // transaction uncommitted while the healthy resolve runs. Without the
+    // routine-row serialization in maybeResolveRoutineFailureEpisode the
+    // resolve would read "no open episode" and return, orphaning it open.
+    const episodeId = randomUUID();
+    let releaseLock!: () => void;
+    const lockGate = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    let signalHeld!: () => void;
+    const lockHeld = new Promise<void>((resolve) => {
+      signalHeld = resolve;
+    });
+    const holder = db.transaction(async (tx) => {
+      await tx.execute(sql`select id from routines where id = ${fixture.routine.id} for update`);
+      await tx.insert(issues).values({
+        id: episodeId,
+        companyId: fixture.companyId,
+        title: "Routine failing: ascii frog",
+        status: "todo",
+        priority: "medium",
+        assigneeAgentId: fixture.agentId,
+        identifier: `EPI${randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`,
+        originKind: "routine_failure_episode",
+        originId: fixture.routine.id,
+        originRunId: failingRun.id,
+        responsibleUserId: fixture.defaultResponsibleUserId,
+      });
+      signalHeld();
+      await lockGate;
+    });
+    await lockHeld;
+
+    const resolvePromise = fixture.svc.syncRunStatusForIssue(healthyIssue.id);
+    // Give the resolve time to reach (and block on) the routine-row lock.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    releaseLock();
+    await holder;
+    await resolvePromise;
+
+    const episode = await getIssue(episodeId);
+    expect(episode.status).toBe("done");
+    const episodeComments = await db
+      .select()
+      .from(issueComments)
+      .where(eq(issueComments.issueId, episodeId));
+    expect(episodeComments).toHaveLength(1);
+    expect(episodeComments[0]!.body).toContain("Routine recovered");
   });
 
   it("a freeze-membership tick suppresses dispatch quietly with no issue and no failure spam", async () => {

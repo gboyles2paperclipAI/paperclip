@@ -258,6 +258,38 @@ function nextResultText(status: string, issueId?: string | null) {
 
 // Unknown or legacy values dispatch exactly like today's default so a bad row
 // can never change routine behavior silently.
+/**
+ * Robust 23505 matcher: postgres-js reports `constraint_name`, node-postgres
+ * reports `constraint`, and drizzle can wrap the driver error in a `cause`
+ * chain — walk all of them like the recovery-service conflict helpers do.
+ */
+function matchesUniqueConstraintViolation(error: unknown, constraintNames: readonly string[]): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (typeof current === "object" && current !== null && !seen.has(current)) {
+    seen.add(current);
+    const maybe = current as {
+      code?: string;
+      constraint?: string;
+      constraint_name?: string;
+      message?: string;
+      cause?: unknown;
+    };
+    const constraint = maybe.constraint ?? maybe.constraint_name;
+    if (maybe.code === "23505") {
+      if (constraint && constraintNames.includes(constraint)) return true;
+      if (
+        typeof maybe.message === "string" &&
+        constraintNames.some((name) => maybe.message!.includes(name))
+      ) {
+        return true;
+      }
+    }
+    current = maybe.cause;
+  }
+  return false;
+}
+
 function readRoutineTrackingMode(value: string | null | undefined): RoutineTrackingMode {
   return (ROUTINE_TRACKING_MODES as readonly string[]).includes(value ?? "")
     ? (value as RoutineTrackingMode)
@@ -1546,8 +1578,27 @@ export function routineService(
     const context = await getIssueOnFailureRoutineForRun(executionIssue.originRunId);
     if (!context) return null;
     const { run, routine } = context;
-    const existing = await findOpenRoutineFailureEpisodeIssue(routine);
-    if (existing) return existing;
+    // Serialize episode open/resolve on the ROUTINE row: a concurrent healthy
+    // resolve blocks on this lock until an in-flight open commits, so it can
+    // never miss the episode and leave it orphaned open. The episode-row
+    // FOR UPDATE in maybeResolve only helps once the row exists.
+    return db.transaction(async (tx) => {
+      const txDb = tx as unknown as Db;
+      await tx.execute(
+        sql`select id from ${routines} where ${routines.id} = ${routine.id} and ${routines.companyId} = ${routine.companyId} for update`,
+      );
+      const existing = await findOpenRoutineFailureEpisodeIssue(routine, txDb);
+      if (existing) return existing;
+      return createRoutineFailureEpisodeIssue({ run, routine, executionIssue });
+    });
+  }
+
+  async function createRoutineFailureEpisodeIssue(input: {
+    run: { id: string; responsibleUserId: string | null };
+    routine: typeof routines.$inferSelect;
+    executionIssue: { id: string; identifier: string | null; status: string };
+  }) {
+    const { run, routine, executionIssue } = input;
     const executionIssueRef = executionIssue.identifier ?? executionIssue.id;
     try {
       return await issueSvc.create(routine.companyId, {
@@ -1574,13 +1625,9 @@ export function routineService(
         originRunId: run.id,
       });
     } catch (error) {
-      const isOpenEpisodeConflict =
-        !!error &&
-        typeof error === "object" &&
-        "code" in error &&
-        (error as { code?: string }).code === "23505" &&
-        "constraint" in error &&
-        (error as { constraint?: string }).constraint === "issues_open_routine_failure_episode_uq";
+      const isOpenEpisodeConflict = matchesUniqueConstraintViolation(error, [
+        "issues_open_routine_failure_episode_uq",
+      ]);
       if (!isOpenEpisodeConflict) throw error;
       return findOpenRoutineFailureEpisodeIssue(routine);
     }
@@ -1596,9 +1643,15 @@ export function routineService(
     const { run, routine } = context;
     // FOR UPDATE on the episode row makes the terminalization exactly-once:
     // a concurrent healthy sync blocks on the lock and then sees the episode
-    // already outside the open set.
+    // already outside the open set. The ROUTINE-row lock (shared with
+    // maybeOpenRoutineFailureEpisode) additionally serializes resolve against
+    // an in-flight open, so a healthy cycle cannot race past an episode that
+    // has not committed yet.
     return db.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
+      await tx.execute(
+        sql`select id from ${routines} where ${routines.id} = ${routine.id} and ${routines.companyId} = ${routine.companyId} for update`,
+      );
       const episode = await findOpenRoutineFailureEpisodeIssue(routine, txDb, { forUpdate: true });
       if (!episode) return null;
       const updated = await issueSvc.update(episode.id, { status: "done" }, txDb);
@@ -2032,13 +2085,14 @@ export function routineService(
             },
           });
         } catch (error) {
-          const isOpenExecutionConflict =
-            !!error &&
-            typeof error === "object" &&
-            "code" in error &&
-            (error as { code?: string }).code === "23505" &&
-            "constraint" in error &&
-            (error as { constraint?: string }).constraint === "issues_open_routine_execution_uq";
+          // Both partial uniques guard one open execution per routine:
+          // issues_open_routine_execution_uq covers visible issues
+          // (hidden_at IS NULL) and issues_open_routine_execution_hidden_uq
+          // covers hidden ones (run_only / issue_on_failure tracking modes).
+          const isOpenExecutionConflict = matchesUniqueConstraintViolation(error, [
+            "issues_open_routine_execution_uq",
+            "issues_open_routine_execution_hidden_uq",
+          ]);
           if (!isOpenExecutionConflict || input.routine.concurrencyPolicy === "always_enqueue") {
             throw error;
           }
