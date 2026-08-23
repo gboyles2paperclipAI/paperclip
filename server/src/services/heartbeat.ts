@@ -203,6 +203,12 @@ import {
 } from "./recovery/index.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-guard.js";
 import {
+  DECISION_FREEZE_ACTIVE_ERROR_CODE,
+  decisionFreezeExclusionSql,
+  evaluateDecisionFreezeWakeBypass,
+  getActiveDecisionFreeze,
+} from "./decision-freeze.js";
+import {
   recoveryAssigneeAdapterOverrides,
   withRecoveryModelProfileHint,
 } from "./recovery/model-profile-hint.js";
@@ -4204,7 +4210,10 @@ export function shouldAutoCheckoutIssueForWake(input: {
   issueExecutionState?: unknown;
   isDependencyReady: boolean;
   agentId: string;
+  /** True when the issue is a member of an active decision-freeze cone (R2.1). */
+  decisionFrozen?: boolean;
 }) {
+  if (input.decisionFrozen === true) return false;
   if (input.issueAssigneeAgentId !== input.agentId) return false;
   if (!input.isDependencyReady) return false;
   const executionState = parseIssueExecutionState(input.issueExecutionState);
@@ -8580,6 +8589,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return null;
     }
 
+    const activeDecisionFreeze = await getActiveDecisionFreeze(db, run.companyId, issueId);
+    if (activeDecisionFreeze) {
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message: "Missing-comment retry suppressed because the issue is inside an active decision freeze",
+        payload: {
+          issueId,
+          leaseId: activeDecisionFreeze.leaseId,
+          anchorIssueId: activeDecisionFreeze.anchorIssueId,
+        },
+      });
+      return null;
+    }
+
     const contextSnapshot = parseObject(run.contextSnapshot);
     const taskKey = deriveTaskKeyWithHeartbeatFallback(contextSnapshot, null);
     const sessionBefore = await resolveSessionBeforeForWakeup(agent, taskKey);
@@ -8842,6 +8867,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
+    if (issueId) {
+      const activeDecisionFreeze = await getActiveDecisionFreeze(db, run.companyId, issueId);
+      if (activeDecisionFreeze) {
+        await appendRunEvent(run, await nextRunEventSeq(run.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "warn",
+          message: "Process-loss retry suppressed because the issue is inside an active decision freeze",
+          payload: {
+            issueId,
+            leaseId: activeDecisionFreeze.leaseId,
+            anchorIssueId: activeDecisionFreeze.anchorIssueId,
+          },
+        });
+        await releaseIssueExecutionAndPromote(run);
+        return null;
+      }
+    }
     const taskKey = deriveTaskKeyWithHeartbeatFallback(contextSnapshot, null);
     const sessionBefore = await resolveSessionBeforeForWakeup(agent, taskKey);
     const retryContextSnapshot = withRecoveryModelProfileHint({
@@ -9055,6 +9098,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           | "issue_execution_lock_changed"
           | "issue_review_participant_changed"
           | "issue_paused"
+          | "issue_decision_frozen"
           | "issue_dependencies_blocked";
         issueId: string | null;
         details: Record<string, unknown>;
@@ -9215,6 +9259,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           issueId,
           holdId: activePauseHold.holdId,
           rootIssueId: activePauseHold.rootIssueId,
+        },
+      };
+    }
+
+    const activeDecisionFreeze = await getActiveDecisionFreeze(db, run.companyId, issueId);
+    if (activeDecisionFreeze) {
+      return {
+        allowed: false,
+        reason: "Scheduled retry suppressed because the issue is inside an active decision freeze",
+        errorCode: "issue_decision_frozen",
+        issueId,
+        details: {
+          issueId,
+          leaseId: activeDecisionFreeze.leaseId,
+          anchorIssueId: activeDecisionFreeze.anchorIssueId,
         },
       };
     }
@@ -9565,6 +9624,32 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           reason: gate.reason,
           errorCode: gate.errorCode,
           issueId: gate.issueId,
+        };
+      }
+    } else if (issueId) {
+      // Retry reasons that skip evaluateScheduledRetryGate still must not
+      // schedule a run for a decision-frozen member issue.
+      const activeDecisionFreeze = await getActiveDecisionFreeze(db, run.companyId, issueId);
+      if (activeDecisionFreeze) {
+        await appendRunEvent(run, await nextRunEventSeq(run.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "warn",
+          message: "Scheduled retry suppressed because the issue is inside an active decision freeze",
+          payload: {
+            retryReason,
+            scheduledRetryAttempt: nextAttempt,
+            maxAttempts,
+            issueId,
+            leaseId: activeDecisionFreeze.leaseId,
+            anchorIssueId: activeDecisionFreeze.anchorIssueId,
+          },
+        });
+        return {
+          outcome: "not_scheduled" as const,
+          reason: "Scheduled retry suppressed because the issue is inside an active decision freeze",
+          errorCode: "issue_decision_frozen" as const,
+          issueId,
         };
       }
     }
@@ -10438,6 +10523,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           isNull(issues.assigneeUserId),
           isNull(issues.hiddenAt),
           inArray(issues.status, [...TIMER_ACTIONABLE_ISSUE_STATUSES]),
+          // Members of an active decision-freeze cone are not actionable (R3.4).
+          decisionFreezeExclusionSql(issues.id),
         ),
       )
       .limit(1)
@@ -10830,24 +10917,62 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const claimedWakeReason = readNonEmptyString(claimedContext.wakeReason);
     if (claimedIssueId && claimedWakeReason !== "source_scoped_recovery_action") {
       const claimedAgent = await getAgent(claimed.agentId);
-      await db
-        .update(issues)
-        .set({
-          executionRunId: claimed.id,
-          executionAgentNameKey: normalizeAgentNameKey(claimedAgent?.name),
-          executionLockedAt: claimedAt,
-          updatedAt: claimedAt,
-        })
-        .where(
-          and(
-            eq(issues.id, claimedIssueId),
-            eq(issues.companyId, claimed.companyId),
-            // Mention/context runs can touch an issue, but only the current assignee
-            // owns the issue execution lock shown as the active run.
-            eq(issues.assigneeAgentId, claimed.agentId),
-            or(isNull(issues.executionRunId), eq(issues.executionRunId, claimed.id)),
-          ),
-        );
+      // R3.9: the decision-freeze membership re-check and the executionRunId
+      // stamp commit in ONE transaction, closing the check-then-stamp race
+      // (R2.3c). Frozen without a bypass flag → zero stamp, cancel the run.
+      const claimDecisionFreeze = await db.transaction(async (tx) => {
+        const activeDecisionFreeze = await getActiveDecisionFreeze(tx, claimed.companyId, claimedIssueId);
+        if (activeDecisionFreeze) {
+          const decisionFreezeBypassWake = await evaluateDecisionFreezeWakeBypass(
+            tx,
+            claimed.companyId,
+            activeDecisionFreeze,
+            { contextSnapshot: claimedContext, agentId: claimed.agentId },
+          );
+          if (!decisionFreezeBypassWake) return activeDecisionFreeze;
+        }
+        await tx
+          .update(issues)
+          .set({
+            executionRunId: claimed.id,
+            executionAgentNameKey: normalizeAgentNameKey(claimedAgent?.name),
+            executionLockedAt: claimedAt,
+            updatedAt: claimedAt,
+          })
+          .where(
+            and(
+              eq(issues.id, claimedIssueId),
+              eq(issues.companyId, claimed.companyId),
+              // Mention/context runs can touch an issue, but only the current assignee
+              // owns the issue execution lock shown as the active run.
+              eq(issues.assigneeAgentId, claimed.agentId),
+              or(isNull(issues.executionRunId), eq(issues.executionRunId, claimed.id)),
+            ),
+          );
+        return null;
+      });
+      if (claimDecisionFreeze) {
+        await cancelRunInternal(claimed.id, "Cancelled because issue is inside an active decision freeze");
+        await logActivity(db, {
+          companyId: claimed.companyId,
+          actorType: "system",
+          actorId: "system",
+          agentId: claimed.agentId,
+          runId: claimed.id,
+          action: "issue.decision_freeze_run_interrupted",
+          entityType: "heartbeat_run",
+          entityId: claimed.id,
+          details: {
+            issueId: claimedIssueId,
+            leaseId: claimDecisionFreeze.leaseId,
+            anchorIssueId: claimDecisionFreeze.anchorIssueId,
+            leaseState: claimDecisionFreeze.state,
+            source: "heartbeat.claim_queued_run",
+            securityPrinciples: ["Complete Mediation", "Fail Securely", "Secure Defaults"],
+          },
+        });
+        return null;
+      }
     }
 
     return claimed;
@@ -11941,6 +12066,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         issueExecutionState: issueContext.executionState,
         isDependencyReady: issueDependencyReadiness?.isDependencyReady ?? true,
         agentId: agent.id,
+        decisionFrozen: Boolean(await getActiveDecisionFreeze(db, agent.companyId, issueId)),
       })
     ) {
       try {
@@ -14765,6 +14891,30 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           continue;
         }
 
+        // Decision-freeze membership gate (R2.1): separate boolean from the
+        // pause-hold gate above; only the R3.1 context bypass flags pass.
+        const activeDecisionFreeze = await getActiveDecisionFreeze(tx, issue.companyId, issue.id);
+        if (activeDecisionFreeze) {
+          const decisionFreezeBypassWake = await evaluateDecisionFreezeWakeBypass(
+            tx,
+            issue.companyId,
+            activeDecisionFreeze,
+            { contextSnapshot: deferredContextSeed, agentId: deferred.agentId },
+          );
+          if (!decisionFreezeBypassWake) {
+            await tx
+              .update(agentWakeupRequests)
+              .set({
+                status: "cancelled",
+                finishedAt: new Date(),
+                error: "Deferred wake suppressed by active decision freeze",
+                updatedAt: new Date(),
+              })
+              .where(eq(agentWakeupRequests.id, deferred.id));
+            continue;
+          }
+        }
+
         const promotedContextSeed: Record<string, unknown> = { ...deferredContextSeed };
         if (activePauseHold) {
           promotedContextSeed.treeHoldInteraction = true;
@@ -15668,6 +15818,44 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     if (issueId) {
+      // Decision-freeze membership gate (R2.1): a separate boolean from the
+      // pause-hold gate above — the tree-hold interaction escape hatch never
+      // applies here. Empty lease tables make this a no-op (R3.8).
+      const activeDecisionFreeze = await getActiveDecisionFreeze(db, agent.companyId, issueId);
+      if (activeDecisionFreeze) {
+        const decisionFreezeBypassWake = await evaluateDecisionFreezeWakeBypass(
+          db,
+          agent.companyId,
+          activeDecisionFreeze,
+          { contextSnapshot: enrichedContextSnapshot, agentId },
+        );
+        if (!decisionFreezeBypassWake) {
+          await writeSkippedRequest(DECISION_FREEZE_ACTIVE_ERROR_CODE);
+          await logActivity(db, {
+            companyId: agent.companyId,
+            actorType: "system",
+            actorId: "system",
+            agentId,
+            runId: null,
+            action: "issue.decision_freeze_wakeup_suppressed",
+            entityType: "issue",
+            entityId: issueId,
+            details: {
+              leaseId: activeDecisionFreeze.leaseId,
+              anchorIssueId: activeDecisionFreeze.anchorIssueId,
+              leaseState: activeDecisionFreeze.state,
+              requestedReason: reason,
+              source,
+              triggerDetail,
+              securityPrinciples: ["Complete Mediation", "Fail Securely", "Secure Defaults"],
+            },
+          });
+          return null;
+        }
+      }
+    }
+
+    if (issueId) {
       // Mention-triggered wakes can request input from another agent, but they must
       // still respect the issue execution lock so a second agent cannot start on the
       // same issue workspace while the assignee already has a live run.
@@ -16565,6 +16753,32 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         finishedAt: new Date(),
       });
       return mergedRun;
+    }
+
+    // This tail path enqueues without a resolved issueId, but a target issue
+    // may still be resolvable from the context snapshot (taskId fallback,
+    // mirroring issueIdFromRunContext). Guard the run insert when it is.
+    const decisionFreezeGuardIssueId =
+      readNonEmptyString(enrichedContextSnapshot.issueId) ??
+      readNonEmptyString(enrichedContextSnapshot.taskId);
+    if (decisionFreezeGuardIssueId) {
+      const activeDecisionFreeze = await getActiveDecisionFreeze(
+        db,
+        agent.companyId,
+        decisionFreezeGuardIssueId,
+      );
+      if (activeDecisionFreeze) {
+        const decisionFreezeBypassWake = await evaluateDecisionFreezeWakeBypass(
+          db,
+          agent.companyId,
+          activeDecisionFreeze,
+          { contextSnapshot: enrichedContextSnapshot, agentId },
+        );
+        if (!decisionFreezeBypassWake) {
+          await writeSkippedRequest(DECISION_FREEZE_ACTIVE_ERROR_CODE);
+          return null;
+        }
+      }
     }
 
     const queueOutcome = await db.transaction(async (tx) => {

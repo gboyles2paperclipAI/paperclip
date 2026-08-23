@@ -41,6 +41,7 @@ const additionalSerializedServerTests = new Set([
   "server/src/__tests__/companies-route-path-guard.test.ts",
   "server/src/__tests__/company-portability.test.ts",
   "server/src/__tests__/costs-service.test.ts",
+  "server/src/__tests__/decision-freeze-guards.test.ts",
   "server/src/__tests__/express5-auth-wildcard.test.ts",
   "server/src/__tests__/health-dev-server-token.test.ts",
   "server/src/__tests__/health.test.ts",

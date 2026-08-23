@@ -69,6 +69,7 @@ import {
   withRecoveryModelProfileHint,
 } from "./model-profile-hint.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
+import { getActiveDecisionFreeze } from "../decision-freeze.js";
 
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["interrupted", "failed", "cancelled", "timed_out"] as const;
@@ -701,6 +702,11 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
 
   async function hasPersistedDurableWaitPath(issue: typeof issues.$inferSelect) {
     if (issue.monitorNextCheckAt) return true;
+
+    // Active decision-lease membership is a durable wait: the continuation
+    // outbox wakes the owner on release, so recovery must not treat the issue
+    // as stranded (empty lease tables → no-op).
+    if (await getActiveDecisionFreeze(db, issue.companyId, issue.id)) return true;
 
     return db
       .select({ id: issueRelations.issueId })
