@@ -117,4 +117,21 @@ WHERE awr."id" = "ranked"."id"
   AND "ranked"."duplicate_rank" > 1;--> statement-breakpoint
 -- paperclip:migration-safety-ignore large-create-index-not-concurrently: partial index over the small pending-status subset; the migration runner applies migrations inside a transaction where CREATE INDEX CONCURRENTLY is not allowed
 CREATE UNIQUE INDEX IF NOT EXISTS "agent_wakeup_requests_pending_idem_uq" ON "agent_wakeup_requests" USING btree ("idempotency_key") WHERE "agent_wakeup_requests"."idempotency_key" is not null
-          and "agent_wakeup_requests"."status" in ('queued', 'claimed', 'deferred_issue_execution');
+          and "agent_wakeup_requests"."status" in ('queued', 'claimed', 'deferred_issue_execution');--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "notification_transitions" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "company_id" uuid NOT NULL,
+  "subject" text NOT NULL,
+  "event_class" text NOT NULL,
+  "state_hash" text NOT NULL,
+  "last_notified_at" timestamp with time zone DEFAULT now() NOT NULL,
+  "notify_count" integer DEFAULT 1 NOT NULL,
+  "acknowledged_channels" jsonb,
+  "created_at" timestamp with time zone DEFAULT now() NOT NULL
+);--> statement-breakpoint
+DO $$ BEGIN
+  ALTER TABLE "notification_transitions" ADD CONSTRAINT "notification_transitions_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE cascade ON UPDATE no action;
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "notification_transitions_company_subject_event_uq" ON "notification_transitions" USING btree ("company_id","subject","event_class");

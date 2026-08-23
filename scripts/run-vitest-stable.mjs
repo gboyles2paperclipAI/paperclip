@@ -59,6 +59,7 @@ const additionalSerializedServerTests = new Set([
   "server/src/__tests__/opencode-local-adapter-environment.test.ts",
   "server/src/__tests__/project-routes-env.test.ts",
   "server/src/__tests__/redaction.test.ts",
+  "server/src/__tests__/routine-tracking-modes.test.ts",
   "server/src/__tests__/routines-e2e.test.ts",
 ]);
 let invocationIndex = 0;
