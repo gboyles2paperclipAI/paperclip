@@ -279,6 +279,10 @@ export async function refreshIssueContinuationSummary(input: {
     changeSummary: `Refresh continuation summary after run ${run.id}`,
     createdByAgentId: agent.id,
     createdByRunId: run.id,
+    // Run settlement is the server's own bookkeeping about a run that already
+    // ended — it must proceed even inside an active decision freeze (freeze
+    // creation itself interrupts member runs, which then settle here).
+    actorType: "system",
   });
   return result.document;
 }
