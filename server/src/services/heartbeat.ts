@@ -346,9 +346,14 @@ const HEARTBEAT_RUN_TERMINAL_STATUSES = ["succeeded", "interrupted", "failed", "
  * the pre-check path.
  */
 class DecisionFreezeStampConflictError extends Error {
-  readonly freeze: ActiveDecisionFreeze;
+  /**
+   * Null when the company-scoped exclusion predicate blocked the stamp twice
+   * while the scoped lookup saw no lease (a lease flapping between
+   * statements): still treated as a freeze conflict, never stamped over.
+   */
+  readonly freeze: ActiveDecisionFreeze | null;
 
-  constructor(freeze: ActiveDecisionFreeze) {
+  constructor(freeze: ActiveDecisionFreeze | null) {
     super("Issue became a decision-freeze member before the execution stamp");
     this.name = "DecisionFreezeStampConflictError";
     this.freeze = freeze;
@@ -4491,6 +4496,17 @@ export function mergeCoalescedContextSnapshot(
     ...existing,
     ...incoming,
   };
+  // The server-authored freeze-bypass marker never survives a merge by
+  // inheritance: a stale marker on an already-queued run must not stick, and
+  // a later ordinary wake must not attach one. Strip it from both sides, then
+  // re-stamp only the value the CURRENT call's validated bypass option put on
+  // the incoming snapshot (enqueueWakeup strips caller-stuffed values before
+  // stamping the validated internal option).
+  delete merged[DECISION_FREEZE_BYPASS_CONTEXT_KEY];
+  const incomingAcceptedBypass = readAcceptedDecisionFreezeBypass(incoming);
+  if (incomingAcceptedBypass) {
+    merged[DECISION_FREEZE_BYPASS_CONTEXT_KEY] = incomingAcceptedBypass.kind;
+  }
   if (existing.forceFreshSession === true || incoming.forceFreshSession === true) {
     merged.forceFreshSession = true;
   }
@@ -8710,7 +8726,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       // R2.3c: the stamp statement re-verifies freeze membership itself; the
       // pre-check above ran outside this transaction and a lease can commit
-      // in between.
+      // in between. The exclusion is company-scoped so it matches the
+      // company-scoped `getActiveDecisionFreeze` lookup exactly.
       const stamped = await tx
         .update(issues)
         .set({
@@ -8719,7 +8736,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           executionLockedAt: now,
           updatedAt: now,
         })
-        .where(and(eq(issues.id, issue.id), decisionFreezeExclusionSql(issues.id)))
+        .where(and(eq(issues.id, issue.id), decisionFreezeExclusionSql(issues.id, issues.companyId)))
         .returning({ id: issues.id });
       if (stamped.length === 0) {
         // The issue row is locked FOR UPDATE in this transaction, so zero rows
@@ -8727,8 +8744,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         // enqueue instead of queueing a run into a frozen cone.
         const lateFreeze = await getActiveDecisionFreeze(tx, run.companyId, issue.id);
         if (lateFreeze) throw new DecisionFreezeStampConflictError(lateFreeze);
-        // Freeze released between the two statements: stamp normally.
-        await tx
+        // Freeze released between the two statements: re-stamp under the SAME
+        // company-scoped exclusion predicate the first stamp used — never
+        // unconditionally — so an exclusion result the lookup cannot see is
+        // treated as still-frozen instead of being stamped over.
+        const restamped = await tx
           .update(issues)
           .set({
             executionRunId: queuedRun.id,
@@ -8736,7 +8756,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             executionLockedAt: now,
             updatedAt: now,
           })
-          .where(eq(issues.id, issue.id));
+          .where(and(eq(issues.id, issue.id), decisionFreezeExclusionSql(issues.id, issues.companyId)))
+          .returning({ id: issues.id });
+        if (restamped.length === 0) {
+          throw new DecisionFreezeStampConflictError(
+            await getActiveDecisionFreeze(tx, run.companyId, issue.id),
+          );
+        }
       }
 
       await tx
@@ -8758,8 +8784,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           message: "Missing-comment retry suppressed because the issue is inside an active decision freeze",
           payload: {
             issueId,
-            leaseId: error.freeze.leaseId,
-            anchorIssueId: error.freeze.anchorIssueId,
+            leaseId: error.freeze?.leaseId ?? null,
+            anchorIssueId: error.freeze?.anchorIssueId ?? null,
           },
         });
         return null;
@@ -9027,7 +9053,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               eq(issues.id, issueId),
               eq(issues.companyId, run.companyId),
               eq(issues.executionRunId, run.id),
-              decisionFreezeExclusionSql(issues.id),
+              decisionFreezeExclusionSql(issues.id, issues.companyId),
             ),
           )
           .returning({ id: issues.id });
@@ -9058,8 +9084,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           message: "Process-loss retry suppressed because the issue is inside an active decision freeze",
           payload: {
             issueId,
-            leaseId: error.freeze.leaseId,
-            anchorIssueId: error.freeze.anchorIssueId,
+            leaseId: error.freeze?.leaseId ?? null,
+            anchorIssueId: error.freeze?.anchorIssueId ?? null,
           },
         });
         await releaseIssueExecutionAndPromote(run);
@@ -10006,7 +10032,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (!wakeupInserted) {
         // A pending wake for this continuation key already exists (0173
         // pending-idempotency unique): reuse its run instead of throwing.
-        const winnerRun = wakeupRequest.runId
+        const winnerRun = wakeupRequest?.runId
           ? await tx
             .select()
             .from(heartbeatRuns)
@@ -10657,7 +10683,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           isNull(issues.hiddenAt),
           inArray(issues.status, [...TIMER_ACTIONABLE_ISSUE_STATUSES]),
           // Members of an active decision-freeze cone are not actionable (R3.4).
-          decisionFreezeExclusionSql(issues.id),
+          decisionFreezeExclusionSql(issues.id, issues.companyId),
         ),
       )
       .limit(1)
@@ -11088,14 +11114,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               // owns the issue execution lock shown as the active run.
               eq(issues.assigneeAgentId, claimed.agentId),
               or(isNull(issues.executionRunId), eq(issues.executionRunId, claimed.id)),
-              ...(bypassAccepted ? [] : [decisionFreezeExclusionSql(issues.id)]),
+              ...(bypassAccepted ? [] : [decisionFreezeExclusionSql(issues.id, issues.companyId)]),
             ),
           )
           .returning({ id: issues.id });
         if (stamped.length === 0 && !bypassAccepted) {
           // Zero rows is usually benign (non-assignee mention run, or the lock
           // is held by another run). Only a freeze that appeared after the
-          // membership SELECT turns it into the cancel path.
+          // membership SELECT AND blocked an otherwise-legitimate stamper
+          // turns it into the cancel path — mirror the process-loss
+          // lock-holder re-check so a mention/context run or a run that lost
+          // the execution lock is never cancelled as frozen.
           const lateFreeze = await getActiveDecisionFreeze(tx, claimed.companyId, claimedIssueId);
           if (lateFreeze) {
             const lateBypassAccepted = await evaluateDecisionFreezeWakeBypass(
@@ -11104,7 +11133,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               lateFreeze,
               { bypass: claimDecisionFreezeBypass, agentId: claimed.agentId },
             );
-            if (!lateBypassAccepted) return lateFreeze;
+            if (!lateBypassAccepted) {
+              const issueRow = await tx
+                .select({
+                  assigneeAgentId: issues.assigneeAgentId,
+                  executionRunId: issues.executionRunId,
+                })
+                .from(issues)
+                .where(and(eq(issues.id, claimedIssueId), eq(issues.companyId, claimed.companyId)))
+                .then((rows) => rows[0] ?? null);
+              const wouldHaveStamped =
+                issueRow !== null &&
+                issueRow.assigneeAgentId === claimed.agentId &&
+                (issueRow.executionRunId === null || issueRow.executionRunId === claimed.id);
+              if (wouldHaveStamped) return lateFreeze;
+              // Fall through to the pre-existing zero-row semantics: this run
+              // was never the legitimate stamper, so the freeze did not block
+              // anything it was entitled to do.
+            }
           }
         }
         return null;
@@ -15700,7 +15746,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   async function insertPendingWakeupRequest(
     executor: Pick<Db, "insert" | "select">,
     values: typeof agentWakeupRequests.$inferInsert,
-  ): Promise<{ row: typeof agentWakeupRequests.$inferSelect; inserted: boolean }> {
+  ): Promise<
+    | { row: typeof agentWakeupRequests.$inferSelect; inserted: true }
+    | { row: typeof agentWakeupRequests.$inferSelect | null; inserted: false }
+  > {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const insertedRow = await executor
         .insert(agentWakeupRequests)
@@ -15731,11 +15780,71 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .then((rows) => rows[0] ?? null);
       if (winner) return { row: winner, inserted: false };
       // The winner left the pending set between the conflict and the read;
-      // retry the insert once before giving up.
+      // retry the insert once.
     }
-    throw new Error(
-      `Unable to insert or reuse a pending wakeup request for idempotency key ${values.idempotencyKey ?? "<none>"}`,
-    );
+    // A concurrent winner is churning through the pending set faster than we
+    // can observe it. Report a row-less conflict — the wake is IN-FLIGHT on
+    // the winner's side, never a failure of this enqueue — instead of
+    // throwing a 500 out of the wake transaction.
+    return { row: null, inserted: false };
+  }
+
+  const IN_FLIGHT_KEYED_WINNER_WAIT_ATTEMPTS = 3;
+  const IN_FLIGHT_KEYED_WINNER_WAIT_INTERVAL_MS = 150;
+
+  /**
+   * Bounded wait for a keyed pending winner whose run stamp had not committed
+   * when the losing enqueue observed it. Returns the winner's run once the
+   * stamp lands so the loser can coalesce onto it; returns null when the
+   * winner is still run-less after the bounded wait (e.g. a deferred wake, or
+   * a stamp still in flight) — callers treat null as success-without-new-run
+   * because the winner's pending row covers the idempotency key. Never a
+   * dropped wake, never a throw.
+   */
+  async function resolveInFlightKeyedWinnerRun(input: {
+    winnerWakeupRequestId: string | null;
+    idempotencyKey: string | null;
+  }): Promise<typeof heartbeatRuns.$inferSelect | null> {
+    if (!input.winnerWakeupRequestId && !input.idempotencyKey) return null;
+    for (let attempt = 0; attempt <= IN_FLIGHT_KEYED_WINNER_WAIT_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) {
+        await new Promise((resolve) => setTimeout(resolve, IN_FLIGHT_KEYED_WINNER_WAIT_INTERVAL_MS));
+      }
+      const winner = input.winnerWakeupRequestId
+        ? await db
+          .select({ runId: agentWakeupRequests.runId, status: agentWakeupRequests.status })
+          .from(agentWakeupRequests)
+          .where(eq(agentWakeupRequests.id, input.winnerWakeupRequestId))
+          .then((rows) => rows[0] ?? null)
+        : await db
+          .select({ runId: agentWakeupRequests.runId, status: agentWakeupRequests.status })
+          .from(agentWakeupRequests)
+          .where(
+            and(
+              eq(agentWakeupRequests.idempotencyKey, input.idempotencyKey!),
+              inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution"]),
+            ),
+          )
+          .orderBy(
+            asc(agentWakeupRequests.requestedAt),
+            asc(agentWakeupRequests.createdAt),
+            asc(agentWakeupRequests.id),
+          )
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+      if (winner?.runId) {
+        const winnerRun = await db
+          .select()
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, winner.runId))
+          .then((rows) => rows[0] ?? null);
+        if (winnerRun) return winnerRun;
+      }
+      // A pending deferred wake never gets a runId while deferred; its
+      // eventual promotion replays this key, so stop waiting immediately.
+      if (winner?.status === "deferred_issue_execution") return null;
+    }
+    return null;
   }
 
   async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}) {
@@ -16864,7 +16973,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         if (!wakeupInserted) {
           // A concurrent keyed enqueue won the 0173 pending-idempotency
           // unique. Reuse the winner's run instead of creating a duplicate.
-          const winnerRun = wakeupRequest.runId
+          const winnerRun = wakeupRequest?.runId
             ? await tx
               .select()
               .from(heartbeatRuns)
@@ -16879,8 +16988,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           ) {
             return { kind: "coalesced" as const, run: winnerRun };
           }
-          // Winner is a pending deferred wake (or its run is not live):
-          // nothing new to start for this key.
+          if (!wakeupRequest?.runId) {
+            // The winner's run stamp has not committed yet (or the winning row
+            // was briefly unobservable): the wake is IN-FLIGHT on the winner's
+            // side. Resolve after this transaction commits with a bounded
+            // wait — never report it as skipped/dropped.
+            return {
+              kind: "winner_in_flight" as const,
+              winnerWakeupRequestId: wakeupRequest?.id ?? null,
+            };
+          }
+          // The winner's run already reached a terminal status: the keyed
+          // wake was delivered; nothing new to start for this key.
           return { kind: "skipped" as const };
         }
 
@@ -16916,6 +17035,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         return { kind: "queued" as const, run: newRun };
       });
 
+      if (outcome.kind === "winner_in_flight") {
+        // The keyed winner's run stamp was still uncommitted inside the wake
+        // transaction. Wait (bounded) for it here, outside any row locks: if
+        // the run appears, coalesce onto it; if not, the winner's pending row
+        // still covers this key — success without a new run, never a drop.
+        const winnerRun = await resolveInFlightKeyedWinnerRun({
+          winnerWakeupRequestId: outcome.winnerWakeupRequestId,
+          idempotencyKey: opts.idempotencyKey ?? null,
+        });
+        if (winnerRun) {
+          await startNextQueuedRuns();
+          return winnerRun;
+        }
+        return null;
+      }
       if (outcome.kind === "deferred" || outcome.kind === "skipped") return null;
       if (outcome.kind === "coalesced") {
         await startNextQueuedRuns();
@@ -17082,7 +17216,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (!wakeupInserted) {
         // A concurrent keyed enqueue won the 0173 pending-idempotency unique.
         // Reuse the winner's run instead of creating a duplicate.
-        const winnerRun = wakeupRequest.runId
+        const winnerRun = wakeupRequest?.runId
           ? await tx
             .select()
             .from(heartbeatRuns)
@@ -17097,6 +17231,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ) {
           return { kind: "coalesced" as const, run: winnerRun };
         }
+        if (!wakeupRequest?.runId) {
+          // The winner's run stamp has not committed yet: the wake is
+          // IN-FLIGHT on the winner's side. Resolve after this transaction
+          // commits with a bounded wait — never report it as skipped/dropped.
+          return {
+            kind: "winner_in_flight" as const,
+            winnerWakeupRequestId: wakeupRequest?.id ?? null,
+          };
+        }
+        // The winner's run already reached a terminal status: the keyed wake
+        // was delivered; nothing new to start for this key.
         return { kind: "skipped" as const };
       }
 
@@ -17128,6 +17273,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return { kind: "queued" as const, run: newRun };
     });
 
+    if (queueOutcome.kind === "winner_in_flight") {
+      // See the issue-scoped path above: bounded wait for the winner's run
+      // stamp outside the transaction; a still-run-less winner means the
+      // pending row covers this key (success without a new run, not a drop).
+      const winnerRun = await resolveInFlightKeyedWinnerRun({
+        winnerWakeupRequestId: queueOutcome.winnerWakeupRequestId,
+        idempotencyKey: opts.idempotencyKey ?? null,
+      });
+      if (winnerRun) {
+        await startNextQueuedRuns();
+        return winnerRun;
+      }
+      return null;
+    }
     if (queueOutcome.kind === "skipped") return null;
     if (queueOutcome.kind === "coalesced") {
       await startNextQueuedRuns();

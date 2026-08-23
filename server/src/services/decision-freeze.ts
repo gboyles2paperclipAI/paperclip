@@ -80,14 +80,27 @@ export async function getActiveDecisionFreeze(
  * Reusable `NOT EXISTS` fragment excluding active-cone members from pick-work
  * queries (R3.4). PR-1 wires it into `hasActionableTimerWork` only (dark);
  * inbox-lite/assignee-list/MCP-inbox sites follow in PR-2.
+ *
+ * Pass `companyIdExpr` to scope the lease lookup to one company, matching
+ * `getActiveDecisionFreeze` exactly. Callers that pair this fragment with the
+ * company-scoped lookup MUST pass it, otherwise a lease in another company
+ * can make the fragment and the lookup disagree (an exclusion "miss" that the
+ * lookup reports as no-freeze). Omitting it keeps the historical unscoped
+ * behavior for global scans.
  */
-export function decisionFreezeExclusionSql(issueIdExpr: SQLWrapper): SQL {
+export function decisionFreezeExclusionSql(
+  issueIdExpr: SQLWrapper,
+  companyIdExpr?: SQLWrapper,
+): SQL {
+  const companyScope = companyIdExpr
+    ? sql` and ${decisionLeases.companyId} = ${companyIdExpr}`
+    : sql``;
   return sql`not exists (
     select 1
     from ${decisionLeaseMembers}
     inner join ${decisionLeases} on ${decisionLeases.id} = ${decisionLeaseMembers.leaseId}
     where ${decisionLeaseMembers.issueId} = ${issueIdExpr}
-      and ${decisionLeases.state} in ('active', 'revising')
+      and ${decisionLeases.state} in ('active', 'revising')${companyScope}
   )`;
 }
 

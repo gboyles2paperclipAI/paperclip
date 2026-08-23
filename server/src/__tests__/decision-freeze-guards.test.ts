@@ -32,6 +32,7 @@ import {
   DECISION_FREEZE_ACTIVE_ERROR_CODE,
   DECISION_FREEZE_BYPASS_CONTEXT_KEY,
   assertNotDecisionFrozen,
+  decisionFreezeExclusionSql,
   evaluateDecisionFreezeWakeBypass,
   getActiveDecisionFreeze,
 } from "../services/decision-freeze.ts";
@@ -482,6 +483,35 @@ describeEmbeddedPostgres("decision freeze guards", () => {
       expect(admitted).not.toBeNull();
     });
 
+    it("the company-scoped exclusion fragment agrees with the company-scoped lookup", async () => {
+      const { companyId, issueId } = await seedCompanyAgentIssue();
+      const other = await seedCompanyAgentIssue();
+
+      const selectWithScopedExclusion = () =>
+        db
+          .select({ id: issues.id })
+          .from(issues)
+          .where(and(eq(issues.id, issueId), decisionFreezeExclusionSql(issues.id, issues.companyId)));
+
+      // A lease in ANOTHER company holding a member row for this issue must
+      // not block the scoped exclusion, exactly as the scoped lookup ignores
+      // it — the two predicates can never disagree and let a fallback stamp
+      // over a real freeze.
+      await seedLease({
+        companyId: other.companyId,
+        anchorIssueId: other.issueId,
+        memberIssueIds: [issueId],
+      });
+      expect(await getActiveDecisionFreeze(db, companyId, issueId)).toBeNull();
+      expect(await selectWithScopedExclusion()).toHaveLength(1);
+
+      // A same-company lease flips BOTH: lookup reports the freeze and the
+      // scoped exclusion filters the issue out.
+      await seedLease({ companyId, anchorIssueId: issueId, memberIssueIds: [issueId] });
+      expect(await getActiveDecisionFreeze(db, companyId, issueId)).not.toBeNull();
+      expect(await selectWithScopedExclusion()).toHaveLength(0);
+    });
+
     it("recovery treats an active-cone member as a durable wait (no stranded recovery)", async () => {
       const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
       // A failed terminal run would normally make this in_progress issue a
@@ -800,6 +830,139 @@ describeEmbeddedPostgres("decision freeze guards", () => {
           .set({ status: "cancelled", finishedAt: new Date(), updatedAt: new Date() })
           .where(eq(heartbeatRuns.id, liveRun.id));
       }
+    });
+
+    it("a keyed loser coalesces onto an in-flight winner whose run stamp lands late (never skipped, never throws)", async () => {
+      const { companyId, agentId } = await seedCompanyAgentIssue();
+
+      // Saturate the agent's single run slot so nothing starts mid-test.
+      await db.insert(heartbeatRuns).values({
+        id: randomUUID(),
+        companyId,
+        agentId,
+        invocationSource: "automation",
+        triggerDetail: "system",
+        status: "running",
+        responsibleUserId: "responsible-user",
+        contextSnapshot: { taskKey: "occupied-slot" },
+        startedAt: new Date(),
+      });
+
+      // The winning pending keyed row exists WITHOUT a runId: its run stamp
+      // is still in flight on the winner's side.
+      const idempotencyKey = `pending-idem-${randomUUID()}`;
+      const winnerWakeupId = randomUUID();
+      await db.insert(agentWakeupRequests).values({
+        id: winnerWakeupId,
+        companyId,
+        agentId,
+        source: "automation",
+        triggerDetail: "system",
+        reason: "monitor_check",
+        status: "queued",
+        idempotencyKey,
+        requestedByActorType: "system",
+        requestedByActorId: "test",
+      });
+
+      // Stamp the winner's run ~200ms later, inside the loser's bounded wait.
+      const winnerRunId = randomUUID();
+      const delayedStamp = (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        await db.insert(heartbeatRuns).values({
+          id: winnerRunId,
+          companyId,
+          agentId,
+          invocationSource: "automation",
+          triggerDetail: "system",
+          status: "queued",
+          wakeupRequestId: winnerWakeupId,
+          responsibleUserId: "responsible-user",
+          contextSnapshot: { taskKey: "winner-scope" },
+        });
+        await db
+          .update(agentWakeupRequests)
+          .set({ runId: winnerRunId, updatedAt: new Date() })
+          .where(eq(agentWakeupRequests.id, winnerWakeupId));
+      })();
+
+      // Pre-fix code returned {kind:"skipped"} (a dropped wake) the moment it
+      // saw the null-runId winner; it must instead wait out the in-flight
+      // stamp and coalesce onto the winner's run.
+      const result = await heartbeat.wakeup(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "monitor_check",
+        idempotencyKey,
+        contextSnapshot: { taskKey: "keyed-scope" },
+        requestedByActorType: "system",
+        requestedByActorId: "test",
+      });
+      await delayedStamp;
+      expect(result).not.toBeNull();
+      expect(result!.id).toBe(winnerRunId);
+
+      // The loser wrote no row of its own: the winner's pending row is the
+      // only record for this key, and nothing was marked skipped.
+      const keyRows = await db
+        .select({ id: agentWakeupRequests.id, status: agentWakeupRequests.status })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.idempotencyKey, idempotencyKey));
+      expect(keyRows).toHaveLength(1);
+      expect(keyRows[0]!.id).toBe(winnerWakeupId);
+      expect(keyRows[0]!.status).not.toBe("skipped");
+
+      const liveRuns = await db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]));
+      for (const liveRun of liveRuns) {
+        await db
+          .update(heartbeatRuns)
+          .set({ status: "cancelled", finishedAt: new Date(), updatedAt: new Date() })
+          .where(eq(heartbeatRuns.id, liveRun.id));
+      }
+    });
+
+    it("a keyed loser whose winner stays run-less returns success-without-new-run (no skip record, no throw)", async () => {
+      const { companyId, agentId } = await seedCompanyAgentIssue();
+
+      const idempotencyKey = `pending-idem-${randomUUID()}`;
+      const winnerWakeupId = randomUUID();
+      await db.insert(agentWakeupRequests).values({
+        id: winnerWakeupId,
+        companyId,
+        agentId,
+        source: "automation",
+        triggerDetail: "system",
+        reason: "monitor_check",
+        status: "queued",
+        idempotencyKey,
+        requestedByActorType: "system",
+        requestedByActorId: "test",
+      });
+
+      // The winner never stamps a run inside the bounded wait: the loser
+      // reports success-without-new-run (null), writes nothing, throws
+      // nothing, and leaves the winner's pending row covering the key.
+      const result = await heartbeat.wakeup(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "monitor_check",
+        idempotencyKey,
+        contextSnapshot: { taskKey: "keyed-scope" },
+        requestedByActorType: "system",
+        requestedByActorId: "test",
+      });
+      expect(result).toBeNull();
+
+      const keyRows = await db
+        .select({ id: agentWakeupRequests.id, status: agentWakeupRequests.status })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.idempotencyKey, idempotencyKey));
+      expect(keyRows).toHaveLength(1);
+      expect(keyRows[0]!.id).toBe(winnerWakeupId);
+      expect(keyRows[0]!.status).toBe("queued");
     });
   });
 
