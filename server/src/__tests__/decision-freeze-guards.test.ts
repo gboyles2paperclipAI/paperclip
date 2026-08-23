@@ -38,6 +38,10 @@ import {
   getActiveDecisionFreeze,
 } from "../services/decision-freeze.ts";
 import { getAutomaticRecoverySuppressionReason } from "../services/recovery/pause-hold-guard.ts";
+import {
+  getIssueContinuationSummaryDocument,
+  refreshIssueContinuationSummary,
+} from "../services/issue-continuation-summary.ts";
 import { dispatchDecisionContinuations } from "../services/decision-leases.ts";
 import { recoveryService } from "../services/recovery/service.ts";
 import { HttpError } from "../errors.ts";
@@ -1124,5 +1128,50 @@ describeEmbeddedPostgres("decision freeze guards", () => {
       expect(await getActiveDecisionFreeze(db, companyId, issueId)).toBeNull();
       await expect(assertNotDecisionFrozen(db, companyId, issueId, "agent")).resolves.toBeUndefined();
     });
+
+  describe("freeze-aware run settlement", () => {
+    it("refreshes the continuation summary for a member of an active freeze (server bookkeeping is system-actor)", async () => {
+      const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+      await seedLease({ companyId, anchorIssueId: issueId, memberIssueIds: [issueId] });
+
+      const runId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: runId,
+        companyId,
+        agentId,
+        invocationSource: "assignment",
+        triggerDetail: "system",
+        status: "succeeded",
+        responsibleUserId: "responsible-user",
+        contextSnapshot: { issueId },
+      });
+
+      // The freeze still refuses a plain agent-actor mutation on the member...
+      await expect(assertNotDecisionFrozen(db, companyId, issueId, "agent")).rejects.toMatchObject({
+        status: 422,
+      });
+
+      // ...but run settlement (the server recording an ended run) must succeed.
+      const doc = await refreshIssueContinuationSummary({
+        db,
+        issueId,
+        run: {
+          id: runId,
+          status: "succeeded",
+          error: null,
+          errorCode: null,
+          resultJson: null,
+          stdoutExcerpt: "settled inside an active decision freeze",
+          stderrExcerpt: null,
+          finishedAt: new Date(),
+        },
+        agent: { id: agentId, name: "Freeze Settlement Agent", adapterType: "codex_local" },
+      });
+      expect(doc).not.toBeNull();
+
+      const stored = await getIssueContinuationSummaryDocument(db, issueId);
+      expect(stored?.body ?? "").toContain(runId);
+    });
   });
+});
 });
