@@ -43,10 +43,22 @@ jobs:
           // by gh-safe-merge.sh against the Paperclip API.
           const uuidLine = /^Approval-Record:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*$/im;
           const match = body.match(uuidLine);
-          if (!match) {
-            console.error('Governance paths require Approval-Record: <uuid> in the PR body.');
-            console.error('Placeholders (PENDING, BYPASS, none, TODO), brackets, and arbitrary text are not accepted.');
-            process.exit(1);
+          if (match) {
+            console.log(`Approval record UUID present for ${governance.length} governance file(s): ${match[1]}`);
+            process.exit(0);
           }
-          console.log(`Approval record UUID present for ${governance.length} governance file(s): ${match[1]}`);
+          // An EXPECTED approval wait is not a failure (AWC lane, Section F):
+          // a well-formed Approval-Pending binding names the requested approval
+          // and makes this run a non-failing WAITING state. It authorizes
+          // nothing — gh-safe-merge.sh checks the LIVE approval status at merge
+          // time, so a pending, stale, or bogus id cannot merge anything.
+          const pendingLine = /^Approval-Pending:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*$/im;
+          const pending = body.match(pendingLine);
+          if (pending) {
+            console.log(`WAITING (non-failing): approval ${pending[1]} pending for ${governance.length} governance file(s); merge stays blocked by gh-safe-merge live-status verification.`);
+            process.exit(0);
+          }
+          console.error('Governance paths require Approval-Record: <uuid> (approved) or Approval-Pending: <uuid> (requested, awaiting decision) in the PR body.');
+          console.error('Placeholders (PENDING, BYPASS, none, TODO), brackets, and arbitrary text are not accepted.');
+          process.exit(1);
           NODE
