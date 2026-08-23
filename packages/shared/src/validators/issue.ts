@@ -19,6 +19,7 @@ import {
   ISSUE_RECOVERY_ACTION_OUTCOMES,
   ISSUE_RECOVERY_ACTION_OWNER_TYPES,
   ISSUE_RECOVERY_ACTION_STATUSES,
+  ISSUE_RESOLUTION_DISPOSITIONS,
   ISSUE_WORK_MODES,
   clampIssueRequestDepth,
   ISSUE_STATUSES,
@@ -30,6 +31,7 @@ import {
   REQUEST_CHECKBOX_CONFIRMATION_OPTION_LIMIT,
   REQUEST_ITEM_VERDICTS_ITEM_LIMIT,
 } from "../constants.js";
+import { decisionLeaseRequestSchema } from "./decision-lease.js";
 import { multilineTextSchema } from "./text.js";
 import { lowTrustReviewPresetPolicySchema, trustAuthorizationPolicySchema } from "./trust-policy.js";
 
@@ -414,6 +416,10 @@ const createIssueBaseSchema = z.object({
     agentId: z.string().uuid(),
     instructions: multilineTextSchema.optional().nullable(),
   }).strict().optional().nullable(),
+  // Completion contract (ADR-20260823 R2.12, PR-3). Structural typing and
+  // preimage binding are enforced server-side (services/completion-contracts);
+  // agents may never attach or modify one.
+  completionContract: z.record(z.unknown()).optional().nullable(),
 });
 
 export const createIssueInputSchema = createIssueBaseSchema.extend({
@@ -436,6 +442,7 @@ export const createChildIssueSchema = withCreateIssueStatusDefault(createIssueBa
     parentId: true,
     inheritExecutionWorkspaceFromIssueId: true,
     watchdogDiscovery: true,
+    completionContract: true,
   })
   .extend({
     acceptanceCriteria: z.array(z.string().trim().min(1).max(500)).max(20).optional(),
@@ -487,6 +494,13 @@ export const updateIssueSchema = createIssueBaseSchema.omit({
   resume: z.boolean().optional(),
   interrupt: z.boolean().optional(),
   hiddenAt: z.string().datetime().nullable().optional(),
+  // Completion receipt submission (ADR-20260823 R2.12, PR-3): allowed for the
+  // assignee agent and board/system actors; validated fail-closed server-side
+  // at the `done` gate in issueService.update.
+  completionReceipt: z.record(z.unknown()).optional().nullable(),
+  // Explicit terminal disposition (board/system actors only; the server
+  // defaults completed/cancelled by terminal status).
+  resolutionDisposition: z.enum(ISSUE_RESOLUTION_DISPOSITIONS).optional().nullable(),
 });
 
 export type UpdateIssue = z.infer<typeof updateIssueSchema>;
@@ -1092,6 +1106,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+    decisionLease: decisionLeaseRequestSchema.nullable().optional(),
     payload: suggestTasksPayloadSchema,
   }),
   z.object({
@@ -1102,6 +1117,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+    decisionLease: decisionLeaseRequestSchema.nullable().optional(),
     payload: askUserQuestionsPayloadSchema,
   }),
   z.object({
@@ -1112,6 +1128,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+    decisionLease: decisionLeaseRequestSchema.nullable().optional(),
     payload: requestConfirmationPayloadSchema,
   }),
   z.object({
@@ -1122,6 +1139,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+    decisionLease: decisionLeaseRequestSchema.nullable().optional(),
     payload: requestCheckboxConfirmationPayloadSchema,
   }),
   z.object({
@@ -1132,6 +1150,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+    decisionLease: decisionLeaseRequestSchema.nullable().optional(),
     payload: requestItemVerdictsPayloadSchema,
   }),
 ]);

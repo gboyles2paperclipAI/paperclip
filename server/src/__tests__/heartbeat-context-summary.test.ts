@@ -5,6 +5,7 @@ import {
   summarizeHeartbeatRunContextSnapshot,
   summarizeHeartbeatRunListResultJson,
 } from "../services/heartbeat.js";
+import { DECISION_FREEZE_BYPASS_CONTEXT_KEY } from "../services/decision-freeze.js";
 
 describe("buildPaperclipTaskMarkdown", () => {
   it("adds planning directives for assignment and comment task context", () => {
@@ -193,6 +194,59 @@ describe("mergeCoalescedContextSnapshot", () => {
       selectedOptionIds: ["file-b"],
       selectedOptions: [{ id: "file-b", label: "b.txt", description: "Generated build output" }],
     });
+  });
+
+  it("never inherits the freeze-bypass marker from the existing snapshot", () => {
+    // A stale server-stamped bypass on an already-queued run must not stick
+    // when a later ordinary wake coalesces onto it.
+    const merged = mergeCoalescedContextSnapshot(
+      {
+        issueId: "issue-1",
+        [DECISION_FREEZE_BYPASS_CONTEXT_KEY]: "continuation",
+      },
+      {
+        issueId: "issue-1",
+        wakeReason: "issue_commented",
+      },
+    );
+    expect(merged[DECISION_FREEZE_BYPASS_CONTEXT_KEY]).toBeUndefined();
+  });
+
+  it("re-stamps the freeze-bypass marker only from the current call's validated snapshot", () => {
+    // enqueueWakeup stamps the marker on the incoming snapshot only after
+    // validating the internal option; the merge carries exactly that value.
+    const restamped = mergeCoalescedContextSnapshot(
+      { issueId: "issue-1" },
+      {
+        issueId: "issue-1",
+        [DECISION_FREEZE_BYPASS_CONTEXT_KEY]: "continuation",
+      },
+    );
+    expect(restamped[DECISION_FREEZE_BYPASS_CONTEXT_KEY]).toBe("continuation");
+
+    // The incoming value wins outright — an old marker on the existing side
+    // never survives alongside or instead of it.
+    const replaced = mergeCoalescedContextSnapshot(
+      {
+        issueId: "issue-1",
+        [DECISION_FREEZE_BYPASS_CONTEXT_KEY]: "revision",
+      },
+      {
+        issueId: "issue-1",
+        [DECISION_FREEZE_BYPASS_CONTEXT_KEY]: "continuation",
+      },
+    );
+    expect(replaced[DECISION_FREEZE_BYPASS_CONTEXT_KEY]).toBe("continuation");
+
+    // A malformed value on the incoming side is stripped, not propagated.
+    const malformed = mergeCoalescedContextSnapshot(
+      { issueId: "issue-1" },
+      {
+        issueId: "issue-1",
+        [DECISION_FREEZE_BYPASS_CONTEXT_KEY]: { sneaky: true },
+      },
+    );
+    expect(malformed[DECISION_FREEZE_BYPASS_CONTEXT_KEY]).toBeUndefined();
   });
 });
 

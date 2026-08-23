@@ -4,6 +4,7 @@ import {
   ROUTINE_CATCH_UP_POLICIES,
   ROUTINE_CONCURRENCY_POLICIES,
   ROUTINE_STATUSES,
+  ROUTINE_TRACKING_MODES,
   ROUTINE_TRIGGER_KINDS,
   ROUTINE_TRIGGER_SIGNING_MODES,
   ROUTINE_VARIABLE_TYPES,
@@ -59,7 +60,26 @@ export const routineVariableSchema = z.object({
   }
 });
 
-export const createRoutineSchema = z.object({
+/**
+ * `run_only` routines have no board-visible execution or failure-episode
+ * issue, so their failures must already be owned by a named external monitor
+ * (ADR-20260823-quiescent-coordination R2.18). The validator refuses
+ * `trackingMode: "run_only"` without a `failureOwner` naming that monitor.
+ */
+const requireFailureOwnerForRunOnly = (
+  value: { trackingMode?: string; failureOwner?: string | null },
+  ctx: z.RefinementCtx,
+) => {
+  if (value.trackingMode !== "run_only") return;
+  if (typeof value.failureOwner === "string" && value.failureOwner.trim().length > 0) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    path: ["failureOwner"],
+    message: "run_only routines must name the external monitor that owns failures (failureOwner)",
+  });
+};
+
+const createRoutineBaseSchema = z.object({
   projectId: z.string().uuid().optional().nullable(),
   goalId: z.string().uuid().optional().nullable(),
   parentIssueId: z.string().uuid().optional().nullable(),
@@ -70,15 +90,22 @@ export const createRoutineSchema = z.object({
   status: z.enum(ROUTINE_STATUSES).optional().default("active"),
   concurrencyPolicy: z.enum(ROUTINE_CONCURRENCY_POLICIES).optional().default("coalesce_if_active"),
   catchUpPolicy: z.enum(ROUTINE_CATCH_UP_POLICIES).optional().default("skip_missed"),
+  // No zod default: the routines table defaults tracking_mode to
+  // "issue_always", and an optional output type keeps existing internal
+  // CreateRoutine constructions (built-in agents, portability, plugins) valid.
+  trackingMode: z.enum(ROUTINE_TRACKING_MODES).optional(),
+  failureOwner: z.string().trim().min(1).max(200).optional().nullable(),
   variables: z.array(routineVariableSchema).optional().default([]),
   env: envConfigSchema.optional().nullable(),
 });
 
+export const createRoutineSchema = createRoutineBaseSchema.superRefine(requireFailureOwnerForRunOnly);
+
 export type CreateRoutine = z.infer<typeof createRoutineSchema>;
 
-export const updateRoutineSchema = createRoutineSchema.partial().extend({
+export const updateRoutineSchema = createRoutineBaseSchema.partial().extend({
   baseRevisionId: z.string().uuid().optional().nullable(),
-});
+}).superRefine(requireFailureOwnerForRunOnly);
 export type UpdateRoutine = z.infer<typeof updateRoutineSchema>;
 
 export const routineRevisionSnapshotRoutineV1Schema = z.object({

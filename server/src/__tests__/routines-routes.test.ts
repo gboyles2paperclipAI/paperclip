@@ -725,4 +725,113 @@ describe("routine routes", () => {
     });
     expect(mockTrackRoutineCreated).toHaveBeenCalledWith(expect.anything());
   });
+
+  it("rejects run_only routine creation without a failureOwner (R2.18)", async () => {
+    mockAccessService.canUser.mockResolvedValue(true);
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/routines`)
+      .send({
+        projectId,
+        title: "Archive sweep",
+        assigneeAgentId: agentId,
+        trackingMode: "run_only",
+      });
+
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body.details)).toContain("failureOwner");
+    expect(mockRoutineService.create).not.toHaveBeenCalled();
+  });
+
+  it("folds failureOwner into the routine env surface and exposes it on read models", async () => {
+    mockAccessService.canUser.mockResolvedValue(true);
+    const failureOwnerEnv = {
+      PAPERCLIP_FAILURE_OWNER: { type: "plain", value: "monitor:host-watchdog" },
+    };
+    mockRoutineService.create.mockResolvedValue({
+      ...routine,
+      trackingMode: "run_only",
+      env: failureOwnerEnv,
+    });
+    mockRoutineService.list.mockResolvedValue([{ ...routine, trackingMode: "run_only", env: failureOwnerEnv }]);
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const created = await request(app)
+      .post(`/api/companies/${companyId}/routines`)
+      .send({
+        projectId,
+        title: "Archive sweep",
+        assigneeAgentId: agentId,
+        trackingMode: "run_only",
+        failureOwner: "monitor:host-watchdog",
+      });
+
+    expect(created.status).toBe(201);
+    // The top-level failureOwner is persisted through the existing env
+    // surface (no new column) as a plain binding under the reserved key.
+    expect(mockRoutineService.create).toHaveBeenCalledWith(companyId, expect.objectContaining({
+      trackingMode: "run_only",
+      env: expect.objectContaining(failureOwnerEnv),
+    }), expect.anything());
+    // Read models surface both trackingMode and the derived failureOwner.
+    expect(created.body).toMatchObject({
+      trackingMode: "run_only",
+      failureOwner: "monitor:host-watchdog",
+    });
+
+    const listed = await request(app).get(`/api/companies/${companyId}/routines`);
+    expect(listed.status).toBe(200);
+    expect(listed.body[0]).toMatchObject({
+      trackingMode: "run_only",
+      failureOwner: "monitor:host-watchdog",
+    });
+  });
+
+  it("merges a PATCHed failureOwner into the existing env without dropping other bindings", async () => {
+    mockAccessService.canUser.mockResolvedValue(true);
+    mockRoutineService.get.mockResolvedValue({
+      ...routine,
+      env: { EXISTING_KEY: { type: "plain", value: "keep-me" } },
+    });
+    mockRoutineService.update.mockResolvedValue({
+      ...routine,
+      env: {
+        EXISTING_KEY: { type: "plain", value: "keep-me" },
+        PAPERCLIP_FAILURE_OWNER: { type: "plain", value: "monitor:successor" },
+      },
+    });
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const res = await request(app)
+      .patch(`/api/routines/${routineId}`)
+      .send({ failureOwner: "monitor:successor" });
+
+    expect(res.status).toBe(200);
+    expect(mockRoutineService.update).toHaveBeenCalledWith(routineId, expect.objectContaining({
+      env: {
+        EXISTING_KEY: { type: "plain", value: "keep-me" },
+        PAPERCLIP_FAILURE_OWNER: { type: "plain", value: "monitor:successor" },
+      },
+    }), expect.anything());
+    expect(res.body.failureOwner).toBe("monitor:successor");
+  });
 });

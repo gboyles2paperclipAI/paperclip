@@ -3,6 +3,7 @@ import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, sql } from "d
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  decisionLeases,
   documents,
   heartbeatRuns,
   issueComments,
@@ -49,6 +50,12 @@ import {
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { getTelemetryClient } from "../telemetry.js";
+import {
+  createLeaseForDecision,
+  findDecisionLeaseForDecision,
+  interruptRunsForDecisionLease,
+  resolveInteractionDecisionLease,
+} from "./decision-leases.js";
 import { issueService, runWorkspaceIsFinalized } from "./issues.js";
 import {
   emitInteractionLifecycleNotification,
@@ -651,6 +658,21 @@ async function emitExpiredInteractionNotifications(
   ));
 }
 
+/**
+ * `interaction.resolved` lifecycle webhook: fired whenever an interaction
+ * reaches a terminal status (accepted/answered/rejected/dismissed/cancelled/
+ * expired). Lease-bound TTL reissues are suppressed by callers per the PR-2a
+ * pattern — the decision continues on the reissued card, so nothing resolved.
+ */
+async function emitResolvedInteractionNotifications(
+  interactions: readonly IssueThreadInteraction[],
+  config = loadInteractionLifecycleConfig(),
+) {
+  await Promise.all(interactions.map((interaction) =>
+    emitInteractionLifecycleNotification("interaction.resolved", interaction, { config })
+  ));
+}
+
 function isCommentAtOrAfterInteraction(args: {
   commentCreatedAt: Date | string;
   interactionCreatedAt: Date | string;
@@ -1021,14 +1043,28 @@ async function expireStaleRequestConfirmationTarget(db: Db | any, args: {
   if (!updated) {
     throw conflict("Interaction has already been resolved");
   }
+  await resolveInteractionDecisionLease(db, {
+    interactionId: args.row.id,
+    companyId: args.row.companyId,
+    disposition: "stale_target",
+  });
   await touchIssue(db, args.row.issueId);
   const expired = hydrateInteraction(updated);
   await emitInteractionResolvedTelemetry(db, expired);
   await emitExpiredInteractionNotifications([expired]);
+  await emitResolvedInteractionNotifications([expired]);
   return expired;
 }
 
-export function issueThreadInteractionService(db: Db) {
+export function issueThreadInteractionService(
+  db: Db,
+  deps: {
+    /** heartbeat.cancelRun-compatible interruptor for lease-creating creates
+     * (R2.3). Optional: absent means freshly frozen members keep their active
+     * runs until the claim-time guard cancels them. */
+    cancelRun?: (runId: string, reason?: string) => Promise<unknown>;
+  } = {},
+) {
   async function getIdempotentInteraction(args: {
     issueId: string;
     companyId: string;
@@ -1149,6 +1185,14 @@ export function issueThreadInteractionService(db: Db) {
         throw conflict("Interaction has already been resolved");
       }
 
+      // accepted → approved (R2.5): resolve a bound lease in the same
+      // transaction; the continuation outbox delivers the wake.
+      await resolveInteractionDecisionLease(tx as unknown as Db, {
+        interactionId: args.current.id,
+        companyId: args.issue.companyId,
+        disposition: "approved",
+      });
+
       const issueContext = await tx
         .select({
           id: issues.id,
@@ -1198,6 +1242,7 @@ export function issueThreadInteractionService(db: Db) {
       };
     });
     await emitInteractionResolvedTelemetry(db, result.interaction);
+    await emitResolvedInteractionNotifications([result.interaction]);
     return result;
   }
 
@@ -1247,9 +1292,15 @@ export function issueThreadInteractionService(db: Db) {
     if (!updated) {
       throw conflict("Interaction has already been resolved");
     }
+    await resolveInteractionDecisionLease(db, {
+      interactionId: args.current.id,
+      companyId: args.issue.companyId,
+      disposition: "rejected",
+    });
     await touchIssue(db, args.issue.id);
     const rejected = hydrateInteraction(updated);
     await emitInteractionResolvedTelemetry(db, rejected);
+    await emitResolvedInteractionNotifications([rejected]);
     return rejected;
   }
 
@@ -1341,7 +1392,17 @@ export function issueThreadInteractionService(db: Db) {
       input: CreateIssueThreadInteraction,
       actor: InteractionActor,
     ) => {
-      const data = normalizeCreateInteractionInput(createIssueThreadInteractionSchema.parse(input));
+      let data = normalizeCreateInteractionInput(createIssueThreadInteractionSchema.parse(input));
+      const decisionLease = data.decisionLease ?? null;
+      if (decisionLease && isUserCommentSupersedableKind(data.kind)) {
+        // Lease-bound interactions are never superseded by board comments
+        // (R2.5): comments during a wait are recorded, they do not silently
+        // kill the decision card.
+        data = {
+          ...data,
+          payload: { ...data.payload, supersedeOnUserComment: false },
+        } as CreateIssueThreadInteraction;
+      }
 
       if (data.idempotencyKey) {
         const existing = await getIdempotentInteraction({
@@ -1406,27 +1467,101 @@ export function issueThreadInteractionService(db: Db) {
         createdAt,
         lifecycleConfig,
       );
+      const insertValues = {
+        companyId: issue.companyId,
+        issueId: issue.id,
+        kind: data.kind,
+        status: "pending",
+        continuationPolicy: data.continuationPolicy,
+        idempotencyKey: data.idempotencyKey ?? null,
+        sourceCommentId: data.sourceCommentId ?? null,
+        sourceRunId: data.sourceRunId ?? null,
+        title: data.title ?? null,
+        summary: data.summary ?? null,
+        createdByAgentId: actor.agentId ?? null,
+        createdByUserId: actor.userId ?? null,
+        payload: lifecyclePayload,
+        createdAt,
+        updatedAt: createdAt,
+      };
+
+      if (decisionLease) {
+        // Decision-create is ONE transaction (R3.2): interaction row, waiting
+        // posture (issue → in_review + evidence comment), cone members, drain,
+        // and the lease itself commit together, so the owner never needs a
+        // follow-up write that its own freeze would 422.
+        const result = await db.transaction(async (rawTx) => {
+          const tx = rawTx as unknown as Db;
+          const [insertedRow] = await tx
+            .insert(issueThreadInteractions)
+            .values(insertValues)
+            .onConflictDoNothing()
+            .returning();
+          if (!insertedRow) {
+            const existing = data.idempotencyKey
+              ? await tx
+                .select()
+                .from(issueThreadInteractions)
+                .where(and(
+                  eq(issueThreadInteractions.companyId, issue.companyId),
+                  eq(issueThreadInteractions.issueId, issue.id),
+                  eq(issueThreadInteractions.idempotencyKey, data.idempotencyKey),
+                ))
+                .then((rows) => rows[0] ?? null)
+              : null;
+            if (!existing || !isEquivalentCreateRequest(existing, data, actor)) {
+              throw conflict("Interaction idempotency key already exists for a different request", {
+                idempotencyKey: data.idempotencyKey ?? null,
+              });
+            }
+            return { row: existing, replay: true as const, runIdsToInterrupt: [] as string[], leaseId: null };
+          }
+
+          const leaseResult = await createLeaseForDecision(tx, {
+            companyId: issue.companyId,
+            decisionKind: "interaction",
+            decisionId: insertedRow.id,
+            idempotencyKey: decisionLease.idempotencyKey,
+            anchorIssueId: issue.id,
+            posture: decisionLease.posture,
+            requestingRunId: data.sourceRunId ?? null,
+            requestedByAgentId: actor.agentId ?? null,
+            requestedByUserId: actor.userId ?? null,
+          });
+          return {
+            row: insertedRow,
+            replay: false as const,
+            runIdsToInterrupt: leaseResult.runIdsToInterrupt,
+            leaseId: leaseResult.lease.id,
+          };
+        });
+
+        if (result.replay) {
+          return hydrateInteraction(result.row);
+        }
+        if (result.runIdsToInterrupt.length > 0 && deps.cancelRun && result.leaseId) {
+          await interruptRunsForDecisionLease(db, { cancelRun: deps.cancelRun }, {
+            companyId: issue.companyId,
+            leaseId: result.leaseId,
+            anchorIssueId: issue.id,
+            runIds: result.runIdsToInterrupt,
+            actorType: actor.agentId ? "agent" : actor.userId ? "user" : "system",
+            actorId: actor.agentId ?? actor.userId ?? "system",
+          });
+        }
+        await touchIssue(db, issue.id);
+        const hydratedLeaseBound = hydrateInteraction(result.row);
+        await emitInteractionLifecycleNotification("interaction.created", hydratedLeaseBound, {
+          config: lifecycleConfig,
+        });
+        return hydratedLeaseBound;
+      }
+
       let created: IssueThreadInteractionRow;
       try {
         [created] = await db
           .insert(issueThreadInteractions)
-          .values({
-            companyId: issue.companyId,
-            issueId: issue.id,
-            kind: data.kind,
-            status: "pending",
-            continuationPolicy: data.continuationPolicy,
-            idempotencyKey: data.idempotencyKey ?? null,
-            sourceCommentId: data.sourceCommentId ?? null,
-            sourceRunId: data.sourceRunId ?? null,
-            title: data.title ?? null,
-            summary: data.summary ?? null,
-            createdByAgentId: actor.agentId ?? null,
-            createdByUserId: actor.userId ?? null,
-            payload: lifecyclePayload,
-            createdAt,
-            updatedAt: createdAt,
-          })
+          .values(insertValues)
           .returning();
       } catch (error) {
         if (!data.idempotencyKey || !isIssueThreadInteractionIdempotencyConflict(error)) {
@@ -1505,12 +1640,29 @@ export function issueThreadInteractionService(db: Db) {
             .returning();
           if (!claimed) return null;
 
+          const boundLease = await findDecisionLeaseForDecision(tx as unknown as Db, {
+            decisionKind: "interaction",
+            decisionId: claimed.id,
+            companyId: claimed.companyId,
+          });
+
           const expiredInteraction = hydrateInteraction(claimed);
           const payload = expiredInteraction.payload;
           const mayReissue =
             payload.escalated !== true
             && !payload.originalInteractionId;
-          if (!mayReissue) return { expiredInteraction, reissuedInteraction: null };
+          if (!mayReissue) {
+            // Final (non-reissuable) TTL expiry of a lease-bound decision is a
+            // resolving disposition (R2.5): write the continuation + release.
+            if (boundLease) {
+              await resolveInteractionDecisionLease(tx as unknown as Db, {
+                interactionId: claimed.id,
+                companyId: claimed.companyId,
+                disposition: "expired",
+              });
+            }
+            return { expiredInteraction, reissuedInteraction: null, leaseTransferred: false };
+          }
 
           const reissuedAt = now;
           const reissuedExpiresAt = expiresAtForInteraction(
@@ -1546,9 +1698,20 @@ export function issueThreadInteractionService(db: Db) {
             })
             .returning();
 
+          // TTL auto-reissue transfers the lease to the reissued interaction
+          // in the SAME transaction as the reissue insert (R2.5): the decision
+          // identity (idempotency key) is stable, only the card row moves.
+          if (boundLease) {
+            await tx
+              .update(decisionLeases)
+              .set({ decisionId: reissuedRow.id })
+              .where(eq(decisionLeases.id, boundLease.id));
+          }
+
           return {
             expiredInteraction,
             reissuedInteraction: hydrateInteraction(reissuedRow),
+            leaseTransferred: Boolean(boundLease),
           };
         });
 
@@ -1557,17 +1720,24 @@ export function issueThreadInteractionService(db: Db) {
         if (result.reissuedInteraction) reissued.push(result.reissuedInteraction);
         await touchIssue(db, result.expiredInteraction.issueId);
         await emitInteractionResolvedTelemetry(db, result.expiredInteraction);
-        await emitInteractionLifecycleNotification(
-          "interaction.expired",
-          result.expiredInteraction,
-          { config },
-        );
-        if (result.reissuedInteraction) {
+        // Lifecycle webhook/Slack emissions for lease-bound reissues are
+        // suppressed (R2.5): no repeated operator notification during a wait.
+        // interaction.resolved follows the same suppression — the decision
+        // continues on the reissued card, so nothing actually resolved.
+        if (!result.leaseTransferred) {
           await emitInteractionLifecycleNotification(
-            "interaction.created",
-            result.reissuedInteraction,
+            "interaction.expired",
+            result.expiredInteraction,
             { config },
           );
+          await emitResolvedInteractionNotifications([result.expiredInteraction], config);
+          if (result.reissuedInteraction) {
+            await emitInteractionLifecycleNotification(
+              "interaction.created",
+              result.reissuedInteraction,
+              { config },
+            );
+          }
         }
       }
 
@@ -1758,6 +1928,11 @@ export function issueThreadInteractionService(db: Db) {
           .where(eq(issueThreadInteractions.id, interactionId))
           .returning();
 
+        await resolveInteractionDecisionLease(tx as unknown as Db, {
+          interactionId,
+          companyId: issue.companyId,
+          disposition: "approved",
+        });
         await touchIssue(tx, issue.id);
         current.status = updated.status;
         current.result = updated.result;
@@ -1771,6 +1946,7 @@ export function issueThreadInteractionService(db: Db) {
       await emitInteractionResolvedTelemetry(db, accepted, {
         createdTaskCount: createdWakeTargets.length,
       });
+      await emitResolvedInteractionNotifications([accepted]);
       return {
         interaction: accepted,
         createdIssues: createdWakeTargets,
@@ -1831,9 +2007,15 @@ export function issueThreadInteractionService(db: Db) {
         throw conflict("Interaction has already been resolved");
       }
 
+      await resolveInteractionDecisionLease(db, {
+        interactionId,
+        companyId: issue.companyId,
+        disposition: "dismissed",
+      });
       await touchIssue(db, issue.id);
       const dismissed = hydrateInteraction(updated);
       await emitInteractionResolvedTelemetry(db, dismissed);
+      await emitResolvedInteractionNotifications([dismissed]);
       return dismissed;
     },
 
@@ -1923,6 +2105,14 @@ export function issueThreadInteractionService(db: Db) {
           throw conflict("Interaction has already been resolved");
         }
 
+        if (complete) {
+          // All verdicts submitted → answered → approved-equivalent (R2.5).
+          await resolveInteractionDecisionLease(tx as unknown as Db, {
+            interactionId,
+            companyId: issue.companyId,
+            disposition: "approved",
+          });
+        }
         await touchIssue(tx, issue.id);
         return {
           interaction: hydrateInteraction(updated),
@@ -1933,6 +2123,7 @@ export function issueThreadInteractionService(db: Db) {
 
       if (submission.resolved) {
         await emitInteractionResolvedTelemetry(db, submission.interaction);
+        await emitResolvedInteractionNotifications([submission.interaction]);
       }
       return submission;
     },
@@ -1977,9 +2168,15 @@ export function issueThreadInteractionService(db: Db) {
         throw conflict("Interaction has already been resolved");
       }
 
+      await resolveInteractionDecisionLease(db, {
+        interactionId,
+        companyId: issue.companyId,
+        disposition: "rejected",
+      });
       await touchIssue(db, issue.id);
       const rejected = hydrateInteraction(updated);
       await emitInteractionResolvedTelemetry(db, rejected);
+      await emitResolvedInteractionNotifications([rejected]);
       return rejected;
     },
 
@@ -2047,6 +2244,7 @@ export function issueThreadInteractionService(db: Db) {
         await touchIssue(db, issue.id);
         await emitResolvedInteractionsTelemetry(db, expired);
         await emitExpiredInteractionNotifications(expired);
+        await emitResolvedInteractionNotifications(expired);
       }
       return expired;
     },
@@ -2189,6 +2387,7 @@ export function issueThreadInteractionService(db: Db) {
         await touchIssue(db, issue.id);
         await emitResolvedInteractionsTelemetry(db, expired);
         await emitExpiredInteractionNotifications(expired);
+        await emitResolvedInteractionNotifications(expired);
       }
       return expired;
     },
@@ -2262,6 +2461,7 @@ export function issueThreadInteractionService(db: Db) {
         await touchIssue(db, issue.id);
         await emitResolvedInteractionsTelemetry(db, expired);
         await emitExpiredInteractionNotifications(expired);
+        await emitResolvedInteractionNotifications(expired);
       }
       return expired;
     },
@@ -2319,9 +2519,16 @@ export function issueThreadInteractionService(db: Db) {
         throw conflict("Interaction has already been resolved");
       }
 
+      // answered → approved (R2.5).
+      await resolveInteractionDecisionLease(db, {
+        interactionId,
+        companyId: issue.companyId,
+        disposition: "approved",
+      });
       await touchIssue(db, issue.id);
       const answered = hydrateInteraction(updated);
       await emitInteractionResolvedTelemetry(db, answered);
+      await emitResolvedInteractionNotifications([answered]);
       return answered;
     },
 
@@ -2376,9 +2583,15 @@ export function issueThreadInteractionService(db: Db) {
         throw conflict("Interaction has already been resolved");
       }
 
+      await resolveInteractionDecisionLease(db, {
+        interactionId,
+        companyId: issue.companyId,
+        disposition: "cancelled",
+      });
       await touchIssue(db, issue.id);
       const cancelled = hydrateInteraction(updated);
       await emitInteractionResolvedTelemetry(db, cancelled);
+      await emitResolvedInteractionNotifications([cancelled]);
       return cancelled;
     },
   };

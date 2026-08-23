@@ -65,6 +65,9 @@ export const issues = pgTable(
     executionWorkspacePreference: text("execution_workspace_preference"),
     executionWorkspaceSettings: jsonb("execution_workspace_settings").$type<Record<string, unknown>>(),
     sourceTrust: jsonb("source_trust").$type<SourceTrustMetadata | null>(),
+    completionContract: jsonb("completion_contract").$type<Record<string, unknown>>(),
+    completionReceipt: jsonb("completion_receipt").$type<Record<string, unknown>>(),
+    resolutionDisposition: text("resolution_disposition"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
@@ -113,6 +116,27 @@ export const issues = pgTable(
           and ${table.originId} is not null
           and ${table.hiddenAt} is null
           and ${table.executionRunId} is not null
+          and ${table.status} in ('backlog', 'todo', 'in_progress', 'in_review', 'blocked')`,
+      ),
+    // Sibling of issues_open_routine_execution_uq for HIDDEN open execution
+    // issues (run_only / issue_on_failure tracking modes): the shipped unique
+    // above is scoped to hidden_at IS NULL, so hidden live executions need
+    // their own mirror predicate to keep one open execution per routine.
+    openRoutineExecutionHiddenIdx: uniqueIndex("issues_open_routine_execution_hidden_uq")
+      .on(table.companyId, table.originKind, table.originId, table.originFingerprint)
+      .where(
+        sql`${table.originKind} = 'routine_execution'
+          and ${table.originId} is not null
+          and ${table.hiddenAt} is not null
+          and ${table.executionRunId} is not null
+          and ${table.status} in ('backlog', 'todo', 'in_progress', 'in_review', 'blocked')`,
+      ),
+    openRoutineFailureEpisodeIdx: uniqueIndex("issues_open_routine_failure_episode_uq")
+      .on(table.companyId, table.originKind, table.originId)
+      .where(
+        sql`${table.originKind} = 'routine_failure_episode'
+          and ${table.originId} is not null
+          and ${table.hiddenAt} is null
           and ${table.status} in ('backlog', 'todo', 'in_progress', 'in_review', 'blocked')`,
       ),
     activeLivenessRecoveryIncidentIdx: uniqueIndex("issues_active_liveness_recovery_incident_uq")

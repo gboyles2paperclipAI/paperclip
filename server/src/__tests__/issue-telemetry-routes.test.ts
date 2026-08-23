@@ -32,6 +32,17 @@ function registerModuleMocks() {
     trackErrorHandlerCrash: vi.fn(),
   }));
 
+  // The canned select mock above returns a row for EVERY query, which the
+  // decision-freeze mutation gate would misread as an active lease. The gate
+  // has dedicated embedded-PG coverage (decision-freeze-guards,
+  // replay-ful20244-stale-blocker); neutralize it here.
+  vi.doMock("../services/decision-freeze.js", async () => {
+    const actual = await vi.importActual<typeof import("../services/decision-freeze.js")>(
+      "../services/decision-freeze.js",
+    );
+    return { ...actual, assertDecisionFreezeMutationAllowed: vi.fn(async () => undefined) };
+  });
+
   vi.doMock("../telemetry.js", () => ({
     getTelemetryClient: mockGetTelemetryClient,
   }));
@@ -135,6 +146,7 @@ describe("issue telemetry routes", () => {
     vi.doUnmock("@paperclipai/shared/telemetry");
     vi.doUnmock("../telemetry.js");
     vi.doUnmock("../services/index.js");
+    vi.doUnmock("../services/decision-freeze.js");
     vi.doUnmock("../routes/issues.js");
     vi.doUnmock("../routes/authz.js");
     vi.doUnmock("../middleware/index.js");

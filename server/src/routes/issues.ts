@@ -118,6 +118,12 @@ import {
   workProductService,
 } from "../services/index.js";
 import { buildPlanReviewContext } from "../services/plan-review-context.js";
+import { findDecisionLeaseForDecision } from "../services/decision-leases.js";
+import {
+  assertDecisionFreezeInteractionCreateAllowed,
+  assertDecisionFreezeMutationAllowed,
+  getActiveDecisionFreeze,
+} from "../services/decision-freeze.js";
 import {
   TASK_WATCHDOG_ORIGIN_KIND,
   resolveTaskWatchdogMutationScope,
@@ -1722,35 +1728,12 @@ type IssueTriageAuthorityPatchDecision = {
   routineExecutionCloseout?: boolean;
 };
 
-function shouldImplicitlyMoveCommentedIssueToTodo(input: {
-  issueStatus: string | null | undefined;
-  assigneeAgentId: string | null | undefined;
-  actorType: "agent" | "user";
-  actorId: string;
-  actorRunId: string | null | undefined;
-  checkoutRunId: string | null | undefined;
-  executionRunId: string | null | undefined;
-}) {
-  // Local-CLI agents post comments under user auth, so the actor.type is "user"
-  // even though the comment originates from the same heartbeat run that owns
-  // the issue lock. Without this guard, an agent that closes its own issue and
-  // then posts a follow-up comment in the same run silently reopens it.
-  // Suppress the implicit move whenever the comment's source run matches the
-  // issue's checkout/execution run.
-  if (
-    typeof input.actorRunId === "string"
-    && input.actorRunId.length > 0
-    && (input.actorRunId === input.checkoutRunId || input.actorRunId === input.executionRunId)
-  ) {
-    return false;
-  }
-  // Only human comments should implicitly reopen finished work.
-  // Agent-authored comments remain communicative unless reopen was explicit.
-  if (input.actorType !== "user") return false;
-  if (!isClosedIssueStatus(input.issueStatus) && input.issueStatus !== "blocked") return false;
-  if (typeof input.assigneeAgentId !== "string" || input.assigneeAgentId.length === 0) return false;
-  return true;
-}
+// ADR-20260823-quiescent-coordination terminal integrity (FUL-20244, PR-2b):
+// the implicit comment-reopen path (`shouldImplicitlyMoveCommentedIssueToTodo`)
+// is REMOVED. Comments never change issue status; moving a terminal or blocked
+// issue back to todo requires explicit `reopen: true` / `resume: true` intent
+// (or the scheduled-retry human-comment supersede below, which only acts on
+// `in_progress` issues that are waiting on a scheduled retry).
 
 function shouldHumanCommentResumeInProgressScheduledRetry(input: {
   hasComment: boolean;
@@ -1800,6 +1783,7 @@ function buildRequestItemVerdictsWakeIdempotencyKey(args: {
 }
 
 function queueResolvedInteractionContinuationWakeup(input: {
+  db: Db;
   heartbeat: ReturnType<typeof heartbeatService>;
   issue: { id: string; assigneeAgentId: string | null; status: string };
   interaction: {
@@ -1830,6 +1814,59 @@ function queueResolvedInteractionContinuationWakeup(input: {
   if (input.interaction.status === "expired") return;
   if (!input.issue.assigneeAgentId || isClosedIssueStatus(input.issue.status)) return;
 
+  void suppressWakeForDecisionLeaseBoundInteraction(input.db, input.interaction.id)
+    .catch((err): boolean => {
+      // Fail OPEN: a lease-lookup failure must never swallow the legacy wake
+      // for non-lease interactions. If a lease actually exists, the wake-guard
+      // skips the non-bypass wake anyway and the outbox still delivers.
+      logger.warn({
+        err,
+        issueId: input.issue.id,
+        interactionId: input.interaction.id,
+      }, "failed to check decision lease binding before interaction continuation wake");
+      return false;
+    })
+    .then((suppressed) => {
+      if (suppressed) return;
+      queueResolvedInteractionContinuationWakeupUnchecked(input);
+    });
+}
+
+/**
+ * The continuation outbox is the ONLY decision wake path (ADR R2.10): a lease
+ * ever bound to this interaction — active, revising, or already released —
+ * means the legacy direct wake below must not also fire.
+ */
+async function suppressWakeForDecisionLeaseBoundInteraction(db: Db, interactionId: string) {
+  const lease = await findDecisionLeaseForDecision(db, {
+    decisionKind: "interaction",
+    decisionId: interactionId,
+    anyState: true,
+  });
+  return Boolean(lease);
+}
+
+function queueResolvedInteractionContinuationWakeupUnchecked(input: {
+  heartbeat: ReturnType<typeof heartbeatService>;
+  issue: { id: string; assigneeAgentId: string | null; status: string };
+  interaction: {
+    id: string;
+    kind: string;
+    status: string;
+    continuationPolicy: string;
+    sourceCommentId?: string | null;
+    sourceRunId?: string | null;
+    payload?: unknown;
+    result?: unknown;
+  };
+  actor: { actorType: "user" | "agent"; actorId: string };
+  source: string;
+  forceFreshSession?: boolean;
+  workspaceRefreshReason?: string | null;
+  newlyResolvedItemIds?: string[];
+  idempotencyKey?: string | null;
+}) {
+  if (!input.issue.assigneeAgentId) return;
   const forceFreshSession = input.forceFreshSession === true;
   const workspaceRefreshReason = readNonEmptyString(input.workspaceRefreshReason);
   const planTarget = readPlanConfirmationTargetForIssue(input.interaction.payload, input.issue.id);
@@ -5866,6 +5903,16 @@ export function issueRoutes(
       updateFields,
       actorType: req.actor.type,
     });
+    // Recovery-action resolve writes the source issue status (stack-review E):
+    // the same freeze/mutation gate applies before any status is restored on a
+    // frozen member. The service-level gate in issueService.update re-checks
+    // inside the write transaction.
+    if (sourceIssueStatus) {
+      await assertDecisionFreezeMutationAllowed(db, existing.companyId, existing.id, {
+        type: req.actor.type,
+        agentId: actor.agentId ?? null,
+      });
+    }
 
     const actionStatus = outcome === "cancelled" ? "cancelled" : "resolved";
     const result = await db.transaction(async (tx) => {
@@ -5896,6 +5943,7 @@ export function issueRoutes(
             status: sourceIssueStatus,
             actorAgentId: actor.agentId ?? null,
             actorUserId: actor.actorType === "user" ? actor.actorId : null,
+            actorType: req.actor.type,
           },
           tx,
         );
@@ -6362,6 +6410,12 @@ export function issueRoutes(
     assertCompanyAccess(req, issue.companyId);
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
+    // Decision-freeze mutation gate (R2.2/R3.3, PR-2b); the anchor's assignee
+    // may still update documents on the anchor while the lease is `revising`.
+    await assertDecisionFreezeMutationAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: req.actor.agentId ?? null,
+    }, { revisingOwnerOperation: "document_put" });
     const keyParsed = issueDocumentKeySchema.safeParse(String(req.params.key ?? "").trim().toLowerCase());
     if (!keyParsed.success) {
       res.status(400).json({ error: "Invalid document key", details: keyParsed.error.issues });
@@ -6382,6 +6436,7 @@ export function issueRoutes(
       createdByAgentId: actor.agentId ?? null,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
       createdByRunId: actor.runId ?? null,
+      actorType: req.actor.type,
       sourceTrust,
       lockedDocumentStrategy: req.actor.type === "agent" ? "create_new_document" : "conflict",
     });
@@ -6795,6 +6850,12 @@ export function issueRoutes(
     assertCompanyAccess(req, issue.companyId);
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
+    // Decision-freeze mutation gate (R2.2/R3.3, PR-2b): no owner exemption for
+    // work products — only comment/document/resubmit pierce while revising.
+    await assertDecisionFreezeMutationAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: req.actor.agentId ?? null,
+    });
     const actor = getActorInfo(req);
     const createInput = {
       ...req.body,
@@ -6810,7 +6871,11 @@ export function issueRoutes(
         metadata: req.body.metadata ?? null,
       });
     }
-    const product = await workProductsSvc.createForIssue(issue.id, issue.companyId, createInput);
+    const product = await workProductsSvc.createForIssue(issue.id, issue.companyId, createInput, {
+      agentId: actor.agentId ?? null,
+      userId: actor.actorType === "user" ? actor.actorId : null,
+      actorType: req.actor.type,
+    });
     if (!product) {
       res.status(422).json({ error: "Invalid work product payload" });
       return;
@@ -6995,6 +7060,12 @@ export function issueRoutes(
     }
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
+    // Decision-freeze mutation gate (R2.2/R3.3, stack-review B): work-product
+    // mutation on a frozen member is refused; the service re-checks in-tx.
+    await assertDecisionFreezeMutationAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: req.actor.type === "agent" ? req.actor.agentId ?? null : null,
+    });
     const actor = getActorInfo(req);
     const patch = { ...req.body };
     const createdByRunId = await resolveWorkProductCreatedByRunId(req, res, existing.companyId, req.body, "update");
@@ -7015,6 +7086,10 @@ export function issueRoutes(
     const product = await workProductsSvc.update(id, {
       ...patch,
       ...(sourceTrust ? { sourceTrust } : {}),
+    }, {
+      agentId: actor.agentId ?? null,
+      userId: actor.actorType === "user" ? actor.actorId : null,
+      actorType: req.actor.type,
     });
     if (!product) {
       res.status(404).json({ error: "Work product not found" });
@@ -7055,12 +7130,23 @@ export function issueRoutes(
     }
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
-    const removed = await workProductsSvc.remove(id);
+    // Decision-freeze mutation gate (R2.2/R3.3, stack-review B): deleting a
+    // work product from a frozen member is refused; service re-checks in-tx.
+    await assertDecisionFreezeMutationAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: req.actor.type === "agent" ? req.actor.agentId ?? null : null,
+    });
+    const deleteActor = getActorInfo(req);
+    const removed = await workProductsSvc.remove(id, {
+      agentId: deleteActor.agentId ?? null,
+      userId: deleteActor.actorType === "user" ? deleteActor.actorId : null,
+      actorType: req.actor.type,
+    });
     if (!removed) {
       res.status(404).json({ error: "Work product not found" });
       return;
     }
-    const actor = getActorInfo(req);
+    const actor = deleteActor;
     await logActivity(db, {
       companyId: existing.companyId,
       actorType: actor.actorType,
@@ -7308,6 +7394,18 @@ export function issueRoutes(
     });
     if (!sanitizedBody) return;
     const { watchdogDiscovery: rawWatchdogDiscovery, ...rawCreateBody } = sanitizedBody;
+    // Completion-contract custody (ADR R2.12, PR-3): only board/system actors
+    // (and the broker path) may attach a contract at create time.
+    if (req.actor.type === "agent" && rawCreateBody.completionContract != null) {
+      res.status(422).json({
+        error: "Agents cannot attach completion contracts",
+        details: {
+          rule: "Completion contract requires an accepted receipt",
+          fix: "Completion contracts are attached by board/system actors or the broker path",
+        },
+      });
+      return;
+    }
     const watchdogDiscovery = normalizeWatchdogDiscovery(rawWatchdogDiscovery);
     const watchdogProductBugFollowUp = await resolveTaskWatchdogProductBugFollowUp(
       req,
@@ -7397,6 +7495,15 @@ export function issueRoutes(
       await assertCanAssignTasks(req, companyId, createAssignmentScope);
     }
     await assertIssueEnvironmentSelection(companyId, createBody.executionWorkspaceSettings?.environmentId);
+    // Decision-freeze issue-create gate (R2.2/R3.3, PR-2b): agents cannot
+    // create new work items whose parent is inside an active decision cone
+    // (blocked-by containment is gated in-transaction by syncBlockedByIssueIds).
+    if (createBody.parentId) {
+      await assertDecisionFreezeMutationAllowed(db, companyId, createBody.parentId, {
+        type: req.actor.type,
+        agentId: req.actor.agentId ?? null,
+      });
+    }
 
     const executionPolicy = applyActorMonitorScheduledBy(
       normalizeIssueExecutionPolicy(createBody.executionPolicy),
@@ -7422,6 +7529,7 @@ export function issueRoutes(
       actorRunId: actor.runId,
       actorResponsibleUserId: authenticatedActorResponsibleUserId(req),
       trustExplicitResponsibleUserId: actor.actorType === "user",
+      actorType: req.actor.type,
       watchdogActorRunId: actor.runId,
     });
     await issueReferencesSvc.syncIssue(issue.id);
@@ -7563,6 +7671,12 @@ export function issueRoutes(
       await assertCanAssignTasks(req, parent.companyId, childAssignmentScope);
     }
     await assertIssueEnvironmentSelection(parent.companyId, createBody.executionWorkspaceSettings?.environmentId);
+    // Decision-freeze issue-create gate (R2.2/R3.3, PR-2b): agents cannot
+    // create children under a parent inside an active decision cone.
+    await assertDecisionFreezeMutationAllowed(db, parent.companyId, parent.id, {
+      type: req.actor.type,
+      agentId: req.actor.agentId ?? null,
+    });
 
     const actor = getActorInfo(req);
     const serializationContext = await resolveWatchdogFollowUpSerializationContext(req, parent);
@@ -7598,6 +7712,7 @@ export function issueRoutes(
       actorRunId: actor.runId,
       actorResponsibleUserId: authenticatedActorResponsibleUserId(req),
       trustExplicitResponsibleUserId: actor.actorType === "user",
+      actorType: req.actor.type,
       actorAgentId: actor.agentId,
       actorUserId: actor.actorType === "user" ? actor.actorId : null,
       watchdogActorRunId: actor.runId,
@@ -7801,6 +7916,7 @@ export function issueRoutes(
       actorAgentId: actor.agentId,
       actorUserId: actor.actorType === "user" ? actor.actorId : null,
       actorRunId: actor.runId ?? null,
+      actorType: req.actor.type,
     });
 
     await logActivity(db, {
@@ -8027,6 +8143,23 @@ export function issueRoutes(
     if (triageAuthorityPatch.routineExecutionCloseout) {
       delete updateFields.executionState;
     }
+    // Decision-freeze mutation gate (R2.2/R3.3, PR-2b): agent writes to a
+    // member of an active decision cone are rejected before any mutation.
+    // While the lease is `revising`, a comment-only PATCH by the anchor's
+    // assignee stays allowed (owner exemption, R3.1); any other field, intent
+    // flag, or review request is still gated.
+    const isCommentOnlyPatch =
+      !!commentBody &&
+      Object.keys(updateFields).length === 0 &&
+      reviewRequest === undefined &&
+      reopenRequested !== true &&
+      resumeRequested !== true &&
+      !interruptRequested &&
+      hiddenAtRaw === undefined;
+    await assertDecisionFreezeMutationAllowed(db, existing.companyId, existing.id, {
+      type: req.actor.type,
+      agentId: actor.agentId ?? null,
+    }, { revisingOwnerOperation: isCommentOnlyPatch ? "comment" : null });
     const shouldCancelActiveRunForCancelledStatus =
       existing.status !== "cancelled" && updateFields.status === "cancelled";
     if (resumeRequested === true && !commentBody) {
@@ -8054,6 +8187,40 @@ export function issueRoutes(
         },
       });
       return;
+    }
+    // Completion-contract custody (ADR R2.12, PR-3): agents never attach or
+    // modify contracts and never record an explicit disposition; a receipt may
+    // only be submitted by the issue's assignee agent. Receipt CONTENT is
+    // validated fail-closed at the done gate in issueService.update.
+    if (req.actor.type === "agent") {
+      if (updateFields.completionContract !== undefined) {
+        res.status(422).json({
+          error: "Agents cannot attach or modify completion contracts",
+          details: {
+            rule: "Completion contract requires an accepted receipt",
+            fix: "Completion contracts are attached by board/system actors or the broker path",
+          },
+        });
+        return;
+      }
+      if (updateFields.resolutionDisposition !== undefined) {
+        res.status(422).json({
+          error: "Agents cannot set an explicit resolution disposition",
+          details: {
+            rule: "Resolution disposition is recorded by the server on terminal transitions",
+          },
+        });
+        return;
+      }
+      if (updateFields.completionReceipt !== undefined && existing.assigneeAgentId !== req.actor.agentId) {
+        res.status(422).json({
+          error: "Only the assignee agent may submit a completion receipt",
+          details: {
+            rule: "Completion contract requires an accepted receipt",
+          },
+        });
+        return;
+      }
     }
     await assertIssueEnvironmentSelection(existing.companyId, updateFields.executionWorkspaceSettings?.environmentId);
     const requestedAssigneeAgentId =
@@ -8092,7 +8259,11 @@ export function issueRoutes(
         : null;
     const shouldResumeInProgressScheduledRetry =
       !!scheduledRetryForHumanComment &&
-      scheduledRetryForHumanComment.agentId === requestedAssigneeAgentId;
+      scheduledRetryForHumanComment.agentId === requestedAssigneeAgentId &&
+      // Scheduled-retry human-comment resume must never fire for a frozen
+      // member (stack-review E): the comment is recorded, the implicit
+      // status move is suppressed until the decision resolves.
+      !(await getActiveDecisionFreeze(db, existing.companyId, existing.id));
     const assigneeSelfCommentOnTerminal = isAssigneeSelfCommentOnTerminalIssue({
       hasCommentBody: !!commentBody,
       resumeRequested: resumeRequested === true,
@@ -8101,20 +8272,12 @@ export function issueRoutes(
       actorType: actor.actorType,
       actorId: actor.actorId,
     });
+    // Comments never implicitly change status (terminal integrity, PR-2b):
+    // only explicit reopen/resume intent or the scheduled-retry supersede move
+    // an issue back to todo.
     const effectiveMoveToTodoRequested =
       !assigneeSelfCommentOnTerminal &&
-      (explicitMoveToTodoRequested ||
-        (!!commentBody &&
-          shouldImplicitlyMoveCommentedIssueToTodo({
-            issueStatus: existing.status,
-            assigneeAgentId: requestedAssigneeAgentId,
-            actorType: actor.actorType,
-            actorId: actor.actorId,
-            actorRunId: actor.runId,
-            checkoutRunId: existing.checkoutRunId,
-            executionRunId: existing.executionRunId,
-          })) ||
-        shouldResumeInProgressScheduledRetry);
+      (explicitMoveToTodoRequested || shouldResumeInProgressScheduledRetry);
     const updateReferenceSummaryBefore = titleOrDescriptionChanged
       ? await issueReferencesSvc.listIssueReferenceSummary(existing.id)
       : null;
@@ -8294,6 +8457,29 @@ export function issueRoutes(
       }
     }
 
+    // Completion-contract done gate, route-level sibling (ADR R2.12, PR-3).
+    // Placed AFTER the execution-policy transition merge so a staged
+    // executor "done" that commits as in_review is not misgated; the
+    // authoritative fail-closed validation lives in issueService.update.
+    if (updateFields.status === "done") {
+      const routeEffectiveCompletionContract = updateFields.completionContract !== undefined
+        ? updateFields.completionContract
+        : existing.completionContract;
+      const routeEffectiveCompletionReceipt = updateFields.completionReceipt !== undefined
+        ? updateFields.completionReceipt
+        : existing.completionReceipt;
+      if (routeEffectiveCompletionContract != null && routeEffectiveCompletionReceipt == null) {
+        res.status(422).json({
+          error: "Issue done requires an accepted completion receipt",
+          details: {
+            rule: "Completion contract requires an accepted receipt",
+            fix: "Submit a completionReceipt bound to the attached contract's preimage, revision, and execution, then retry status=done",
+          },
+        });
+        return;
+      }
+    }
+
     const nextAssigneeAgentId =
       updateFields.assigneeAgentId === undefined ? existing.assigneeAgentId : (updateFields.assigneeAgentId as string | null);
     const nextAssigneeUserId =
@@ -8359,6 +8545,9 @@ export function issueRoutes(
               ...updateFields,
               actorAgentId: actor.agentId ?? null,
               actorUserId: actor.actorType === "user" ? actor.actorId : null,
+              actorType: req.actor.type,
+              revisingOwnerOperation: isCommentOnlyPatch ? "comment" : null,
+              reopen: reopenRequested === true || resumeRequested === true,
             },
             tx,
           );
@@ -8387,6 +8576,9 @@ export function issueRoutes(
               ...updateFields,
               actorAgentId: actor.agentId ?? null,
               actorUserId: actor.actorType === "user" ? actor.actorId : null,
+              actorType: req.actor.type,
+              revisingOwnerOperation: isCommentOnlyPatch ? "comment" : null,
+              reopen: reopenRequested === true || resumeRequested === true,
             },
             tx,
           );
@@ -8398,9 +8590,11 @@ export function issueRoutes(
               agentId: actor.agentId ?? undefined,
               userId: actor.actorType === "user" ? actor.actorId : undefined,
               runId: actor.runId,
+              actorType: req.actor.type,
             },
             {
               sourceTrust: await sourceTrustForActorWrite(updated, actor),
+              revisingOwnerOperation: isCommentOnlyPatch ? "comment" : null,
             },
             tx,
           );
@@ -8411,6 +8605,9 @@ export function issueRoutes(
           ...updateFields,
           actorAgentId: actor.agentId ?? null,
           actorUserId: actor.actorType === "user" ? actor.actorId : null,
+          actorType: req.actor.type,
+          revisingOwnerOperation: isCommentOnlyPatch ? "comment" : null,
+          reopen: reopenRequested === true || resumeRequested === true,
         });
       }
     } catch (err) {
@@ -8829,8 +9026,10 @@ export function issueRoutes(
         agentId: actor.agentId ?? undefined,
         userId: actor.actorType === "user" ? actor.actorId : undefined,
         runId: actor.runId,
+        actorType: req.actor.type,
       }, {
         sourceTrust: await sourceTrustForActorWrite(issue, actor),
+        revisingOwnerOperation: isCommentOnlyPatch ? "comment" : null,
       });
       await issueReferencesSvc.syncComment(comment.id);
       await externalObjectsSvc.syncCommentSafely(comment.id);
@@ -9231,6 +9430,12 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, existing.companyId);
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
+    // Decision-freeze mutation gate (R2.2/R3.3): an agent must not delete a
+    // frozen cone member out from under a pending human decision.
+    await assertDecisionFreezeMutationAllowed(db, existing.companyId, existing.id, {
+      type: req.actor.type,
+      agentId: getActorInfo(req).agentId ?? null,
+    });
     const attachments = await svc.listAttachments(id);
 
     const issue = await svc.remove(id);
@@ -9651,7 +9856,17 @@ export function issueRoutes(
     const agentSourceRunId = req.actor.type === "agent" ? requireAgentRunId(req, res) : null;
     if (req.actor.type === "agent" && !agentSourceRunId) return;
 
-    const interaction = await issueThreadInteractionService(db).create(issue, {
+    // Decision-freeze interaction gate (R2.2, stack-review B): an agent may
+    // not open a NEW interaction on a frozen member — unless it carries the
+    // SAME decision idempotency key as every freezing lease (the revision
+    // resubmit path re-posting the same decision). Board/user actors are the
+    // deciders and stay exempt.
+    await assertDecisionFreezeInteractionCreateAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: req.actor.type === "agent" ? req.actor.agentId ?? null : null,
+    }, { decisionIdempotencyKey: req.body?.decisionLease?.idempotencyKey ?? null });
+
+    const interaction = await issueThreadInteractionService(db, { cancelRun: heartbeat.cancelRun }).create(issue, {
       ...req.body,
       sourceRunId: req.actor.type === "agent" ? agentSourceRunId : req.body.sourceRunId ?? null,
     }, {
@@ -9770,6 +9985,7 @@ export function issueRoutes(
         acceptedPlanTarget?.issueId === issue.id &&
         acceptedPlanTarget.key === "plan";
       queueResolvedInteractionContinuationWakeup({
+        db,
         heartbeat,
         issue: continuationWakeIssue,
         interaction,
@@ -9830,6 +10046,7 @@ export function issueRoutes(
       });
 
       queueResolvedInteractionContinuationWakeup({
+        db,
         heartbeat,
         issue,
         interaction,
@@ -9883,6 +10100,7 @@ export function issueRoutes(
       });
 
       queueResolvedInteractionContinuationWakeup({
+        db,
         heartbeat,
         issue,
         interaction,
@@ -9947,6 +10165,7 @@ export function issueRoutes(
 
       if (newlyResolvedItemIds.length > 0) {
         queueResolvedInteractionContinuationWakeup({
+          db,
           heartbeat,
           issue,
           interaction,
@@ -10006,6 +10225,7 @@ export function issueRoutes(
       });
 
       queueResolvedInteractionContinuationWakeup({
+        db,
         heartbeat,
         issue,
         interaction,
@@ -10069,6 +10289,7 @@ export function issueRoutes(
       });
 
       queueResolvedInteractionContinuationWakeup({
+        db,
         heartbeat,
         issue,
         interaction,
@@ -10346,6 +10567,17 @@ export function issueRoutes(
     const reopenRequested = req.body.reopen === true;
     const resumeRequested = req.body.resume === true;
     const interruptRequested = req.body.interrupt === true;
+    // Decision-freeze mutation gate (R2.2/R3.3, PR-2b): agent comments on a
+    // member of an active decision cone are rejected; a pure comment (no
+    // reopen/resume/interrupt intent) by the anchor's assignee stays allowed
+    // while the lease is `revising` (owner exemption, R3.1).
+    await assertDecisionFreezeMutationAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: actor.agentId ?? null,
+    }, {
+      revisingOwnerOperation:
+        reopenRequested || resumeRequested || interruptRequested ? null : "comment",
+    });
     const isClosed = isClosedIssueStatus(issue.status);
     const isBlocked = issue.status === "blocked";
     const mentionGrantedPeerAgentCommentOnly =
@@ -10383,7 +10615,11 @@ export function issueRoutes(
         : null;
     const shouldResumeInProgressScheduledRetry =
       !!scheduledRetryForHumanComment &&
-      scheduledRetryForHumanComment.agentId === issue.assigneeAgentId;
+      scheduledRetryForHumanComment.agentId === issue.assigneeAgentId &&
+      // Scheduled-retry human-comment resume must never fire for a frozen
+      // member (stack-review E): the comment lands, the implicit status move
+      // waits for the decision to resolve.
+      !(await getActiveDecisionFreeze(db, issue.companyId, issue.id));
     const assigneeSelfCommentOnTerminal = isAssigneeSelfCommentOnTerminalIssue({
       hasCommentBody: true,
       resumeRequested: resumeRequested === true,
@@ -10392,19 +10628,12 @@ export function issueRoutes(
       actorType: actor.actorType,
       actorId: actor.actorId,
     });
+    // Comments never implicitly change status (terminal integrity, PR-2b):
+    // only explicit reopen/resume intent or the scheduled-retry supersede move
+    // an issue back to todo.
     const effectiveMoveToTodoRequested =
       !assigneeSelfCommentOnTerminal &&
-      (explicitMoveToTodoRequested ||
-        shouldImplicitlyMoveCommentedIssueToTodo({
-          issueStatus: issue.status,
-          assigneeAgentId: issue.assigneeAgentId,
-          actorType: actor.actorType,
-          actorId: actor.actorId,
-          actorRunId: actor.runId,
-          checkoutRunId: issue.checkoutRunId,
-          executionRunId: issue.executionRunId,
-        }) ||
-        shouldResumeInProgressScheduledRetry);
+      (explicitMoveToTodoRequested || shouldResumeInProgressScheduledRetry);
     const hasUnresolvedFirstClassBlockers =
       isBlocked && effectiveMoveToTodoRequested
         ? (await svc.getDependencyReadiness(issue.id)).unresolvedBlockerCount > 0
@@ -10548,6 +10777,7 @@ export function issueRoutes(
         status: typeof transition.patch.status === "string" ? transition.patch.status : "done",
         actorAgentId: actor.agentId ?? null,
         actorUserId: actor.actorType === "user" ? actor.actorId : null,
+        actorType: req.actor.type,
       };
 
       const sourceTrust = await sourceTrustForActorWrite(currentIssue, actor);
@@ -10567,6 +10797,7 @@ export function issueRoutes(
               agentId: actor.agentId ?? undefined,
               userId: actor.actorType === "user" ? actor.actorId : undefined,
               runId: actor.runId,
+              actorType: req.actor.type,
             },
             commentOptions,
             tx,
@@ -10635,11 +10866,14 @@ export function issueRoutes(
         agentId: actor.agentId ?? undefined,
         userId: actor.actorType === "user" ? actor.actorId : undefined,
         runId: actor.runId,
+        actorType: req.actor.type,
       }, {
         authorType: req.body.authorType ?? (actor.actorType === "agent" ? "agent" : "user"),
         presentation: req.body.presentation ?? null,
         metadata: req.body.metadata ?? null,
         sourceTrust: await sourceTrustForActorWrite(currentIssue, actor),
+        revisingOwnerOperation:
+          reopenRequested || resumeRequested || interruptRequested ? null : "comment",
       });
     }
 
@@ -11077,6 +11311,12 @@ export function issueRoutes(
     }
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
+    // Decision-freeze mutation gate (R2.2/R3.3, PR-2b): no owner exemption for
+    // attachments — only comment/document/resubmit pierce while revising.
+    await assertDecisionFreezeMutationAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: req.actor.agentId ?? null,
+    });
 
     const company = await companiesSvc.getById(companyId);
     const attachmentMaxBytes = normalizeIssueAttachmentMaxBytes(company?.attachmentMaxBytes);
@@ -11132,6 +11372,7 @@ export function issueRoutes(
       originalFilename: stored.originalFilename,
       createdByAgentId: actor.agentId,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+      actorType: req.actor.type,
     });
 
     await logActivity(db, {
@@ -11234,6 +11475,14 @@ export function issueRoutes(
     }
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
+    // Decision-freeze mutation gate (R2.2/R3.3, stack-review B): agent
+    // deletion of evidence attachments on a frozen member is refused BEFORE
+    // the storage object is touched; the service re-checks in-tx.
+    await assertDecisionFreezeMutationAllowed(db, issue.companyId, issue.id, {
+      type: req.actor.type,
+      agentId: req.actor.type === "agent" ? req.actor.agentId ?? null : null,
+    });
+    const actor = getActorInfo(req);
 
     try {
       await storage.deleteObject(attachment.companyId, attachment.objectKey);
@@ -11241,13 +11490,15 @@ export function issueRoutes(
       logger.warn({ err, attachmentId }, "storage delete failed while removing attachment");
     }
 
-    const removed = await svc.removeAttachment(attachmentId);
+    const removed = await svc.removeAttachment(attachmentId, {
+      agentId: actor.agentId ?? null,
+      userId: actor.actorType === "user" ? actor.actorId : null,
+      actorType: req.actor.type,
+    });
     if (!removed) {
       res.status(404).json({ error: "Attachment not found" });
       return;
     }
-
-    const actor = getActorInfo(req);
     await logActivity(db, {
       companyId: removed.companyId,
       actorType: actor.actorType,

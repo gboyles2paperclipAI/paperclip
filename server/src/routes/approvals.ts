@@ -23,6 +23,14 @@ import { redactEventPayload } from "../redaction.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { slackIntegrationService } from "../services/slack-integration.js";
 import { loadMatchingAgentRun } from "../services/agent-run-context.js";
+import {
+  createApprovalDecision,
+  findDecisionLeaseForDecision,
+  interruptRunsForDecisionLease,
+  resolveApprovalDecisionLease,
+} from "../services/decision-leases.js";
+import { assertDecisionFreezeMutationAllowed } from "../services/decision-freeze.js";
+import { bindBrokerOperationRequestToApprovalPayload } from "../services/broker-operations.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -146,7 +154,13 @@ export function approvalRoutes(
       ? rawIssueIds.filter((value: unknown): value is string => typeof value === "string")
       : [];
     const uniqueIssueIds = Array.from(new Set(issueIds));
-    const { issueIds: _issueIds, ...approvalInput } = req.body;
+    const {
+      issueIds: _issueIds,
+      idempotencyKey: _idempotencyKey,
+      decisionLease: _decisionLease,
+      brokerOperation: _brokerOperation,
+      ...approvalInput
+    } = req.body;
     const normalizedPayload =
       approvalInput.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
@@ -157,6 +171,91 @@ export function approvalRoutes(
         : approvalInput.payload;
 
     const actor = getActorInfo(req);
+
+    // Decision-idempotent / lease-creating path (ADR R2.11, R3.2): one
+    // transaction writes approval + links + posture + cone + lease; equivalent
+    // replays return the existing approval with zero side effects.
+    const decisionLease = req.body.decisionLease ?? null;
+    const idempotencyKey = typeof req.body.idempotencyKey === "string" ? req.body.idempotencyKey : null;
+
+    // Approved-action broker request (R2.16/PR-5): bind the typed operation +
+    // content hashes into the approval payload; the broker_operations row is
+    // enqueued only when the approval is accepted. Lease-bound only in v1.
+    const brokerOperation = req.body.brokerOperation ?? null;
+    if (brokerOperation && !decisionLease) {
+      res.status(422).json({
+        error: "brokerOperation requires a decisionLease block (broker operations are lease-bound)",
+      });
+      return;
+    }
+    const payloadForCreate = brokerOperation
+      ? bindBrokerOperationRequestToApprovalPayload(normalizedPayload, brokerOperation)
+      : normalizedPayload;
+
+    if (decisionLease || idempotencyKey) {
+      const created = await createApprovalDecision(db, {
+        companyId,
+        type: approvalInput.type,
+        payload: payloadForCreate,
+        idempotencyKey,
+        issueIds: uniqueIssueIds,
+        requestedByAgentId:
+          approvalInput.requestedByAgentId ?? (actor.actorType === "agent" ? actor.actorId : null),
+        requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
+        requestingRunId: req.actor.type === "agent" ? req.actor.runId ?? null : null,
+        decisionLease,
+      });
+
+      if (!created.applied) {
+        res.status(200).json({ ...redactApprovalPayload(created.approval), applied: false });
+        return;
+      }
+
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        action: "approval.created",
+        entityType: "approval",
+        entityId: created.approval.id,
+        details: {
+          type: created.approval.type,
+          issueIds: created.linkedIssueIds,
+          ...(created.lease ? { decisionLeaseId: created.lease.id } : {}),
+        },
+      });
+      if (created.lease) {
+        await logActivity(db, {
+          companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          action: "decision_lease.created",
+          entityType: "decision_lease",
+          entityId: created.lease.id,
+          details: {
+            approvalId: created.approval.id,
+            anchorIssueId: created.lease.anchorIssueId,
+            interruptedRunCount: created.runIdsToInterrupt.length,
+          },
+        });
+        if (created.runIdsToInterrupt.length > 0) {
+          await interruptRunsForDecisionLease(db, { cancelRun: heartbeat.cancelRun }, {
+            companyId,
+            leaseId: created.lease.id,
+            anchorIssueId: created.lease.anchorIssueId,
+            runIds: created.runIdsToInterrupt,
+            actorType: actor.actorType === "user" ? "user" : "agent",
+            actorId: actor.actorId,
+          });
+        }
+      }
+      await slack.postApprovalRequested(created.approval.id);
+      res.status(201).json(redactApprovalPayload(created.approval));
+      return;
+    }
+
     const approval = await svc.create(companyId, {
       ...approvalInput,
       payload: normalizedPayload,
@@ -234,7 +333,26 @@ export function approvalRoutes(
         },
       });
 
-      if (approval.requestedByAgentId) {
+      // Lease-bound approvals deliver the requester wake through the
+      // continuation outbox exclusively (R2.10); the legacy immediate wake
+      // below remains ONLY for approvals without a lease (documented PR-2a
+      // deviation: full outbox unification for non-lease approvals needs a
+      // lease row and lands with the broker migration). Fail OPEN on lookup
+      // errors: an active lease still freeze-skips the legacy wake, and the
+      // orphan sweep + outbox deliver exactly once.
+      let leaseOutcome: Awaited<ReturnType<typeof resolveApprovalDecisionLease>> = null;
+      try {
+        leaseOutcome = await resolveApprovalDecisionLease(db, {
+          approval,
+          disposition: "approved",
+          actorUserId: decidedByUserId,
+          enqueueWakeup: heartbeat.wakeup,
+        });
+      } catch (err) {
+        logger.warn({ err, approvalId: approval.id }, "decision lease resolution failed on approve; falling back to legacy wake path");
+      }
+
+      if (!leaseOutcome && approval.requestedByAgentId) {
         try {
           const wakeRun = await heartbeat.wakeup(approval.requestedByAgentId, {
             source: "automation",
@@ -321,6 +439,19 @@ export function approvalRoutes(
         entityId: approval.id,
         details: { type: approval.type },
       });
+
+      // Lease-bound rejections now wake the requester too, via the outbox
+      // (R2.5: every decision outcome is a resolving disposition).
+      try {
+        await resolveApprovalDecisionLease(db, {
+          approval,
+          disposition: "rejected",
+          actorUserId: decidedByUserId,
+          enqueueWakeup: heartbeat.wakeup,
+        });
+      } catch (err) {
+        logger.warn({ err, approvalId: approval.id }, "decision lease resolution failed on reject; orphan sweep will resolve");
+      }
     }
 
     res.json(redactApprovalPayload(approval));
@@ -349,6 +480,24 @@ export function approvalRoutes(
         details: { type: approval.type },
       });
 
+      // R3.1: revision is a NON-releasing lease substate — the cone stays
+      // frozen, no continuation is written, and the owner gets one bounded
+      // revision wake keyed per distinct revision request.
+      try {
+        await resolveApprovalDecisionLease(db, {
+          approval,
+          disposition: "revision_requested",
+          actorUserId: decidedByUserId,
+          enqueueWakeup: heartbeat.wakeup,
+          revisionEventId: approval.decidedAt instanceof Date
+            ? String(approval.decidedAt.getTime())
+            : String(Date.now()),
+          decisionNote: req.body.decisionNote ?? null,
+        });
+      } catch (err) {
+        logger.warn({ err, approvalId: approval.id }, "decision lease revision transition failed; lease remains active");
+      }
+
       res.json(redactApprovalPayload(approval));
     },
   );
@@ -363,7 +512,43 @@ export function approvalRoutes(
     assertCompanyAccess(req, existing.companyId);
     if (!(await assertApprovalMutationAllowedByRunContext(req, res, existing.companyId))) return;
 
-    if (req.actor.type === "agent" && req.actor.agentId !== existing.requestedByAgentId) {
+    // Resubmit narrowing (R3.1, stack-review F). When the approval is bound
+    // to a decision lease, resubmission is allowed ONLY while that lease is
+    // in state `revising`, ONLY by board/user actors or the anchor issue's
+    // assignee agent (the revising-owner "resubmit" exemption), and it always
+    // preserves the same decision idempotency key (the approval row — and its
+    // key — are reused; a mismatched binding is a 409).
+    const boundLease = await findDecisionLeaseForDecision(db, {
+      decisionKind: "approval",
+      decisionId: id,
+      companyId: existing.companyId,
+    });
+    if (boundLease) {
+      if (boundLease.state !== "revising") {
+        res.status(409).json({
+          error: "Approval resubmit requires the bound decision lease to be in state revising",
+          details: {
+            leaseId: boundLease.id,
+            leaseState: boundLease.state,
+            fix: "Ask the board to request a revision first, or wait for the decision to resolve",
+          },
+        });
+        return;
+      }
+      if ((existing.idempotencyKey ?? null) !== boundLease.decisionIdempotencyKey) {
+        res.status(409).json({
+          error: "Approval resubmit must preserve the bound decision idempotency key",
+          details: { leaseId: boundLease.id },
+        });
+        return;
+      }
+      // Agent actors: only the anchor's assignee may resubmit — exactly the
+      // revising-owner "resubmit" exemption. Board/user actors pass.
+      await assertDecisionFreezeMutationAllowed(db, existing.companyId, boundLease.anchorIssueId, {
+        type: req.actor.type,
+        agentId: req.actor.type === "agent" ? req.actor.agentId ?? null : null,
+      }, { revisingOwnerOperation: "resubmit" });
+    } else if (req.actor.type === "agent" && req.actor.agentId !== existing.requestedByAgentId) {
       res.status(403).json({ error: "Only requesting agent can resubmit this approval" });
       return;
     }

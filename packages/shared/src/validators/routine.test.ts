@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  createRoutineSchema,
   routineRevisionSnapshotV1Schema,
   routineVariableSchema,
   updateRoutineSchema,
@@ -83,6 +84,44 @@ describe("routine validators", () => {
       title: "Daily triage",
       baseRevisionId,
     }).baseRevisionId).toBe(baseRevisionId);
+  });
+
+  it("accepts tracking modes and requires failureOwner for run_only routines (R2.18)", () => {
+    expect(createRoutineSchema.parse({
+      title: "Archive sweep",
+      trackingMode: "run_only",
+      failureOwner: "monitor:host-watchdog",
+    })).toMatchObject({ trackingMode: "run_only", failureOwner: "monitor:host-watchdog" });
+
+    // run_only without a named external failure owner is refused.
+    expect(() => createRoutineSchema.parse({
+      title: "Archive sweep",
+      trackingMode: "run_only",
+    })).toThrow(/failureOwner/);
+    expect(() => createRoutineSchema.parse({
+      title: "Archive sweep",
+      trackingMode: "run_only",
+      failureOwner: "   ",
+    })).toThrow(/failureOwner/);
+    expect(() => updateRoutineSchema.parse({
+      trackingMode: "run_only",
+    })).toThrow(/failureOwner/);
+
+    // Other tracking modes carry no failureOwner requirement.
+    expect(createRoutineSchema.parse({
+      title: "Archive sweep",
+      trackingMode: "issue_on_failure",
+    }).trackingMode).toBe("issue_on_failure");
+    expect(createRoutineSchema.parse({ title: "Archive sweep" }).trackingMode).toBeUndefined();
+    expect(updateRoutineSchema.parse({
+      trackingMode: "run_only",
+      failureOwner: "monitor:uw-archive",
+    }).failureOwner).toBe("monitor:uw-archive");
+
+    expect(() => createRoutineSchema.parse({
+      title: "Archive sweep",
+      trackingMode: "not-a-mode",
+    })).toThrow();
   });
 
   it("accepts date variables with valid YYYY-MM-DD defaults", () => {

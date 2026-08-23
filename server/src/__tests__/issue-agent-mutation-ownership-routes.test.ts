@@ -1365,6 +1365,8 @@ describe("agent issue mutation checkout ownership", () => {
       issueId,
       companyId,
       expect.objectContaining({ createdByRunId: ownerRunId }),
+      // Actor context for the service-level decision-freeze gate (stack-review B).
+      expect.objectContaining({ actorType: "agent" }),
     );
   });
 
@@ -1818,7 +1820,12 @@ describe("agent issue mutation checkout ownership", () => {
       expect.any(Object),
     );
     expect(mockDocumentService.upsertIssueDocument).toHaveBeenCalled();
-    expect(mockWorkProductService.update).toHaveBeenCalledWith("product-1", { title: "Updated product" });
+    expect(mockWorkProductService.update).toHaveBeenCalledWith(
+      "product-1",
+      { title: "Updated product" },
+      // Actor context for the service-level decision-freeze gate (stack-review B).
+      expect.objectContaining({ actorType: "agent" }),
+    );
   });
 
   it("preserves board mutations on active checkouts", async () => {

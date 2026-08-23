@@ -143,7 +143,7 @@ describe("migration lineage contract", () => {
     const tags = entries.map((entry) => entry.tag);
     const whens = entries.map((entry) => entry.when);
 
-    expect(entries).toHaveLength(173);
+    expect(entries).toHaveLength(174);
     expect(tags.slice(126, 131)).toEqual([
       "0126_issue_comment_derived_attribution",
       "0127_recovery_action_terminal_cleanup",
@@ -194,6 +194,7 @@ describe("migration lineage contract", () => {
       "0170_tool_connection_installs",
       "0171_tool_gateway_protocol_rate_limit_counters",
       "0172_issue_last_activity_and_heartbeat_lookup",
+      "0173_decision_quiescence_core",
     ]);
     const preservedForkMaxWhen = Math.max(...whens.slice(0, 131));
     const integratedTailWhens = whens.slice(131);
@@ -247,7 +248,7 @@ describeEmbeddedPostgres("migration lineage replay", () => {
             ) AS plugin_config_company_id
         `);
         expect(rows[0]).toEqual({
-          migration_count: "173",
+          migration_count: "174",
           env_hash_rows: "1",
           derived_fast_hash_rows: "1",
           user_secret_tables: "2",
@@ -337,7 +338,7 @@ describeEmbeddedPostgres("migration lineage replay", () => {
             (SELECT "adapter_type" FROM "agent_runtime_state" WHERE "agent_id" = '30000000-0000-0000-0000-000000000003') AS acp_runtime_other_adapter_type
         `);
         expect(rows[0]).toEqual({
-          migration_count: "173",
+          migration_count: "174",
           env_hash_rows: "1",
           derived_fast_hash_rows: "1",
           company_secret_scope: "company",

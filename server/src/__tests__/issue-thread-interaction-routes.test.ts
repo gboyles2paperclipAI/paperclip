@@ -49,6 +49,20 @@ const mockAgentServiceGetById = vi.hoisted(() => vi.fn(async () => ({
   permissions: null,
 })));
 
+// The canned select mock above returns a row for EVERY query, which the
+// decision-freeze interaction gate would misread as an active lease. The gate
+// has dedicated embedded-PG coverage (decision-freeze-guards + replay
+// fixtures); neutralize it here.
+vi.mock("../services/decision-freeze.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/decision-freeze.js")>(
+    "../services/decision-freeze.js",
+  );
+  return {
+    ...actual,
+    assertDecisionFreezeInteractionCreateAllowed: vi.fn(async () => undefined),
+  };
+});
+
 vi.mock("@paperclipai/shared/telemetry", () => ({
   trackAgentTaskCompleted: vi.fn(),
   trackErrorHandlerCrash: vi.fn(),

@@ -41,6 +41,7 @@ const additionalSerializedServerTests = new Set([
   "server/src/__tests__/companies-route-path-guard.test.ts",
   "server/src/__tests__/company-portability.test.ts",
   "server/src/__tests__/costs-service.test.ts",
+  "server/src/__tests__/decision-freeze-guards.test.ts",
   "server/src/__tests__/express5-auth-wildcard.test.ts",
   "server/src/__tests__/health-dev-server-token.test.ts",
   "server/src/__tests__/health.test.ts",
@@ -58,6 +59,10 @@ const additionalSerializedServerTests = new Set([
   "server/src/__tests__/opencode-local-adapter-environment.test.ts",
   "server/src/__tests__/project-routes-env.test.ts",
   "server/src/__tests__/redaction.test.ts",
+  "server/src/__tests__/replay-decision-revision-roundtrip.test.ts",
+  "server/src/__tests__/replay-ful20229-approval-race.test.ts",
+  "server/src/__tests__/replay-ful20244-stale-blocker.test.ts",
+  "server/src/__tests__/routine-tracking-modes.test.ts",
   "server/src/__tests__/routines-e2e.test.ts",
 ]);
 let invocationIndex = 0;

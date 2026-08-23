@@ -40,13 +40,28 @@ const mockTxInsert = vi.hoisted(() => vi.fn(() => ({ values: mockTxInsertValues 
 const mockTx = vi.hoisted(() => ({
   insert: mockTxInsert,
 }));
-const mockDbSelectOrderBy = vi.hoisted(() => vi.fn(async () => []));
+const mockDbSelectLimit = vi.hoisted(() => vi.fn(() => ({
+  then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
+    Promise.resolve([]).then(onFulfilled, onRejected),
+})));
+// Awaitable AND chainable (`.limit(1).then(...)` — the decision-freeze lookup
+// shape) while still resolving to [] when awaited directly.
+const mockDbSelectOrderBy = vi.hoisted(() => vi.fn(() => ({
+  limit: mockDbSelectLimit,
+  then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
+    Promise.resolve([]).then(onFulfilled, onRejected),
+})));
 const mockDbSelectWhere = vi.hoisted(() => vi.fn(() => ({
   orderBy: mockDbSelectOrderBy,
   then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
     Promise.resolve([]).then(onFulfilled, onRejected),
 })));
-const mockDbSelectFrom = vi.hoisted(() => vi.fn(() => ({ where: mockDbSelectWhere })));
+// `.from(...)` supports the plain `.where(...)` shape and the decision-freeze
+// membership `.innerJoin(...).where(...)` shape.
+const mockDbSelectFrom = vi.hoisted(() => vi.fn(() => ({
+  where: mockDbSelectWhere,
+  innerJoin: vi.fn(() => ({ where: mockDbSelectWhere })),
+})));
 const mockDbSelect = vi.hoisted(() => vi.fn(() => ({ from: mockDbSelectFrom })));
 const mockDb = vi.hoisted(() => ({
   select: mockDbSelect,
@@ -287,16 +302,28 @@ describe.sequential("issue comment reopen routes", () => {
     mockDbSelectFrom.mockReset();
     mockDbSelectWhere.mockReset();
     mockDbSelectOrderBy.mockReset();
+    mockDbSelectLimit.mockReset();
     mockDb.transaction.mockReset();
     mockTxInsertValues.mockResolvedValue(undefined);
     mockTxInsert.mockImplementation(() => ({ values: mockTxInsertValues }));
-    mockDbSelectOrderBy.mockResolvedValue([]);
+    mockDbSelectLimit.mockImplementation(() => ({
+      then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
+        Promise.resolve([]).then(onFulfilled, onRejected),
+    }));
+    mockDbSelectOrderBy.mockImplementation(() => ({
+      limit: mockDbSelectLimit,
+      then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
+        Promise.resolve([]).then(onFulfilled, onRejected),
+    }));
     mockDbSelectWhere.mockImplementation(() => ({
       orderBy: mockDbSelectOrderBy,
       then: (onFulfilled: (rows: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
         Promise.resolve([]).then(onFulfilled, onRejected),
     }));
-    mockDbSelectFrom.mockImplementation(() => ({ where: mockDbSelectWhere }));
+    mockDbSelectFrom.mockImplementation(() => ({
+      where: mockDbSelectWhere,
+      innerJoin: vi.fn(() => ({ where: mockDbSelectWhere })),
+    }));
     mockDbSelect.mockImplementation(() => ({ from: mockDbSelectFrom }));
     mockDb.transaction.mockImplementation(async (fn: (tx: typeof mockTx) => Promise<unknown>) => fn(mockTx));
     mockHeartbeatService.wakeup.mockResolvedValue(undefined);
@@ -419,7 +446,10 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
-  it("implicitly reopens closed issues via the PATCH comment path when reassigning to an agent", async () => {
+  // ADR-20260823 terminal integrity (PR-2b): comments NEVER implicitly change
+  // status — reassigning with a comment records both, but reopening a done
+  // issue requires explicit reopen/resume intent.
+  it("does not implicitly reopen closed issues via the PATCH comment path when reassigning to an agent", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue("done"));
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
       ...makeIssue("done"),
@@ -435,21 +465,21 @@ describe.sequential("issue comment reopen routes", () => {
       "11111111-1111-4111-8111-111111111111",
       expect.objectContaining({
         assigneeAgentId: "33333333-3333-4333-8333-333333333333",
-        status: "todo",
         actorAgentId: null,
         actorUserId: "local-board",
       }),
       expect.anything(),
     );
-    expect(mockLogActivity).toHaveBeenCalledWith(
+    expect(mockIssueService.update).not.toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      expect.objectContaining({ status: "todo" }),
+      expect.anything(),
+    );
+    expect(mockLogActivity).not.toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
         action: "issue.updated",
-        details: expect.objectContaining({
-          reopened: true,
-          reopenedFrom: "done",
-          status: "todo",
-        }),
+        details: expect.objectContaining({ reopened: true }),
       }),
     );
   });
@@ -534,7 +564,9 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
-  it("implicitly reopens closed issues via POST comments when an agent is assigned", async () => {
+  // ADR-20260823 terminal integrity (PR-2b): a human comment on a done issue
+  // is recorded but never reopens it and never wakes the assignee.
+  it("does not implicitly reopen closed issues via POST comments when an agent is assigned", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue("done"));
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
       ...makeIssue("done"),
@@ -546,19 +578,11 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ body: "hello" });
 
     expect(res.status).toBe(201);
-    expect(mockIssueService.update).toHaveBeenCalledWith(
-      "11111111-1111-4111-8111-111111111111",
-      { status: "todo" },
-    );
-    await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
-      "22222222-2222-4222-8222-222222222222",
-      expect.objectContaining({
-        reason: "issue_reopened_via_comment",
-        payload: expect.objectContaining({
-          reopenedFrom: "done",
-        }),
-      }),
-    ));
+    expect(mockIssueService.addComment).toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    // Flush the deferred wakeup task before asserting it never fired.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 
   it("rejects non-assignee agent POST comments on closed issues", async () => {
@@ -843,39 +867,36 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
-  it("moves assigned blocked issues back to todo via POST comments", async () => {
+  // ADR-20260823 terminal integrity (PR-2b): comments on blocked issues are
+  // communicative — they wake the assignee but never move the issue to todo.
+  it("keeps assigned blocked issues blocked on POST comments and wakes the assignee as a comment", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue("blocked"));
-    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
-      ...makeIssue("blocked"),
-      ...patch,
-    }));
 
     const res = await request(await installActor(createApp()))
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
       .send({ body: "please continue" });
 
     expect(res.status).toBe(201);
-    expect(mockIssueService.update).toHaveBeenCalledWith(
-      "11111111-1111-4111-8111-111111111111",
-      { status: "todo" },
-    );
+    expect(mockIssueService.update).not.toHaveBeenCalled();
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
       expect.objectContaining({
-        reason: "issue_reopened_via_comment",
+        reason: "issue_commented",
         payload: expect.objectContaining({
           commentId: "comment-1",
-          reopenedFrom: "blocked",
           mutation: "comment",
         }),
         contextSnapshot: expect.objectContaining({
           issueId: "11111111-1111-4111-8111-111111111111",
           wakeCommentId: "comment-1",
-          wakeReason: "issue_reopened_via_comment",
-          reopenedFrom: "blocked",
+          wakeReason: "issue_commented",
         }),
       }),
     ));
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ reason: "issue_reopened_via_comment" }),
+    );
   });
 
   it("moves in-progress issues with a scheduled retry back to todo via POST human comments", async () => {
@@ -1038,12 +1059,15 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.addComment).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       "Paperclip needs a disposition before this issue can continue.",
-      { agentId: undefined, userId: "local-board", runId: null },
+      { agentId: undefined, userId: "local-board", runId: null, actorType: "board" },
       {
         authorType: "user",
         presentation: { kind: "system_notice", tone: "warning", detailsDefaultOpen: false },
         metadata,
         sourceTrust: null,
+        // Pure comment (no reopen/resume/interrupt intent): the service gate
+        // receives the revising-owner "comment" exemption (stack-review B).
+        revisingOwnerOperation: "comment",
       },
     );
   });
@@ -1181,7 +1205,10 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
-  it("still implicitly reopens done issues via POST comments when the comment runId differs from the issue's owning run", async () => {
+  // ADR-20260823 terminal integrity (PR-2b): even a genuine human follow-up
+  // comment (runId differing from the owning run) no longer reopens a done
+  // issue — reopening requires explicit reopen/resume intent.
+  it("does not implicitly reopen done issues via POST comments even when the comment runId differs from the issue's owning run", async () => {
     mockIssueService.getById.mockResolvedValue({
       ...makeIssue("done"),
       checkoutRunId: "run-owning",
@@ -1201,13 +1228,10 @@ describe.sequential("issue comment reopen routes", () => {
       runId: "run-different",
     }))
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
-      .send({ body: "Real human follow-up — please reopen" });
+      .send({ body: "Real human follow-up — but reopening now needs explicit intent" });
 
     expect(res.status).toBe(201);
-    expect(mockIssueService.update).toHaveBeenCalledWith(
-      "11111111-1111-4111-8111-111111111111",
-      { status: "todo" },
-    );
+    expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
   it("does not implicitly reopen done issues via the PATCH comment path when actor runId matches the issue's checkout run", async () => {
@@ -1240,7 +1264,9 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
-  it("moves assigned blocked issues back to todo via the PATCH comment path", async () => {
+  // ADR-20260823 terminal integrity (PR-2b): PATCH comments on blocked issues
+  // no longer move them to todo; the assignee is woken as a plain comment.
+  it("keeps assigned blocked issues blocked on the PATCH comment path and wakes the assignee as a comment", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue("blocked"));
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
       ...makeIssue("blocked"),
@@ -1252,26 +1278,25 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ comment: "please continue" });
 
     expect(res.status).toBe(200);
-    expect(mockIssueService.update).toHaveBeenCalledWith(
+    expect(mockIssueService.update).not.toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
-      expect.objectContaining({
-        status: "todo",
-        actorAgentId: null,
-        actorUserId: "local-board",
-      }),
+      expect.objectContaining({ status: "todo" }),
       expect.anything(),
     );
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
       expect.objectContaining({
-        reason: "issue_reopened_via_comment",
+        reason: "issue_commented",
         payload: expect.objectContaining({
           commentId: "comment-1",
-          reopenedFrom: "blocked",
           mutation: "comment",
         }),
       }),
     ));
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ reason: "issue_reopened_via_comment" }),
+    );
   });
 
   it("moves in-progress issues with a scheduled retry back to todo via the PATCH comment path", async () => {

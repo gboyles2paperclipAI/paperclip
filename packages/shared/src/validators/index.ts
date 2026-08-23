@@ -527,6 +527,31 @@ export {
 } from "./approval.js";
 
 export {
+  decisionLeaseRequestSchema,
+  type DecisionLeaseRequest,
+} from "./decision-lease.js";
+
+export {
+  BROKER_OPERATION_NAMES,
+  activateRuntimeCandidateArgsSchema,
+  quarantineExactFileArgsSchema,
+  brokerOperationRequestSchema,
+  claimBrokerOperationSchema,
+  heartbeatBrokerOperationSchema,
+  brokerPreflightReportSchema,
+  submitBrokerOperationReceiptSchema,
+  type BrokerOperationName,
+  type ActivateRuntimeCandidateArgs,
+  type QuarantineExactFileArgs,
+  type BrokerOperationRequest,
+  type ClaimBrokerOperation,
+  type HeartbeatBrokerOperation,
+  type BrokerPreflightReport,
+  type BrokerRollbackEvidence,
+  type SubmitBrokerOperationReceipt,
+} from "./broker-operation.js";
+
+export {
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingUserSecretRefSchema,

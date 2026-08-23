@@ -30,7 +30,6 @@ import {
   postSlackMessage,
   maybeNotifySlackForActivity,
   redactSlackText,
-  resetSlackActivityNotificationDedupeForTests,
   verifySlackRequestSignature,
 } from "../services/slack-integration.js";
 import { slackIntegrationRoutes } from "../routes/slack-integrations.js";
@@ -95,7 +94,6 @@ function createApp(db: ReturnType<typeof createDb>) {
 
 describe("Slack integration utilities", () => {
   afterEach(() => {
-    resetSlackActivityNotificationDedupeForTests();
     vi.restoreAllMocks();
     delete process.env.PAPERCLIP_PUBLIC_URL;
     delete process.env.SLACK_ALERTS_CHANNEL_ID;
@@ -192,7 +190,7 @@ describe("Slack integration utilities", () => {
     await expect(postSlackMessage({
       channel: process.env.SLACK_ALERTS_CHANNEL_ID,
       text: "safe notification",
-    })).resolves.toEqual({ skipped: false, ok: false });
+    })).resolves.toEqual({ skipped: false, ok: false, ts: null, channel: "C123" });
 
     delete process.env.SLACK_BOT_TOKEN;
     delete process.env.SLACK_ALERTS_CHANNEL_ID;
@@ -290,11 +288,17 @@ describe("Slack integration utilities", () => {
     delete process.env.SLACK_APPROVALS_CHANNEL_ID;
   });
 
-  it("dedupes repeated blocked-agent Slack notifications for the same issue and reason", async () => {
+  it("re-notifies blocked-agent alerts on every occurrence when no durable transition store is reachable", async () => {
+    // The 30-minute in-memory window was replaced with durable
+    // transition-keyed dedup backed by notification_transitions (R2.15).
+    // Without a db (or with a non-UUID company id) the previous transition is
+    // unreadable, and an unreadable previous ALWAYS notifies — unknown is not
+    // unchanged. Durable dedup itself is covered in
+    // notification-transitions.test.ts against embedded Postgres.
     process.env.SLACK_BOT_TOKEN = "xoxb-test";
     process.env.SLACK_ALERTS_CHANNEL_ID = "CALERTS";
     const fetchMock = vi.fn(async () => ({
-      json: async () => ({ ok: true }),
+      json: async () => ({ ok: true, ts: "1710000000.000200" }),
     }));
     vi.stubGlobal("fetch", fetchMock);
     const details = {
@@ -303,41 +307,26 @@ describe("Slack integration utilities", () => {
       reason: "Help Scout credentials missing",
     };
 
-    maybeNotifySlackForActivity({
+    await maybeNotifySlackForActivity({
       companyId: "company-1",
       action: "issue.updated",
       entityType: "issue",
       entityId: "iss-1",
       details,
-      nowMs: 1_000,
     });
-    maybeNotifySlackForActivity({
+    await maybeNotifySlackForActivity({
       companyId: "company-1",
       action: "issue.updated",
       entityType: "issue",
       entityId: "iss-1",
       details,
-      nowMs: 10_000,
     });
-    await new Promise((resolve) => setImmediate(resolve));
 
-    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"));
     expect(body.channel).toBe("CALERTS");
     expect(body.text).toContain("[ACTION REQUIRED] Agent blocked");
     expect(JSON.stringify(body.blocks)).toContain("Action required: yes - clear the blocker or assign the next owner");
-
-    maybeNotifySlackForActivity({
-      companyId: "company-1",
-      action: "issue.updated",
-      entityType: "issue",
-      entityId: "iss-1",
-      details,
-      nowMs: 31 * 60 * 1_000,
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("parses and identifies Slack Socket Mode interactive envelopes", () => {

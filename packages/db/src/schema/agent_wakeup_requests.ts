@@ -1,4 +1,5 @@
-import { pgTable, uuid, text, timestamp, jsonb, integer, index } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { pgTable, uuid, text, timestamp, jsonb, integer, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 
@@ -36,5 +37,22 @@ export const agentWakeupRequests = pgTable(
       table.requestedAt,
     ),
     agentRequestedIdx: index("agent_wakeup_requests_agent_requested_idx").on(table.agentId, table.requestedAt),
+    pendingIdemUq: uniqueIndex("agent_wakeup_requests_pending_idem_uq")
+      .on(table.idempotencyKey)
+      .where(
+        sql`${table.idempotencyKey} is not null
+          and ${table.status} in ('queued', 'claimed', 'deferred_issue_execution')`,
+      ),
+    // Decision-lease creation drains unclaimed member wakeups by
+    // payload->>'issueId' over the pending statuses (createLeaseForDecision,
+    // ADR-20260823 R2.3); this partial expression index keeps that in-tx
+    // UPDATE off a sequential scan (stack-review I / Gemini C6).
+    pendingPayloadIssueIdx: index("agent_wakeup_requests_pending_payload_issue_idx")
+      .using("btree", sql`((${table.payload} ->> 'issueId'))`)
+      .where(
+        sql`${table.status} in ('queued', 'deferred_issue_execution')
+          and ${table.runId} is null
+          and (${table.payload} ->> 'issueId') is not null`,
+      ),
   }),
 );

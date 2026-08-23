@@ -51,6 +51,11 @@ import {
 } from "./services/index.js";
 import { resolveWorktreeRunExecutionActivationState } from "./services/instance-settings.js";
 import {
+  dispatchDecisionContinuations,
+  enforceDecisionFreezeKillSwitch,
+  sweepOrphanedDecisionLeases,
+} from "./services/decision-leases.js";
+import {
   parseAdapterRegistryEnv,
   reconcileAdapterAvailability,
 } from "./services/adapter-registry-bootstrap.js";
@@ -553,6 +558,18 @@ export async function startServer(): Promise<StartedServer> {
   if (accessBackfill.agentMembershipsInserted > 0 || accessBackfill.humanGrantsInserted > 0) {
     logger.info(accessBackfill, "Backfilled principal access compatibility records");
   }
+
+  // Decision-freeze kill switch (ADR R3.5): the switch resolves, never
+  // abandons. With PAPERCLIP_DECISION_FREEZE_DISABLED=1 and live leases this
+  // throws (refusing startup) unless the RESOLVE_ALL companion flag bulk-
+  // resolves every lease as operator_override first.
+  const decisionFreezeKillSwitch = await enforceDecisionFreezeKillSwitch(db as any);
+  if (decisionFreezeKillSwitch.state === "bulk_resolved") {
+    logger.warn(
+      { resolvedLeaseIds: decisionFreezeKillSwitch.resolvedLeaseIds },
+      "decision-freeze kill switch bulk-resolved active leases as operator_override",
+    );
+  }
   if (config.deploymentMode === "authenticated") {
     const {
       createBetterAuthHandler,
@@ -967,6 +984,21 @@ export async function startServer(): Promise<StartedServer> {
       );
     }
 
+    // Decision continuation outbox (ADR R2.7/R2.10): deliver any continuation
+    // written before a crash/restart exactly once before timers resume.
+    try {
+      const startupOrphanSweep = await sweepOrphanedDecisionLeases(db as any);
+      if (startupOrphanSweep.resolved > 0) {
+        logger.warn({ ...startupOrphanSweep }, "startup orphaned decision-lease sweep resolved leases");
+      }
+      const startupOutbox = await dispatchDecisionContinuations(db as any, { enqueueWakeup: heartbeat.wakeup });
+      if (startupOutbox.delivered > 0 || startupOutbox.failed > 0 || startupOutbox.deadLettered > 0) {
+        logger.warn({ ...startupOutbox }, "startup decision continuation outbox dispatch ran");
+      }
+    } catch (err) {
+      logger.error({ err }, "startup decision-lease sweep failed");
+    }
+
     heartbeatSchedulerInterval = setInterval(() => {
       // Async so the suppression checks below can honor the override-aware
       // resolver (e.g. worktree run-execution opt-in). The gated work is still
@@ -1029,6 +1061,27 @@ export async function startServer(): Promise<StartedServer> {
         })
         .catch((err) => {
           logger.error({ err }, "operator-interaction expiry failed");
+        }));
+
+      // Decision-lease integrity sweeps (ADR R2.7): orphaned-lease repair,
+      // then exactly-once continuation delivery through the outbox.
+      trackHeartbeatSchedulerWork(sweepOrphanedDecisionLeases(db as any)
+        .then((result) => {
+          if (result.resolved > 0) {
+            logger.warn({ ...result }, "orphaned decision-lease sweep resolved leases");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "orphaned decision-lease sweep failed");
+        }));
+      trackHeartbeatSchedulerWork(dispatchDecisionContinuations(db as any, { enqueueWakeup: heartbeat.wakeup })
+        .then((result) => {
+          if (result.delivered > 0 || result.failed > 0 || result.deadLettered > 0) {
+            logger.warn({ ...result }, "decision continuation outbox dispatch ran");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "decision continuation outbox dispatch failed");
         }));
 
       if (heartbeatSchedulerStopped) return;

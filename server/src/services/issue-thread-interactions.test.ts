@@ -11,15 +11,28 @@ vi.mock("./issues.js", () => ({
 type SelectRow = Record<string, unknown>;
 
 function createSelectChain(rows: SelectRow[]) {
+  // Thenable at every stage so both the plain where().then(...) shape and the
+  // decision-lease lookup's where().orderBy().limit() shape resolve.
+  const terminal = (resolvedRows: SelectRow[]) => ({
+    then(callback: (rows: SelectRow[]) => unknown) {
+      return Promise.resolve(callback(resolvedRows));
+    },
+    limit() {
+      return terminal(resolvedRows);
+    },
+    orderBy() {
+      return terminal(resolvedRows);
+    },
+  });
   return {
     from() {
       return {
         where() {
-          return {
-            then(callback: (rows: SelectRow[]) => unknown) {
-              return Promise.resolve(callback(rows));
-            },
-          };
+          // The lease lookup queries the decision_leases table through this
+          // same stub; an empty result (no lease bound) is the correct answer
+          // for these facade tests, but the primary interaction row must still
+          // flow through the plain then(...) path.
+          return terminal(rows);
         },
       };
     },

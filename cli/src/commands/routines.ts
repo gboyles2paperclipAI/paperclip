@@ -29,6 +29,13 @@ type DisableAllRoutinesResult = {
   pausedCount: number;
   alreadyPausedCount: number;
   archivedCount: number;
+  /**
+   * Count of routines per tracking mode (issue_always / run_only /
+   * issue_on_failure). run_only and issue_on_failure routines keep their
+   * execution issues hidden from the board, so this display makes them
+   * visible to operators here.
+   */
+  trackingModes: Record<string, number>;
 };
 
 type EmbeddedPostgresInstance = {
@@ -276,12 +283,18 @@ export async function disableAllRoutinesInConfig(
       .select({
         id: routines.id,
         status: routines.status,
+        trackingMode: routines.trackingMode,
       })
       .from(routines)
       .where(eq(routines.companyId, companyId));
 
     const alreadyPausedCount = existing.filter((routine) => routine.status === "paused").length;
     const archivedCount = existing.filter((routine) => routine.status === "archived").length;
+    const trackingModes: Record<string, number> = {};
+    for (const routine of existing) {
+      const mode = routine.trackingMode ?? "issue_always";
+      trackingModes[mode] = (trackingModes[mode] ?? 0) + 1;
+    }
     const idsToPause = existing
       .filter((routine) => routine.status !== "paused" && routine.status !== "archived")
       .map((routine) => routine.id);
@@ -302,6 +315,7 @@ export async function disableAllRoutinesInConfig(
       pausedCount: idsToPause.length,
       alreadyPausedCount,
       archivedCount,
+      trackingModes,
     };
   } finally {
     if (db) {
@@ -330,6 +344,12 @@ export async function disableAllRoutinesCommand(options: RoutinesDisableAllOptio
     `Paused ${result.pausedCount} routine(s) for company ${result.companyId} ` +
       `(${result.alreadyPausedCount} already paused, ${result.archivedCount} archived).`,
   );
+  const trackingSummary = Object.entries(result.trackingModes)
+    .map(([mode, count]) => `${mode}=${count}`)
+    .join(", ");
+  if (trackingSummary) {
+    console.log(pc.dim(`Tracking modes: ${trackingSummary}`));
+  }
 }
 
 export function registerRoutineCommands(program: Command): void {

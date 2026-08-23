@@ -7,11 +7,16 @@ import { badRequest, forbidden, HttpError, unauthorized, unprocessable } from ".
 import { redactEventPayload, redactSensitiveText } from "../redaction.js";
 import { approvalService, heartbeatService, issueApprovalService, logActivity, secretService } from "./index.js";
 import { logger } from "../middleware/logger.js";
+import { resolveApprovalDecisionLease } from "./decision-leases.js";
+import {
+  evaluateNotificationTransition,
+  recordNotificationTransition,
+  type NotificationTransitionDescriptor,
+} from "./notification-transitions.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 
 const SLACK_VERSION = "v0";
 const MAX_SLACK_SKEW_SECONDS = 60 * 5;
-const BLOCKED_ACTIVITY_NOTIFICATION_DEDUPE_MS = 30 * 60 * 1000;
 const APPROVAL_ACTIONS = new Set(["approve", "reject", "needs_changes"]);
 const SECRET_TEXT_RE =
   /\b(?:password|passcode|mfa|2fa|otp|recovery key|api key|secret|token|authorization|bearer|credit card|card number|cvv|ssn)\b/i;
@@ -31,7 +36,6 @@ const NOISE_PAYLOAD_KEYS = new Set([
   "upload",
   "uploads",
 ]);
-const blockedActivityNotificationSeenAt = new Map<string, number>();
 
 export type SlackApprovalAction = "approve" | "reject" | "needs_changes";
 
@@ -343,41 +347,19 @@ function actionRequiredLine(required: boolean, reason: string): string {
   return `Action required: ${required ? "yes" : "no"} - ${reason}`;
 }
 
-function blockedActivityDedupeKey(input: {
-  companyId?: string | null;
-  entityId: string;
-  details: Record<string, unknown>;
-  summary: string;
-}): string {
+/**
+ * Canonical, redaction-safe blocked reason used as the transition state for
+ * the blocked-alert family (same source keys the free-text dedupe window used
+ * before it was replaced with durable transition-keyed dedup, R2.15).
+ */
+function normalizedBlockedReason(details: Record<string, unknown>, summary: string): string {
   const reason =
-    stringValue(input.details.blocker)
-    ?? stringValue(input.details.reason)
-    ?? stringValue(input.details.summary)
-    ?? stringValue(input.details.title)
-    ?? input.summary;
-  return [
-    input.companyId ?? "global",
-    input.entityId,
-    reason.toLowerCase().replace(/\s+/g, " ").slice(0, 240),
-  ].join(":");
-}
-
-function hasRecentBlockedActivityNotification(key: string, nowMs: number): boolean {
-  const previous = blockedActivityNotificationSeenAt.get(key);
-  if (previous !== undefined && nowMs - previous < BLOCKED_ACTIVITY_NOTIFICATION_DEDUPE_MS) {
-    return true;
-  }
-  blockedActivityNotificationSeenAt.set(key, nowMs);
-  for (const [seenKey, seenAt] of blockedActivityNotificationSeenAt) {
-    if (nowMs - seenAt >= BLOCKED_ACTIVITY_NOTIFICATION_DEDUPE_MS) {
-      blockedActivityNotificationSeenAt.delete(seenKey);
-    }
-  }
-  return false;
-}
-
-export function resetSlackActivityNotificationDedupeForTests() {
-  blockedActivityNotificationSeenAt.clear();
+    stringValue(details.blocker)
+    ?? stringValue(details.reason)
+    ?? stringValue(details.summary)
+    ?? stringValue(details.title)
+    ?? summary;
+  return reason.toLowerCase().replace(/\s+/g, " ").slice(0, 240);
 }
 
 function buildPayloadFields(payload: Record<string, unknown>): Array<Record<string, unknown>> {
@@ -529,7 +511,10 @@ export async function postSlackMessage(input: {
   const channel = input.channel?.trim() || (input.channelKey
     ? await resolveSlackSetting(input.db, input.companyId, input.channelKey)
     : null);
-  if (!token || !channel) return { skipped: true as const };
+  // An unset token/channel is a channel-delivery FAILURE for acceptance
+  // purposes (R2.15) — never vacuous success. `skipped: true` is retained so
+  // existing callers keep their "nothing was configured" branch.
+  if (!token || !channel) return { skipped: true as const, ok: false as const, ts: null, channel: channel ?? null };
   const response = await fetch("https://slack.com/api/chat.postMessage", {
     method: "POST",
     headers: {
@@ -547,12 +532,18 @@ export async function postSlackMessage(input: {
     logger.warn({ err }, "Slack message post failed");
     return null;
   });
-  if (!response) return { skipped: false as const, ok: false };
-  const body = await response.json().catch(() => ({})) as { ok?: boolean; error?: string };
+  if (!response) return { skipped: false as const, ok: false, ts: null, channel };
+  const body = await response.json().catch(() => ({})) as {
+    ok?: boolean;
+    error?: string;
+    ts?: string;
+    message?: { ts?: string };
+  };
   if (!response.ok || body.ok === false) {
     logger.warn({ status: response.status, error: body.error }, "Slack message post failed");
   }
-  return { skipped: false as const, ok: Boolean(body.ok) };
+  const ts = stringValue(body.ts) ?? stringValue(body.message?.ts);
+  return { skipped: false as const, ok: Boolean(body.ok), ts, channel };
 }
 
 export async function updateSlackInteractionMessage(input: {
@@ -682,22 +673,98 @@ function buildIssueInteractionNotificationBlocks(input: {
   return blocks;
 }
 
-export function maybeNotifySlackForActivity(input: {
+interface SlackActivityNotification {
+  channel: string | undefined;
+  channelKey?: "SLACK_APPROVALS_CHANNEL_ID" | "SLACK_ALERTS_CHANNEL_ID" | "SLACK_TICKETS_CHANNEL_ID";
+  text: string;
+  blocks: unknown[];
+  transition: NotificationTransitionDescriptor;
+}
+
+/**
+ * Post a candidate notification through the durable transition-keyed dedup
+ * gate (R2.15): evaluate the stored previous transition first (missing or
+ * unreadable previous ALWAYS notifies), post only on a state/owner change,
+ * and record the transition only after the channel accepted the message with
+ * a message ts. A failed or unconfigured channel records nothing, leaving the
+ * transition retryable on the next occurrence.
+ */
+async function postTransitionKeyedNotification(input: {
+  db?: Db;
+  companyId?: string | null;
+  notification: SlackActivityNotification;
+}): Promise<{ posted: boolean; accepted: boolean; suppressed: boolean }> {
+  const evaluation = await evaluateNotificationTransition(
+    input.db,
+    input.companyId ?? null,
+    input.notification.transition,
+  );
+  if (!evaluation.notify) {
+    return { posted: false, accepted: false, suppressed: true };
+  }
+
+  const result = await postSlackMessage({
+    db: input.db,
+    companyId: input.companyId,
+    channel: input.notification.channel,
+    channelKey: input.notification.channelKey,
+    text: input.notification.text,
+    blocks: input.notification.blocks,
+  }).catch((err) => {
+    logger.warn({ err }, "Slack activity notification failed");
+    return null;
+  });
+
+  // Accepted = channel API success AND a message ts/id (R2.15). An unset
+  // channel (skipped) or a post without a ts is a channel failure.
+  const accepted = Boolean(result && !result.skipped && result.ok && result.ts);
+  if (!accepted) {
+    logger.warn(
+      {
+        subject: input.notification.transition.subject,
+        eventClass: input.notification.transition.eventClass,
+        skipped: result?.skipped ?? null,
+      },
+      "no notification channel accepted the transition; leaving it unacknowledged for retry",
+    );
+    return { posted: Boolean(result && !result.skipped), accepted: false, suppressed: false };
+  }
+
+  if (evaluation.recordable && evaluation.stateHash && input.companyId && input.db) {
+    await recordNotificationTransition(input.db, {
+      companyId: input.companyId,
+      subject: input.notification.transition.subject,
+      eventClass: input.notification.transition.eventClass,
+      stateHash: evaluation.stateHash,
+      nextState: input.notification.transition.nextState,
+      ownerIdentity: input.notification.transition.ownerIdentity ?? null,
+      acceptedChannels: {
+        slack: {
+          channel: result!.channel ?? "unknown",
+          messageId: result!.ts!,
+          acceptedAt: new Date().toISOString(),
+        },
+      },
+    }).catch((err) => {
+      logger.warn(
+        { err, subject: input.notification.transition.subject },
+        "failed to record accepted notification transition; next occurrence will re-notify",
+      );
+    });
+  }
+  return { posted: true, accepted: true, suppressed: false };
+}
+
+export async function maybeNotifySlackForActivity(input: {
   db?: Db;
   companyId?: string;
   action: string;
   entityType: string;
   entityId: string;
   details: Record<string, unknown> | null;
-  nowMs?: number;
-}) {
+}): Promise<void> {
   const details = input.details ?? {};
-  const textForAction = (): {
-    channel: string | undefined;
-    channelKey?: "SLACK_APPROVALS_CHANNEL_ID" | "SLACK_ALERTS_CHANNEL_ID" | "SLACK_TICKETS_CHANNEL_ID";
-    text: string;
-    blocks: unknown[];
-  } | null => {
+  const textForAction = (): SlackActivityNotification | null => {
     if (input.action === "issue.created") {
       return null;
     }
@@ -708,6 +775,7 @@ export function maybeNotifySlackForActivity(input: {
       const summary =
         payloadText(details, ["interactionTitle", "title", "prompt", "summary"])
         ?? `Issue ${compactId(input.entityId)} has a pending ${humanizeKey(kind)} card.`;
+      const interactionId = stringValue(details.interactionId);
       return {
         channel: process.env.SLACK_APPROVALS_CHANNEL_ID,
         channelKey: "SLACK_APPROVALS_CHANNEL_ID",
@@ -719,18 +787,23 @@ export function maybeNotifySlackForActivity(input: {
           details,
           paperclipUrl: process.env.PAPERCLIP_PUBLIC_URL,
         }),
+        transition: {
+          subject: interactionId
+            ? `interaction:${interactionId}`
+            : `issue:${input.entityId}:interaction`,
+          eventClass: "interaction_created",
+          nextState: {
+            kind,
+            status: stringValue(details.interactionStatus) ?? "pending",
+            interactionId: interactionId ?? null,
+          },
+          ownerIdentity: "board",
+        },
       };
     }
     if (input.action === "issue.updated" && details.status === "blocked") {
       const title = "[ACTION REQUIRED] Agent blocked";
       const summary = payloadText(details, ["title", "summary", "blocker", "reason"]) ?? `Issue ${compactId(input.entityId)} is blocked.`;
-      const dedupeKey = blockedActivityDedupeKey({
-        companyId: input.companyId,
-        entityId: input.entityId,
-        details,
-        summary,
-      });
-      if (hasRecentBlockedActivityNotification(dedupeKey, input.nowMs ?? Date.now())) return null;
       return {
         channel: process.env.SLACK_ALERTS_CHANNEL_ID,
         channelKey: "SLACK_ALERTS_CHANNEL_ID",
@@ -745,6 +818,18 @@ export function maybeNotifySlackForActivity(input: {
           owner: "Current assignee/manager",
           nextUpdate: "When the issue leaves blocked or the blocker reason changes",
         }),
+        transition: {
+          subject: `issue:${input.entityId}`,
+          eventClass: "blocked",
+          nextState: {
+            status: "blocked",
+            reason: normalizedBlockedReason(details, summary),
+          },
+          ownerIdentity:
+            stringValue(details.assigneeAgentId)
+            ?? stringValue(details.assigneeUserId)
+            ?? null,
+        },
       };
     }
     if (input.action.includes("escalation") || String(details.type ?? "").includes("escalation")) {
@@ -764,16 +849,28 @@ export function maybeNotifySlackForActivity(input: {
           owner: "Board/operator",
           nextUpdate: "When the escalation is accepted, reassigned, or closed",
         }),
+        transition: {
+          subject: `${input.entityType}:${input.entityId}`,
+          eventClass: "escalation",
+          nextState: {
+            type: stringValue(details.type) ?? input.action,
+            reason: (payloadText(details, ["title", "summary", "reason", "scope"]) ?? "")
+              .toLowerCase()
+              .replace(/\s+/g, " ")
+              .slice(0, 240),
+          },
+          ownerIdentity: "board",
+        },
       };
     }
     return null;
   };
   const notification = textForAction();
   if (!notification) return;
-  void postSlackMessage({
+  await postTransitionKeyedNotification({
     db: input.db,
     companyId: input.companyId,
-    ...notification,
+    notification,
   }).catch((err) => logger.warn({ err }, "Slack activity notification failed"));
 }
 
@@ -877,19 +974,32 @@ export function slackIntegrationService(
     postApprovalRequested: async (approvalId: string) => {
       const approval = await approvals.getById(approvalId);
       if (!approval) throw unprocessable("Approval not found");
-      return postSlackMessage({
+      // approval-requested is one of the transition-keyed alert families
+      // (R2.15): a re-post of the same pending approval is suppressed, while
+      // a channel failure records nothing so the request stays retryable.
+      const result = await postTransitionKeyedNotification({
         db,
         companyId: approval.companyId,
-        channel: process.env.SLACK_APPROVALS_CHANNEL_ID,
-        channelKey: "SLACK_APPROVALS_CHANNEL_ID",
-        text: `[ACTION REQUIRED] Paperclip approval requested: ${approval.id}`,
-        blocks: buildSlackApprovalBlocks({
-          approvalId: approval.id,
-          type: approval.type,
-          payload: approval.payload,
-          paperclipUrl: process.env.PAPERCLIP_PUBLIC_URL,
-        }),
+        notification: {
+          channel: process.env.SLACK_APPROVALS_CHANNEL_ID,
+          channelKey: "SLACK_APPROVALS_CHANNEL_ID",
+          text: `[ACTION REQUIRED] Paperclip approval requested: ${approval.id}`,
+          blocks: buildSlackApprovalBlocks({
+            approvalId: approval.id,
+            type: approval.type,
+            payload: approval.payload,
+            paperclipUrl: process.env.PAPERCLIP_PUBLIC_URL,
+          }),
+          transition: {
+            subject: `approval:${approval.id}`,
+            eventClass: "approval_requested",
+            nextState: { status: approval.status, type: approval.type },
+            ownerIdentity: "board",
+          },
+        },
       });
+      if (result.suppressed || !result.posted) return { skipped: true as const, ok: false as const };
+      return { skipped: false as const, ok: result.accepted };
     },
 
     handleInteraction: async (interaction: SlackInteractionContext, requestHash: string) => {
@@ -944,7 +1054,36 @@ export function slackIntegrationService(
         },
       });
 
-      if (interaction.action === "approve" && result.applied) {
+      // Lease-bound approvals deliver every decision wake through the
+      // continuation outbox (R2.10); the direct wakeRequester below stays only
+      // for non-lease approvals. Replay protection is keyed on the approval id
+      // + applied-state: `result.applied` is false for a second Slack payload
+      // against an already-applied approval, so it performs zero wakes.
+      let leaseOutcome: Awaited<ReturnType<typeof resolveApprovalDecisionLease>> = null;
+      if (result.applied) {
+        try {
+          leaseOutcome = await resolveApprovalDecisionLease(db, {
+            approval: result.approval,
+            disposition: interaction.action === "approve"
+              ? "approved"
+              : interaction.action === "reject"
+                ? "rejected"
+                : "revision_requested",
+            actorUserId: paperclipUserId,
+            enqueueWakeup: heartbeat.wakeup,
+            revisionEventId: result.approval.decidedAt instanceof Date
+              ? String(result.approval.decidedAt.getTime())
+              : String(Date.now()),
+            decisionNote,
+          });
+        } catch (err) {
+          // Fail OPEN: an active lease still freeze-skips the legacy wake and
+          // the orphan sweep + outbox deliver exactly once.
+          logger.warn({ err, approvalId: result.approval.id }, "decision lease resolution failed on Slack decision; falling back to legacy wake path");
+        }
+      }
+
+      if (interaction.action === "approve" && result.applied && !leaseOutcome) {
         try {
           await wakeRequester({ approval: result.approval, linkedIssueIds, actorUserId: paperclipUserId });
         } catch (err) {

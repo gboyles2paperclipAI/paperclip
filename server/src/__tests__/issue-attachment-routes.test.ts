@@ -598,6 +598,8 @@ describe("issue attachment routes", () => {
           originalFilename: "clip.mp4",
         },
       }),
+      // Actor context for the service-level decision-freeze gate (stack-review B).
+      expect.objectContaining({ actorType: "board" }),
     );
   });
 
@@ -691,6 +693,8 @@ describe("issue attachment routes", () => {
           originalFilename: "clip.webm",
         },
       }),
+      // Actor context for the service-level decision-freeze gate (stack-review B).
+      expect.objectContaining({ actorType: "board" }),
     );
   });
 });

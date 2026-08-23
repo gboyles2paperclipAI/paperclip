@@ -20,6 +20,55 @@ import { getTelemetryClient } from "../telemetry.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import type { ProviderCooldownService } from "../services/provider-cooldown.js";
 
+/**
+ * `failureOwner` (ADR-20260823-quiescent-coordination R2.18) is stored on the
+ * routine's existing env/defaults surface as a plain binding under this
+ * reserved key — no new column. The routes fold the top-level request field
+ * into `env` before persistence and surface it back as `failureOwner` on
+ * routine read models.
+ */
+const FAILURE_OWNER_ENV_KEY = "PAPERCLIP_FAILURE_OWNER";
+
+function readRoutineFailureOwner(env: unknown): string | null {
+  if (!env || typeof env !== "object" || Array.isArray(env)) return null;
+  const binding = (env as Record<string, unknown>)[FAILURE_OWNER_ENV_KEY];
+  if (typeof binding === "string") return binding.trim() || null;
+  if (binding && typeof binding === "object" && !Array.isArray(binding)) {
+    const record = binding as Record<string, unknown>;
+    if (record.type === "plain" && typeof record.value === "string") {
+      return record.value.trim() || null;
+    }
+  }
+  return null;
+}
+
+function presentRoutine<T extends { env?: unknown }>(routine: T): T & { failureOwner: string | null } {
+  return { ...routine, failureOwner: readRoutineFailureOwner(routine.env ?? null) };
+}
+
+/**
+ * Fold a validated top-level `failureOwner` into the env payload the frozen
+ * routine service persists. `existingEnv` (the routine's current env) keeps
+ * unrelated bindings intact when a PATCH changes only the failure owner.
+ */
+function foldFailureOwnerIntoEnv(
+  body: { env?: Record<string, unknown> | null; failureOwner?: string | null },
+  existingEnv?: unknown,
+): void {
+  if (body.failureOwner === undefined) return;
+  const base: Record<string, unknown> = body.env !== undefined
+    ? { ...(body.env ?? {}) }
+    : (existingEnv && typeof existingEnv === "object" && !Array.isArray(existingEnv)
+      ? { ...(existingEnv as Record<string, unknown>) }
+      : {});
+  if (body.failureOwner === null) {
+    delete base[FAILURE_OWNER_ENV_KEY];
+  } else {
+    base[FAILURE_OWNER_ENV_KEY] = { type: "plain", value: body.failureOwner };
+  }
+  body.env = base;
+}
+
 export function routineRoutes(
   db: Db,
   options: { pluginWorkerManager?: PluginWorkerManager; providerCooldownService?: ProviderCooldownService } = {},
@@ -164,13 +213,14 @@ export function routineRoutes(
     assertCompanyAccess(req, companyId);
     const projectId = typeof req.query.projectId === "string" ? req.query.projectId : undefined;
     const result = await svc.list(companyId, { projectId });
-    res.json(result);
+    res.json(result.map(presentRoutine));
   });
 
   router.post("/companies/:companyId/routines", validate(createRoutineSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertBoardCanAssignTasks(req, companyId);
     await assertCanManageCompanyRoutine(req, companyId, req.body.assigneeAgentId);
+    foldFailureOwnerIntoEnv(req.body);
     const created = await svc.create(companyId, req.body, {
       agentId: req.actor.type === "agent" ? req.actor.agentId : null,
       userId: req.actor.type === "board" ? req.actor.userId ?? "board" : null,
@@ -186,7 +236,12 @@ export function routineRoutes(
       action: "routine.created",
       entityType: "routine",
       entityId: created.id,
-      details: { title: created.title, assigneeAgentId: created.assigneeAgentId },
+      details: {
+        title: created.title,
+        assigneeAgentId: created.assigneeAgentId,
+        trackingMode: created.trackingMode,
+        failureOwner: readRoutineFailureOwner(created.env ?? null),
+      },
     });
     const telemetryClient = getTelemetryClient();
     if (telemetryClient) {
@@ -200,7 +255,7 @@ export function routineRoutes(
       changeSummary: "Created routine",
       triggerCount: 0,
     });
-    res.status(201).json(created);
+    res.status(201).json(presentRoutine(created));
   });
 
   router.get("/routines/:id", async (req, res) => {
@@ -210,7 +265,7 @@ export function routineRoutes(
       return;
     }
     assertCompanyAccess(req, detail.companyId);
-    res.json(detail);
+    res.json(presentRoutine(detail));
   });
 
   router.get("/routines/:id/revisions", async (req, res) => {
@@ -395,6 +450,7 @@ export function routineRoutes(
     if (req.actor.type === "agent" && req.body.assigneeAgentId !== undefined) {
       await assertCanAssignCompanyRoutine(req, routine.companyId, req.body.assigneeAgentId);
     }
+    foldFailureOwnerIntoEnv(req.body, routine.env ?? null);
     const updated = await svc.update(routine.id, req.body, {
       agentId: req.actor.type === "agent" ? req.actor.agentId : null,
       userId: req.actor.type === "board" ? req.actor.userId ?? "board" : null,
@@ -410,7 +466,11 @@ export function routineRoutes(
       action: "routine.updated",
       entityType: "routine",
       entityId: routine.id,
-      details: { title: updated?.title ?? routine.title },
+      details: {
+        title: updated?.title ?? routine.title,
+        trackingMode: updated?.trackingMode ?? routine.trackingMode,
+        failureOwner: readRoutineFailureOwner((updated ?? routine).env ?? null),
+      },
     });
     if (updated && updated.latestRevisionId !== routine.latestRevisionId) {
       await remapRoutineDescriptionAnnotations(req, routine.id);
@@ -423,7 +483,7 @@ export function routineRoutes(
         triggerCount: null,
       });
     }
-    res.json(updated);
+    res.json(updated ? presentRoutine(updated) : updated);
   });
 
   router.post("/routines/:id/revisions/:revisionId/restore", async (req, res) => {

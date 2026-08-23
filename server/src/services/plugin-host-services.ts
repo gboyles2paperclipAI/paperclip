@@ -765,6 +765,17 @@ export function buildHostServices(
     }));
   };
 
+  /**
+   * Plugin writes are fail-closed for the decision-freeze gates (stack-review
+   * B/D): a plugin call that carries no USER identity is treated as an agent
+   * context, so omitting `actorAgentId` can never walk around the freeze gate.
+   * Only an explicit user attribution downgrades to the exempt "user" type.
+   */
+  const pluginActorTypeForFreezeGate = (
+    actorAgentId: string | null | undefined,
+    actorUserId: string | null | undefined,
+  ): "agent" | "user" => (actorUserId && !actorAgentId ? "user" : "agent");
+
   const setBlockedByWithActivity = async (params: {
     issueId: string;
     companyId: string;
@@ -780,6 +791,7 @@ export function buildHostServices(
       blockedByIssueIds: params.blockedByIssueIds,
       actorAgentId: params.actorAgentId ?? null,
       actorUserId: params.actorUserId ?? null,
+      actorType: pluginActorTypeForFreezeGate(params.actorAgentId, params.actorUserId),
     } as any);
     const relations = await issues.getRelationSummaries(params.issueId);
     await logPluginActivity({
@@ -1564,6 +1576,7 @@ export function buildHostServices(
           createdByUserId: actorUserId ?? null,
           actorResponsibleUserId: actorUserId ?? null,
           trustExplicitResponsibleUserId: true,
+          actorType: pluginActorTypeForFreezeGate(actorAgentId, actorUserId),
         })) as Issue;
         await logPluginActivity({
           companyId,
@@ -1600,6 +1613,7 @@ export function buildHostServices(
           ...(patch as any),
           actorAgentId,
           actorUserId,
+          actorType: pluginActorTypeForFreezeGate(actorAgentId, actorUserId),
         })) as Issue;
         await logPluginActivity({
           companyId,
@@ -2019,7 +2033,10 @@ export function buildHostServices(
         const comment = (await issues.addComment(
           params.issueId,
           params.body,
-          { agentId: params.authorAgentId },
+          {
+            agentId: params.authorAgentId,
+            actorType: pluginActorTypeForFreezeGate(params.authorAgentId, null),
+          },
         )) as IssueComment;
         await logPluginActivity({
           companyId,

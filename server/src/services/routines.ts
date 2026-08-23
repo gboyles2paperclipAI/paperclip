@@ -45,6 +45,7 @@ import type {
   UpdateRoutineTrigger,
 } from "@paperclipai/shared";
 import {
+  ROUTINE_TRACKING_MODES,
   WORKSPACE_BRANCH_ROUTINE_VARIABLE,
   getBuiltinRoutineVariableValues,
   extractRoutineVariableNames,
@@ -53,6 +54,7 @@ import {
   pluginOperationIssueOriginKind,
   stringifyRoutineVariableValue,
   syncRoutineVariablesWithTemplate,
+  type RoutineTrackingMode,
 } from "@paperclipai/shared";
 import { trackRoutineRun } from "@paperclipai/shared/telemetry";
 import { conflict, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
@@ -60,6 +62,7 @@ import { logger } from "../middleware/logger.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
 import { issueService } from "./issues.js";
+import { getActiveDecisionFreeze } from "./decision-freeze.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import { secretService } from "./secrets.js";
@@ -79,6 +82,8 @@ import type { ProviderCooldownService } from "./provider-cooldown.js";
 
 const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"];
 const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"];
+const ROUTINE_FAILURE_EPISODE_ORIGIN_KIND = "routine_failure_episode";
+const DECISION_FREEZE_SKIP_REASON = "decision_freeze";
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
 const MAX_CATCH_UP_RUNS = 25;
 const MAX_ROUTINE_REVISIONS = 100;
@@ -244,10 +249,51 @@ function nextResultText(status: string, issueId?: string | null) {
   if (status === "issue_created" && issueId) return `Created execution issue ${issueId}`;
   if (status === "coalesced") return "Coalesced into an existing live execution issue";
   if (status === "skipped_paused") return "Skipped because the project is paused";
+  if (status === "skipped_decision_freeze") return "Skipped because the routine context is inside an active decision freeze";
   if (status === "skipped") return "Skipped because a live execution issue already exists";
   if (status === "completed") return "Execution issue completed";
   if (status === "failed") return "Execution failed";
   return status;
+}
+
+// Unknown or legacy values dispatch exactly like today's default so a bad row
+// can never change routine behavior silently.
+/**
+ * Robust 23505 matcher: postgres-js reports `constraint_name`, node-postgres
+ * reports `constraint`, and drizzle can wrap the driver error in a `cause`
+ * chain — walk all of them like the recovery-service conflict helpers do.
+ */
+function matchesUniqueConstraintViolation(error: unknown, constraintNames: readonly string[]): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (typeof current === "object" && current !== null && !seen.has(current)) {
+    seen.add(current);
+    const maybe = current as {
+      code?: string;
+      constraint?: string;
+      constraint_name?: string;
+      message?: string;
+      cause?: unknown;
+    };
+    const constraint = maybe.constraint ?? maybe.constraint_name;
+    if (maybe.code === "23505") {
+      if (constraint && constraintNames.includes(constraint)) return true;
+      if (
+        typeof maybe.message === "string" &&
+        constraintNames.some((name) => maybe.message!.includes(name))
+      ) {
+        return true;
+      }
+    }
+    current = maybe.cause;
+  }
+  return false;
+}
+
+function readRoutineTrackingMode(value: string | null | undefined): RoutineTrackingMode {
+  return (ROUTINE_TRACKING_MODES as readonly string[]).includes(value ?? "")
+    ? (value as RoutineTrackingMode)
+    : "issue_always";
 }
 
 function normalizeWebhookTimestampMs(rawTimestamp: string) {
@@ -1396,10 +1442,18 @@ export function routineService(
     executor: Db = db,
     dispatchFingerprint?: string | null,
     origin?: { kind: string; id: string | null },
+    options?: { includeHidden?: boolean },
   ) {
     const fingerprintCondition = routineExecutionFingerprintCondition(dispatchFingerprint);
     const originKind = origin?.kind ?? "routine_execution";
     const originId = origin?.id ?? routine.id;
+    // Hidden-tracking routines (run_only / issue_on_failure) create their
+    // execution issues with hiddenAt set, so their skip/coalesce lookup must
+    // match hidden issues too (while still excluding harness issues). The
+    // default keeps today's visible-only behavior byte-identical.
+    const executionIssueVisibilityCondition = options?.includeHidden
+      ? isNull(issues.harnessKind)
+      : visibleIssueCondition();
     const executionBoundIssue = await executor
       .select()
       .from(issues)
@@ -1416,7 +1470,7 @@ export function routineService(
           eq(issues.originKind, originKind),
           eq(issues.originId, originId),
           inArray(issues.status, OPEN_ISSUE_STATUSES),
-          visibleIssueCondition(),
+          executionIssueVisibilityCondition,
           ...(fingerprintCondition ? [fingerprintCondition] : []),
         ),
       )
@@ -1442,7 +1496,7 @@ export function routineService(
           eq(issues.originKind, originKind),
           eq(issues.originId, originId),
           inArray(issues.status, OPEN_ISSUE_STATUSES),
-          visibleIssueCondition(),
+          executionIssueVisibilityCondition,
           ...(fingerprintCondition ? [fingerprintCondition] : []),
         ),
       )
@@ -1461,6 +1515,156 @@ export function routineService(
       .where(eq(routineRuns.id, runId))
       .returning()
       .then((rows) => rows[0] ?? null);
+  }
+
+  // ---------------------------------------------------------------------------
+  // issue_on_failure failure episodes (ADR R2.18)
+  //
+  // Hidden execution issues terminalize their runs through syncRunStatusForIssue
+  // exactly like visible ones. For issue_on_failure routines, a failed cycle
+  // surfaces exactly ONE visible failure-episode issue per open episode — keyed
+  // by the issues_open_routine_failure_episode_uq partial unique on
+  // (company_id, origin_kind='routine_failure_episode', origin_id=routineId)
+  // over open, non-hidden statuses — and a later healthy cycle terminalizes the
+  // open episode exactly once with an evidence comment.
+  // ---------------------------------------------------------------------------
+
+  async function getIssueOnFailureRoutineForRun(originRunId: string) {
+    const run = await db
+      .select({
+        id: routineRuns.id,
+        routineId: routineRuns.routineId,
+        responsibleUserId: routineRuns.responsibleUserId,
+      })
+      .from(routineRuns)
+      .where(eq(routineRuns.id, originRunId))
+      .then((rows) => rows[0] ?? null);
+    if (!run) return null;
+    const routine = await getRoutineById(run.routineId);
+    if (!routine) return null;
+    if (readRoutineTrackingMode(routine.trackingMode) !== "issue_on_failure") return null;
+    return { run, routine };
+  }
+
+  async function findOpenRoutineFailureEpisodeIssue(
+    routine: typeof routines.$inferSelect,
+    executor: Db = db,
+    options?: { forUpdate?: boolean },
+  ) {
+    const query = executor
+      .select()
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, routine.companyId),
+          eq(issues.originKind, ROUTINE_FAILURE_EPISODE_ORIGIN_KIND),
+          eq(issues.originId, routine.id),
+          inArray(issues.status, OPEN_ISSUE_STATUSES),
+          isNull(issues.hiddenAt),
+        ),
+      )
+      .orderBy(desc(issues.createdAt), desc(issues.id))
+      .limit(1);
+    const rows = options?.forUpdate ? await query.for("update") : await query;
+    return rows[0] ?? null;
+  }
+
+  async function maybeOpenRoutineFailureEpisode(executionIssue: {
+    id: string;
+    identifier: string | null;
+    status: string;
+    originRunId: string;
+  }) {
+    const context = await getIssueOnFailureRoutineForRun(executionIssue.originRunId);
+    if (!context) return null;
+    const { run, routine } = context;
+    // Serialize episode open/resolve on the ROUTINE row: a concurrent healthy
+    // resolve blocks on this lock until an in-flight open commits, so it can
+    // never miss the episode and leave it orphaned open. The episode-row
+    // FOR UPDATE in maybeResolve only helps once the row exists.
+    return db.transaction(async (tx) => {
+      const txDb = tx as unknown as Db;
+      await tx.execute(
+        sql`select id from ${routines} where ${routines.id} = ${routine.id} and ${routines.companyId} = ${routine.companyId} for update`,
+      );
+      const existing = await findOpenRoutineFailureEpisodeIssue(routine, txDb);
+      if (existing) return existing;
+      return createRoutineFailureEpisodeIssue({ run, routine, executionIssue });
+    });
+  }
+
+  async function createRoutineFailureEpisodeIssue(input: {
+    run: { id: string; responsibleUserId: string | null };
+    routine: typeof routines.$inferSelect;
+    executionIssue: { id: string; identifier: string | null; status: string };
+  }) {
+    const { run, routine, executionIssue } = input;
+    const executionIssueRef = executionIssue.identifier ?? executionIssue.id;
+    try {
+      return await issueSvc.create(routine.companyId, {
+        projectId: routine.projectId,
+        goalId: routine.goalId,
+        parentId: routine.parentIssueId,
+        title: `Routine failing: ${routine.title}`,
+        description: [
+          `Routine \`${routine.title}\` (tracking mode \`issue_on_failure\`) failed its latest execution cycle.`,
+          "",
+          `- Routine id: ${routine.id}`,
+          `- Failing run: ${run.id}`,
+          `- Execution issue: ${executionIssueRef} (moved to ${executionIssue.status})`,
+          "",
+          "This episode issue stays open across further failing cycles and is closed automatically by the next healthy cycle.",
+        ].join("\n"),
+        status: "todo",
+        priority: routine.priority,
+        assigneeAgentId: routine.assigneeAgentId,
+        responsibleUserId: run.responsibleUserId ?? routine.responsibleUserId ?? null,
+        trustExplicitResponsibleUserId: true,
+        originKind: ROUTINE_FAILURE_EPISODE_ORIGIN_KIND,
+        originId: routine.id,
+        originRunId: run.id,
+      });
+    } catch (error) {
+      const isOpenEpisodeConflict = matchesUniqueConstraintViolation(error, [
+        "issues_open_routine_failure_episode_uq",
+      ]);
+      if (!isOpenEpisodeConflict) throw error;
+      return findOpenRoutineFailureEpisodeIssue(routine);
+    }
+  }
+
+  async function maybeResolveRoutineFailureEpisode(executionIssue: {
+    id: string;
+    identifier: string | null;
+    originRunId: string;
+  }) {
+    const context = await getIssueOnFailureRoutineForRun(executionIssue.originRunId);
+    if (!context) return null;
+    const { run, routine } = context;
+    // FOR UPDATE on the episode row makes the terminalization exactly-once:
+    // a concurrent healthy sync blocks on the lock and then sees the episode
+    // already outside the open set. The ROUTINE-row lock (shared with
+    // maybeOpenRoutineFailureEpisode) additionally serializes resolve against
+    // an in-flight open, so a healthy cycle cannot race past an episode that
+    // has not committed yet.
+    return db.transaction(async (tx) => {
+      const txDb = tx as unknown as Db;
+      await tx.execute(
+        sql`select id from ${routines} where ${routines.id} = ${routine.id} and ${routines.companyId} = ${routine.companyId} for update`,
+      );
+      const episode = await findOpenRoutineFailureEpisodeIssue(routine, txDb, { forUpdate: true });
+      if (!episode) return null;
+      const updated = await issueSvc.update(episode.id, { status: "done" }, txDb);
+      const executionIssueRef = executionIssue.identifier ?? executionIssue.id;
+      await issueSvc.addComment(
+        episode.id,
+        `Routine recovered: run ${run.id} completed via execution issue ${executionIssueRef}. Closing this failure episode.`,
+        {},
+        { authorType: "system" },
+        txDb,
+      );
+      return updated;
+    });
   }
 
   async function createWebhookSecret(
@@ -1668,6 +1872,14 @@ export function routineService(
       : "routine_execution";
     const issueOriginId = managedIssueTemplate?.originId ?? input.routine.id;
     const issueBillingCode = managedIssueTemplate?.billingCode ?? null;
+    const trackingMode = readRoutineTrackingMode(input.routine.trackingMode);
+    // run_only and issue_on_failure keep the issue-bound execution vehicle but
+    // create it hidden (issues.hiddenAt) so it never reaches board queries or
+    // convergence counts. Hidden issues still execute: the assignment wake below
+    // carries the issue id and the heartbeat pickup path resolves issues by id
+    // without a visibility filter (same mechanism as skill_test harness issues,
+    // which visibleIssueCondition() also excludes).
+    const hiddenExecutionIssue = trackingMode === "run_only" || trackingMode === "issue_on_failure";
     const dispatchFingerprint = createRoutineDispatchFingerprint({
       payload: triggerPayload,
       projectId,
@@ -1714,6 +1926,54 @@ export function routineService(
       }
 
       const triggeredAt = new Date();
+      const nextRunAt = input.trigger?.kind === "schedule" && input.trigger.cronExpression && input.trigger.timezone
+        ? nextCronTickInTimeZone(input.trigger.cronExpression, input.trigger.timezone, triggeredAt)
+        : undefined;
+
+      // R2.14: a routine whose parent/anchor context issue is a member of an
+      // active decision-freeze cone produces a suppressed run — the same quiet
+      // shape as the paused suppression (skipped, no issue, no notification,
+      // no failure). The suppressed run intentionally records no idempotency
+      // key so a caller retrying after the freeze releases dispatches normally
+      // (retry-later, not terminal). Empty lease tables return null here, so
+      // this is inert until the first lease writer ships.
+      if (input.routine.parentIssueId) {
+        const activeFreeze = await getActiveDecisionFreeze(txDb, input.routine.companyId, input.routine.parentIssueId);
+        if (activeFreeze) {
+          const [suppressedRun] = await txDb
+            .insert(routineRuns)
+            .values({
+              companyId: input.routine.companyId,
+              routineId: input.routine.id,
+              triggerId: input.trigger?.id ?? null,
+              source: input.source,
+              status: "skipped",
+              triggeredAt,
+              failureReason: DECISION_FREEZE_SKIP_REASON,
+              completedAt: triggeredAt,
+              linkedIssueId: null,
+              routineRevisionId: input.routine.latestRevisionId,
+              responsibleUserId: input.routine.responsibleUserId ?? null,
+              triggerPayload: {
+                decisionFreeze: {
+                  leaseId: activeFreeze.leaseId,
+                  state: activeFreeze.state,
+                  anchorIssueId: activeFreeze.anchorIssueId,
+                },
+              },
+            })
+            .returning();
+          await updateRoutineTouchedState({
+            routineId: input.routine.id,
+            triggerId: input.trigger?.id ?? null,
+            triggeredAt,
+            status: "skipped_decision_freeze",
+            nextRunAt,
+          }, txDb);
+          return suppressedRun;
+        }
+      }
+
       const manualRunnerUserId = input.source === "manual" ? input.actor?.userId ?? null : null;
       const latestRevisionResponsibleUserId = input.routine.latestRevisionId
         ? await txDb
@@ -1752,16 +2012,12 @@ export function routineService(
         })
         .returning();
 
-      const nextRunAt = input.trigger?.kind === "schedule" && input.trigger.cronExpression && input.trigger.timezone
-        ? nextCronTickInTimeZone(input.trigger.cronExpression, input.trigger.timezone, triggeredAt)
-        : undefined;
-
       let createdIssue: Awaited<ReturnType<typeof issueSvc.create>> | null = null;
       try {
         const activeIssue = await findLiveExecutionIssue(input.routine, txDb, dispatchFingerprint, {
           kind: issueOriginKind,
           id: issueOriginId,
-        });
+        }, { includeHidden: hiddenExecutionIssue });
         if (activeIssue && input.routine.concurrencyPolicy !== "always_enqueue") {
           const status = input.routine.concurrencyPolicy === "skip_if_active" ? "skipped" : "coalesced";
           if (manualRunnerUserId) {
@@ -1809,6 +2065,7 @@ export function routineService(
             originRunId: createdRun.id,
             originFingerprint: dispatchFingerprint,
             billingCode: issueBillingCode,
+            ...(hiddenExecutionIssue ? { hiddenAt: triggeredAt } : {}),
             ...(executionWorkspaceIdOverrideProvided
               ? { executionWorkspaceId: input.executionWorkspaceId ?? null }
               : {}),
@@ -1828,13 +2085,14 @@ export function routineService(
             },
           });
         } catch (error) {
-          const isOpenExecutionConflict =
-            !!error &&
-            typeof error === "object" &&
-            "code" in error &&
-            (error as { code?: string }).code === "23505" &&
-            "constraint" in error &&
-            (error as { constraint?: string }).constraint === "issues_open_routine_execution_uq";
+          // Both partial uniques guard one open execution per routine:
+          // issues_open_routine_execution_uq covers visible issues
+          // (hidden_at IS NULL) and issues_open_routine_execution_hidden_uq
+          // covers hidden ones (run_only / issue_on_failure tracking modes).
+          const isOpenExecutionConflict = matchesUniqueConstraintViolation(error, [
+            "issues_open_routine_execution_uq",
+            "issues_open_routine_execution_hidden_uq",
+          ]);
           if (!isOpenExecutionConflict || input.routine.concurrencyPolicy === "always_enqueue") {
             throw error;
           }
@@ -1842,7 +2100,7 @@ export function routineService(
           const existingIssue = await findLiveExecutionIssue(input.routine, txDb, dispatchFingerprint, {
             kind: issueOriginKind,
             id: issueOriginId,
-          });
+          }, { includeHidden: hiddenExecutionIssue });
           if (!existingIssue) throw error;
           const status = input.routine.concurrencyPolicy === "skip_if_active" ? "skipped" : "coalesced";
           if (manualRunnerUserId) {
@@ -1913,6 +2171,35 @@ export function routineService(
         return failed ?? createdRun;
       }
     });
+
+    const suppressedByDecisionFreeze =
+      run.status === "skipped" && run.failureReason === DECISION_FREEZE_SKIP_REASON;
+    if (suppressedByDecisionFreeze) {
+      // Mirror recordSuppressedAutomaticRun's quiet shape: a routine.run_skipped
+      // activity entry for automatic sources, no run_triggered log, no telemetry.
+      if (input.source === "schedule" || input.source === "webhook") {
+        try {
+          await logActivity(db, {
+            companyId: input.routine.companyId,
+            actorType: "system",
+            actorId: input.source === "schedule" ? "routine-scheduler" : "routine-webhook",
+            action: "routine.run_skipped",
+            entityType: "routine_run",
+            entityId: run.id,
+            details: {
+              routineId: input.routine.id,
+              triggerId: input.trigger?.id ?? null,
+              source: input.source,
+              status: "skipped",
+              reason: DECISION_FREEZE_SKIP_REASON,
+            },
+          });
+        } catch (err) {
+          logger.warn({ err, routineId: input.routine.id, runId: run.id }, "failed to log skipped routine run");
+        }
+      }
+      return run;
+    }
 
     if (input.source === "schedule" || input.source === "webhook") {
       const actorId = input.source === "schedule" ? "routine-scheduler" : "routine-webhook";
@@ -2130,6 +2417,7 @@ export function routineService(
             status,
             concurrencyPolicy: input.concurrencyPolicy,
             catchUpPolicy: input.catchUpPolicy,
+            trackingMode: input.trackingMode,
             variables,
             env,
             responsibleUserId,
@@ -2240,6 +2528,7 @@ export function routineService(
           status: nextStatus,
           concurrencyPolicy: patch.concurrencyPolicy ?? locked.concurrencyPolicy,
           catchUpPolicy: patch.catchUpPolicy ?? locked.catchUpPolicy,
+          trackingMode: patch.trackingMode ?? locked.trackingMode,
           variables: nextVariables,
           env: nextEnv,
           responsibleUserId: locked.responsibleUserId ?? responsibleUserId,
@@ -2247,7 +2536,13 @@ export function routineService(
           updatedByUserId: actor.userId ?? null,
         };
 
-        if (locked.latestRevisionId && routineCurrentFieldsMatch(locked, candidate)) {
+        if (
+          locked.latestRevisionId &&
+          routineCurrentFieldsMatch(locked, candidate) &&
+          // trackingMode is intentionally outside the .strict() revision
+          // snapshot, so a trackingMode-only change must not short-circuit.
+          locked.trackingMode === candidate.trackingMode
+        ) {
           return locked;
         }
 
@@ -2290,6 +2585,7 @@ export function routineService(
             status: candidate.status,
             concurrencyPolicy: candidate.concurrencyPolicy,
             catchUpPolicy: candidate.catchUpPolicy,
+            trackingMode: candidate.trackingMode,
             variables: candidate.variables,
             env: candidate.env,
             responsibleUserId: candidate.responsibleUserId,
@@ -3079,6 +3375,7 @@ export function routineService(
       const issue = await db
         .select({
           id: issues.id,
+          identifier: issues.identifier,
           status: issues.status,
           originKind: issues.originKind,
           originRunId: issues.originRunId,
@@ -3088,17 +3385,38 @@ export function routineService(
         .then((rows) => rows[0] ?? null);
       if (!issue || issue.originKind !== "routine_execution" || !issue.originRunId) return null;
       if (issue.status === "done") {
-        return finalizeRun(issue.originRunId, {
+        const finalized = await finalizeRun(issue.originRunId, {
           status: "completed",
           completedAt: new Date(),
         });
+        try {
+          await maybeResolveRoutineFailureEpisode({
+            id: issue.id,
+            identifier: issue.identifier,
+            originRunId: issue.originRunId,
+          });
+        } catch (err) {
+          logger.warn({ err, issueId: issue.id }, "failed to resolve routine failure episode");
+        }
+        return finalized;
       }
       if (issue.status === "blocked" || issue.status === "cancelled") {
-        return finalizeRun(issue.originRunId, {
+        const finalized = await finalizeRun(issue.originRunId, {
           status: "failed",
           failureReason: `Execution issue moved to ${issue.status}`,
           completedAt: new Date(),
         });
+        try {
+          await maybeOpenRoutineFailureEpisode({
+            id: issue.id,
+            identifier: issue.identifier,
+            status: issue.status,
+            originRunId: issue.originRunId,
+          });
+        } catch (err) {
+          logger.warn({ err, issueId: issue.id }, "failed to open routine failure episode issue");
+        }
+        return finalized;
       }
       return null;
     },

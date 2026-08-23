@@ -3,6 +3,10 @@ import type { Db } from "@paperclipai/db";
 import { documentRevisions, documents, issueDocuments, issues } from "@paperclipai/db";
 import { isSystemIssueDocumentKey, issueDocumentKeySchema } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
+import {
+  assertDecisionFreezeMutationAllowed,
+  deriveDecisionFreezeActorType,
+} from "./decision-freeze.js";
 
 function normalizeDocumentKey(key: string) {
   const normalized = key.trim().toLowerCase();
@@ -205,6 +209,7 @@ export function documentService(db: Db) {
       createdByAgentId?: string | null;
       createdByUserId?: string | null;
       createdByRunId?: string | null;
+      actorType?: string | null;
       sourceTrust?: typeof documents.$inferInsert.sourceTrust;
       lockedDocumentStrategy?: "conflict" | "create_new_document";
     }) => {
@@ -220,6 +225,18 @@ export function documentService(db: Db) {
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         try {
           return await db.transaction(async (tx) => {
+          // In-tx decision-freeze gate for the document PUT service path
+          // (R2.2/R3.1, stack-review B): agent writes on frozen members are
+          // refused inside the same transaction as the write; the anchor's
+          // assignee keeps document PUT while the lease is `revising`.
+          await assertDecisionFreezeMutationAllowed(tx as unknown as Db, issue.companyId, issue.id, {
+            type: deriveDecisionFreezeActorType({
+              actorType: input.actorType ?? null,
+              actorAgentId: input.createdByAgentId ?? null,
+              actorUserId: input.createdByUserId ?? null,
+            }),
+            agentId: input.createdByAgentId ?? null,
+          }, { revisingOwnerOperation: "document_put" });
           const now = new Date();
           const existing = await tx
             .select({
