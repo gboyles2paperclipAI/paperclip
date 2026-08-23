@@ -17,6 +17,10 @@ import {
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
+import {
+  enqueueBrokerOperationForApprovedDecision,
+  getBrokerOperationRequestFromApprovalPayload,
+} from "./broker-operations.js";
 
 /**
  * Decision-lease writers (ADR-20260823-quiescent-coordination R2.5–R2.7,
@@ -472,12 +476,27 @@ export async function buildContinuationPayloadForLease(
         .orderBy(asc(issueApprovals.createdAt))
         .then((rows) => rows.map((row) => row.issueId))
       : [];
+    // Broker-executed operations (R2.16): the continuation explicitly
+    // instructs the woken owner that the broker performs the mutation — the
+    // owner verifies only.
+    const brokerBlock = approval
+      ? getBrokerOperationRequestFromApprovalPayload(approval.payload)
+      : null;
     return {
       wakeAgentId: approval?.requestedByAgentId ?? null,
       approvalId: lease.decisionId,
       approvalStatus: mapDispositionToApprovalStatus(disposition),
       issueId: linkedIssueIds[0] ?? lease.anchorIssueId,
       issueIds: linkedIssueIds.length > 0 ? linkedIssueIds : [lease.anchorIssueId],
+      ...(brokerBlock
+        ? {
+          brokerOperation: {
+            name: brokerBlock.request.name,
+            executionModel: "broker_executes",
+            ownerAction: "verify_only",
+          },
+        }
+        : {}),
     };
   }
 
@@ -703,6 +722,7 @@ export async function dispatchDecisionContinuations(
       continuation: decisionContinuations,
       companyId: decisionLeases.companyId,
       decisionKind: decisionLeases.decisionKind,
+      decisionId: decisionLeases.decisionId,
       anchorIssueId: decisionLeases.anchorIssueId,
     })
     .from(decisionContinuations)
@@ -723,9 +743,31 @@ export async function dispatchDecisionContinuations(
       const wakeAgentId = typeof rawWakeAgentId === "string" && rawWakeAgentId.length > 0
         ? rawWakeAgentId
         : null;
+
+      // Approved-action broker hook (R2.16/PR-5): an ACCEPTED approval that
+      // carries a broker-operation request enqueues its broker_operations row
+      // here, exactly once, BEFORE the continuation is consumed. Enqueue is
+      // idempotent (unique on (company_id, idempotency_key)), so a crash
+      // between enqueue and consume replays safely; a transient enqueue error
+      // propagates so this delivery is retried rather than lost. Typed
+      // refusals (no broker block, decision not approved) are non-events.
+      let brokerOperationId: string | null = null;
+      if (row.decisionKind === "approval" && continuation.disposition === "approved") {
+        const enqueueOutcome = await enqueueBrokerOperationForApprovedDecision(db, {
+          approvalId: row.decisionId,
+        });
+        if (enqueueOutcome.outcome === "enqueued") {
+          brokerOperationId = enqueueOutcome.operation.id;
+        }
+      }
+
       if (wakeAgentId) {
         const reason = continuationWakeReason(row.decisionKind, continuation.disposition);
-        const wakePayload = { ...deliverable, revalidate: true };
+        const wakePayload = {
+          ...deliverable,
+          revalidate: true,
+          ...(brokerOperationId ? { brokerOperationId } : {}),
+        };
         await deps.enqueueWakeup(wakeAgentId, {
           source: "automation",
           triggerDetail: "system",

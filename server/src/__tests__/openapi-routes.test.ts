@@ -62,6 +62,10 @@ const explicitOpenApiCoverageExclusions = new Set([
   // Decision-lease routes ship dark with the quiescent human-decision rollout and
   // are not yet in the public OpenAPI document.
   "decision-leases.ts",
+  // Broker-operation claim/receipt routes ship dark with the same rollout
+  // (board/system-only host-broker surface) and are not yet in the public
+  // OpenAPI document.
+  "broker-operations.ts",
 ]);
 
 function createApp() {

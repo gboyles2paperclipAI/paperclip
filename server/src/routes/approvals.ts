@@ -28,6 +28,7 @@ import {
   interruptRunsForDecisionLease,
   resolveApprovalDecisionLease,
 } from "../services/decision-leases.js";
+import { bindBrokerOperationRequestToApprovalPayload } from "../services/broker-operations.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -155,6 +156,7 @@ export function approvalRoutes(
       issueIds: _issueIds,
       idempotencyKey: _idempotencyKey,
       decisionLease: _decisionLease,
+      brokerOperation: _brokerOperation,
       ...approvalInput
     } = req.body;
     const normalizedPayload =
@@ -173,11 +175,26 @@ export function approvalRoutes(
     // replays return the existing approval with zero side effects.
     const decisionLease = req.body.decisionLease ?? null;
     const idempotencyKey = typeof req.body.idempotencyKey === "string" ? req.body.idempotencyKey : null;
+
+    // Approved-action broker request (R2.16/PR-5): bind the typed operation +
+    // content hashes into the approval payload; the broker_operations row is
+    // enqueued only when the approval is accepted. Lease-bound only in v1.
+    const brokerOperation = req.body.brokerOperation ?? null;
+    if (brokerOperation && !decisionLease) {
+      res.status(422).json({
+        error: "brokerOperation requires a decisionLease block (broker operations are lease-bound)",
+      });
+      return;
+    }
+    const payloadForCreate = brokerOperation
+      ? bindBrokerOperationRequestToApprovalPayload(normalizedPayload, brokerOperation)
+      : normalizedPayload;
+
     if (decisionLease || idempotencyKey) {
       const created = await createApprovalDecision(db, {
         companyId,
         type: approvalInput.type,
-        payload: normalizedPayload,
+        payload: payloadForCreate,
         idempotencyKey,
         issueIds: uniqueIssueIds,
         requestedByAgentId:
