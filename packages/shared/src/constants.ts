@@ -213,6 +213,17 @@ export const INBOX_MINE_ISSUE_STATUS_FILTER = INBOX_MINE_ISSUE_STATUSES.join(","
 
 export const ISSUE_PRIORITIES = ["critical", "high", "medium", "low"] as const;
 export type IssuePriority = (typeof ISSUE_PRIORITIES)[number];
+// How a terminal issue resolved (ADR-20260823 R2.12, PR-3). Defaulted by the
+// server on terminal transitions (`done` → completed, `cancelled` →
+// cancelled); explicit superseded/failed may only be recorded by board/system
+// actors.
+export const ISSUE_RESOLUTION_DISPOSITIONS = [
+  "completed",
+  "cancelled",
+  "superseded",
+  "failed",
+] as const;
+export type IssueResolutionDisposition = (typeof ISSUE_RESOLUTION_DISPOSITIONS)[number];
 export const ISSUE_WORK_MODES = ["standard", "ask", "planning", "skill_test"] as const;
 export type IssueWorkMode = (typeof ISSUE_WORK_MODES)[number];
 export const ISSUE_HARNESS_KINDS = ["skill_test"] as const;

@@ -7353,6 +7353,18 @@ export function issueRoutes(
     });
     if (!sanitizedBody) return;
     const { watchdogDiscovery: rawWatchdogDiscovery, ...rawCreateBody } = sanitizedBody;
+    // Completion-contract custody (ADR R2.12, PR-3): only board/system actors
+    // (and the broker path) may attach a contract at create time.
+    if (req.actor.type === "agent" && rawCreateBody.completionContract != null) {
+      res.status(422).json({
+        error: "Agents cannot attach completion contracts",
+        details: {
+          rule: "Completion contract requires an accepted receipt",
+          fix: "Completion contracts are attached by board/system actors or the broker path",
+        },
+      });
+      return;
+    }
     const watchdogDiscovery = normalizeWatchdogDiscovery(rawWatchdogDiscovery);
     const watchdogProductBugFollowUp = await resolveTaskWatchdogProductBugFollowUp(
       req,
@@ -8132,6 +8144,40 @@ export function issueRoutes(
       });
       return;
     }
+    // Completion-contract custody (ADR R2.12, PR-3): agents never attach or
+    // modify contracts and never record an explicit disposition; a receipt may
+    // only be submitted by the issue's assignee agent. Receipt CONTENT is
+    // validated fail-closed at the done gate in issueService.update.
+    if (req.actor.type === "agent") {
+      if (updateFields.completionContract !== undefined) {
+        res.status(422).json({
+          error: "Agents cannot attach or modify completion contracts",
+          details: {
+            rule: "Completion contract requires an accepted receipt",
+            fix: "Completion contracts are attached by board/system actors or the broker path",
+          },
+        });
+        return;
+      }
+      if (updateFields.resolutionDisposition !== undefined) {
+        res.status(422).json({
+          error: "Agents cannot set an explicit resolution disposition",
+          details: {
+            rule: "Resolution disposition is recorded by the server on terminal transitions",
+          },
+        });
+        return;
+      }
+      if (updateFields.completionReceipt !== undefined && existing.assigneeAgentId !== req.actor.agentId) {
+        res.status(422).json({
+          error: "Only the assignee agent may submit a completion receipt",
+          details: {
+            rule: "Completion contract requires an accepted receipt",
+          },
+        });
+        return;
+      }
+    }
     await assertIssueEnvironmentSelection(existing.companyId, updateFields.executionWorkspaceSettings?.environmentId);
     const requestedAssigneeAgentId =
       normalizedAssigneeAgentId === undefined ? existing.assigneeAgentId : normalizedAssigneeAgentId;
@@ -8357,6 +8403,29 @@ export function issueRoutes(
             interactionId: pendingInteraction.id,
             interactionKind: pendingInteraction.kind,
             fix: "Resolve, reject, cancel, dismiss, or supersede the pending interaction before closing the issue.",
+          },
+        });
+        return;
+      }
+    }
+
+    // Completion-contract done gate, route-level sibling (ADR R2.12, PR-3).
+    // Placed AFTER the execution-policy transition merge so a staged
+    // executor "done" that commits as in_review is not misgated; the
+    // authoritative fail-closed validation lives in issueService.update.
+    if (updateFields.status === "done") {
+      const routeEffectiveCompletionContract = updateFields.completionContract !== undefined
+        ? updateFields.completionContract
+        : existing.completionContract;
+      const routeEffectiveCompletionReceipt = updateFields.completionReceipt !== undefined
+        ? updateFields.completionReceipt
+        : existing.completionReceipt;
+      if (routeEffectiveCompletionContract != null && routeEffectiveCompletionReceipt == null) {
+        res.status(422).json({
+          error: "Issue done requires an accepted completion receipt",
+          details: {
+            rule: "Completion contract requires an accepted receipt",
+            fix: "Submit a completionReceipt bound to the attached contract's preimage, revision, and execution, then retry status=done",
           },
         });
         return;

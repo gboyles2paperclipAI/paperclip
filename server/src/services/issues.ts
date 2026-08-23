@@ -112,6 +112,14 @@ import {
   listActiveDecisionFreezesForIssues,
 } from "./decision-freeze.js";
 import { recomputeConeForEdgeChange } from "./decision-leases.js";
+import {
+  assertCompletionReceiptShape,
+  COMPLETION_CONTRACT_RECEIPT_RULE,
+  getCompletionReceiptAcceptance,
+  normalizeCompletionContractOnAttach,
+  RESOLUTION_DISPOSITION_RULE,
+  validateCompletionReceipt,
+} from "./completion-contracts.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -6010,6 +6018,21 @@ export function issueService(db: Db) {
           };
         }
       }
+      // Completion contracts (ADR R2.12, PR-3): preimage-bind the contract at
+      // attach time. An issue can never be BORN satisfied: creating it
+      // directly in `done` with a contract would bypass the receipt gate.
+      if (issueData.completionContract != null) {
+        issueData.completionContract = normalizeCompletionContractOnAttach(
+          issueData.completionContract,
+          { attachedBy: issueData.createdByUserId ?? issueData.createdByAgentId ?? null },
+        );
+        if (issueData.status === "done") {
+          throw unprocessable("An issue with a completion contract cannot be created directly in done", {
+            rule: COMPLETION_CONTRACT_RECEIPT_RULE,
+            reasons: ["receipt_missing"],
+          });
+        }
+      }
       if (data.assigneeAgentId && data.assigneeUserId) {
         throw unprocessable("Issue can only have one assignee");
       }
@@ -6376,6 +6399,114 @@ export function issueService(db: Db) {
         assertTransition(existing.status, issueData.status);
       }
 
+      // Completion-contract custody (ADR R2.12, PR-3). Agent-attributed
+      // updates may never attach, modify, or clear a contract, and may never
+      // record an explicit disposition; a receipt may only be submitted by the
+      // issue's assignee agent. Board/user/system callers manage both.
+      if (actorAgentId) {
+        if (issueData.completionContract !== undefined) {
+          throw unprocessable("Agents cannot attach or modify completion contracts", {
+            rule: COMPLETION_CONTRACT_RECEIPT_RULE,
+            issueId: id,
+          });
+        }
+        if (issueData.resolutionDisposition !== undefined) {
+          throw unprocessable("Agents cannot set an explicit resolution disposition", {
+            rule: RESOLUTION_DISPOSITION_RULE,
+            issueId: id,
+          });
+        }
+        if (issueData.completionReceipt !== undefined && existing.assigneeAgentId !== actorAgentId) {
+          throw unprocessable("Only the assignee agent may submit a completion receipt", {
+            rule: COMPLETION_CONTRACT_RECEIPT_RULE,
+            issueId: id,
+          });
+        }
+      }
+      if (issueData.completionContract != null) {
+        issueData.completionContract = normalizeCompletionContractOnAttach(
+          issueData.completionContract,
+          { attachedBy: actorUserId ?? null },
+        );
+      }
+      if (issueData.completionReceipt != null) {
+        assertCompletionReceiptShape(issueData.completionReceipt);
+        // Stamp the submitter: agents cannot spoof it; board/system stamps
+        // apply only when the receipt does not already carry one.
+        const receiptRecord = { ...(issueData.completionReceipt as Record<string, unknown>) };
+        if (actorAgentId) {
+          receiptRecord.submittedBy = actorAgentId;
+        } else if (receiptRecord.submittedBy == null && actorUserId) {
+          receiptRecord.submittedBy = actorUserId;
+        }
+        issueData.completionReceipt = receiptRecord;
+      }
+
+      // The completion-contract `done` gate (ADR R2.12/R2.13, PR-3). This is
+      // the single terminal-status chokepoint: every internal caller —
+      // including closeRoutineExecution and execution-policy stage commits —
+      // funnels through here. `done` with an attached contract requires an
+      // accepted, preimage-bound receipt; `cancelled` is never blocked.
+      const effectiveCompletionContract = issueData.completionContract !== undefined
+        ? issueData.completionContract
+        : existing.completionContract;
+      if (issueData.status === "done" && effectiveCompletionContract != null) {
+        const submittedReceipt = issueData.completionReceipt !== undefined
+          ? issueData.completionReceipt
+          : existing.completionReceipt;
+        const verdict = validateCompletionReceipt(effectiveCompletionContract, submittedReceipt, {
+          issueId: id,
+          expectedExecutionRunId: existing.executionRunId ?? null,
+          submitterIdentity: actorAgentId ?? actorUserId ?? null,
+          previouslyAcceptedReceipt: getCompletionReceiptAcceptance(existing.completionReceipt)
+            ? existing.completionReceipt
+            : null,
+        });
+        if (verdict.outcome === "rejected") {
+          throw unprocessable("Issue done requires an accepted completion receipt", {
+            rule: COMPLETION_CONTRACT_RECEIPT_RULE,
+            issueId: id,
+            reasons: verdict.reasons,
+            fix: "Submit a completionReceipt bound to the attached contract's preimage, revision, and execution, then retry status=done",
+          });
+        }
+        // Accepted (or idempotent resubmit of the accepted receipt): persist
+        // the server-stamped acceptance; a replay keeps the stored receipt so
+        // resubmits have no duplicate effects.
+        issueData.completionReceipt = verdict.acceptedReceipt;
+      }
+
+      // Resolution disposition (ADR R2.12): recorded on terminal transitions.
+      // Defaults derive from the terminal status; explicit values are
+      // board/system-only (gated above) and constrained per status.
+      if (issueData.status === "done" || issueData.status === "cancelled") {
+        const defaultDisposition = issueData.status === "done" ? "completed" : "cancelled";
+        const explicitDisposition = issueData.resolutionDisposition ?? null;
+        if (explicitDisposition) {
+          const allowedDispositions = issueData.status === "done"
+            ? ["completed", "superseded", "failed"]
+            : ["cancelled", "superseded", "failed"];
+          if (!allowedDispositions.includes(explicitDisposition)) {
+            throw unprocessable(`resolutionDisposition "${explicitDisposition}" is not valid for status "${issueData.status}"`, {
+              rule: RESOLUTION_DISPOSITION_RULE,
+              issueId: id,
+              allowed: allowedDispositions,
+            });
+          }
+        }
+        issueData.resolutionDisposition = explicitDisposition
+          ?? (existing.status === issueData.status ? existing.resolutionDisposition ?? defaultDisposition : defaultDisposition);
+      } else if (issueData.resolutionDisposition != null) {
+        // An explicit disposition without a terminal target is only valid as a
+        // correction on an already-terminal issue.
+        if (issueData.status !== undefined || (existing.status !== "done" && existing.status !== "cancelled")) {
+          throw unprocessable("resolutionDisposition can only be recorded on a terminal transition", {
+            rule: RESOLUTION_DISPOSITION_RULE,
+            issueId: id,
+          });
+        }
+      }
+
       const patch: Partial<typeof issues.$inferInsert> = {
         ...issueData,
         updatedAt: new Date(),
@@ -6472,6 +6603,10 @@ export function issueService(db: Db) {
       }
       if (issueData.status && issueData.status !== "cancelled") {
         patch.cancelledAt = null;
+      }
+      if (issueData.status && issueData.status !== "done" && issueData.status !== "cancelled") {
+        // Reopening clears the recorded disposition (mirrors completedAt).
+        patch.resolutionDisposition = null;
       }
       if (issueData.status && issueData.status !== "in_progress") {
         patch.checkoutRunId = null;
