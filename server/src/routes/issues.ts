@@ -9430,6 +9430,12 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, existing.companyId);
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
+    // Decision-freeze mutation gate (R2.2/R3.3): an agent must not delete a
+    // frozen cone member out from under a pending human decision.
+    await assertDecisionFreezeMutationAllowed(db, existing.companyId, existing.id, {
+      type: req.actor.type,
+      agentId: getActorInfo(req).agentId ?? null,
+    });
     const attachments = await svc.listAttachments(id);
 
     const issue = await svc.remove(id);
