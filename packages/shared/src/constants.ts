@@ -555,6 +555,9 @@ export type RoutineConcurrencyPolicy = (typeof ROUTINE_CONCURRENCY_POLICIES)[num
 export const ROUTINE_CATCH_UP_POLICIES = ["skip_missed", "enqueue_missed_with_cap"] as const;
 export type RoutineCatchUpPolicy = (typeof ROUTINE_CATCH_UP_POLICIES)[number];
 
+export const ROUTINE_TRACKING_MODES = ["issue_always", "run_only", "issue_on_failure"] as const;
+export type RoutineTrackingMode = (typeof ROUTINE_TRACKING_MODES)[number];
+
 export const ROUTINE_TRIGGER_KINDS = ["schedule", "webhook", "api"] as const;
 export type RoutineTriggerKind = (typeof ROUTINE_TRIGGER_KINDS)[number];
 
@@ -609,6 +612,31 @@ export const APPROVAL_STATUSES = [
   "cancelled",
 ] as const;
 export type ApprovalStatus = (typeof APPROVAL_STATUSES)[number];
+
+export const DECISION_LEASE_STATES = ["active", "revising", "released"] as const;
+export type DecisionLeaseState = (typeof DECISION_LEASE_STATES)[number];
+
+export const DECISION_TERMINAL_DISPOSITIONS = [
+  "approved",
+  "rejected",
+  "cancelled",
+  "expired",
+  "superseded_by_comment",
+  "stale_target",
+  "dismissed",
+  "operator_override",
+] as const;
+export type DecisionTerminalDisposition = (typeof DECISION_TERMINAL_DISPOSITIONS)[number];
+
+export const BROKER_OPERATION_STATES = [
+  "enqueued",
+  "claimed",
+  "succeeded",
+  "failed",
+  "rolled_back",
+  "dead",
+] as const;
+export type BrokerOperationState = (typeof BROKER_OPERATION_STATES)[number];
 
 export const SECRET_PROVIDERS = [
   "local_encrypted",

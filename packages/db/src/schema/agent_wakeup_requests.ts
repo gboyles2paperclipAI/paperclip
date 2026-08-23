@@ -1,4 +1,5 @@
-import { pgTable, uuid, text, timestamp, jsonb, integer, index } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { pgTable, uuid, text, timestamp, jsonb, integer, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 
@@ -36,5 +37,11 @@ export const agentWakeupRequests = pgTable(
       table.requestedAt,
     ),
     agentRequestedIdx: index("agent_wakeup_requests_agent_requested_idx").on(table.agentId, table.requestedAt),
+    pendingIdemUq: uniqueIndex("agent_wakeup_requests_pending_idem_uq")
+      .on(table.idempotencyKey)
+      .where(
+        sql`${table.idempotencyKey} is not null
+          and ${table.status} in ('queued', 'claimed', 'deferred_issue_execution')`,
+      ),
   }),
 );
