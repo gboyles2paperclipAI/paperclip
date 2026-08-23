@@ -23,6 +23,11 @@ import { redactEventPayload } from "../redaction.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { slackIntegrationService } from "../services/slack-integration.js";
 import { loadMatchingAgentRun } from "../services/agent-run-context.js";
+import {
+  createApprovalDecision,
+  interruptRunsForDecisionLease,
+  resolveApprovalDecisionLease,
+} from "../services/decision-leases.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -146,7 +151,12 @@ export function approvalRoutes(
       ? rawIssueIds.filter((value: unknown): value is string => typeof value === "string")
       : [];
     const uniqueIssueIds = Array.from(new Set(issueIds));
-    const { issueIds: _issueIds, ...approvalInput } = req.body;
+    const {
+      issueIds: _issueIds,
+      idempotencyKey: _idempotencyKey,
+      decisionLease: _decisionLease,
+      ...approvalInput
+    } = req.body;
     const normalizedPayload =
       approvalInput.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
@@ -157,6 +167,76 @@ export function approvalRoutes(
         : approvalInput.payload;
 
     const actor = getActorInfo(req);
+
+    // Decision-idempotent / lease-creating path (ADR R2.11, R3.2): one
+    // transaction writes approval + links + posture + cone + lease; equivalent
+    // replays return the existing approval with zero side effects.
+    const decisionLease = req.body.decisionLease ?? null;
+    const idempotencyKey = typeof req.body.idempotencyKey === "string" ? req.body.idempotencyKey : null;
+    if (decisionLease || idempotencyKey) {
+      const created = await createApprovalDecision(db, {
+        companyId,
+        type: approvalInput.type,
+        payload: normalizedPayload,
+        idempotencyKey,
+        issueIds: uniqueIssueIds,
+        requestedByAgentId:
+          approvalInput.requestedByAgentId ?? (actor.actorType === "agent" ? actor.actorId : null),
+        requestedByUserId: actor.actorType === "user" ? actor.actorId : null,
+        requestingRunId: req.actor.type === "agent" ? req.actor.runId ?? null : null,
+        decisionLease,
+      });
+
+      if (!created.applied) {
+        res.status(200).json({ ...redactApprovalPayload(created.approval), applied: false });
+        return;
+      }
+
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        action: "approval.created",
+        entityType: "approval",
+        entityId: created.approval.id,
+        details: {
+          type: created.approval.type,
+          issueIds: created.linkedIssueIds,
+          ...(created.lease ? { decisionLeaseId: created.lease.id } : {}),
+        },
+      });
+      if (created.lease) {
+        await logActivity(db, {
+          companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          action: "decision_lease.created",
+          entityType: "decision_lease",
+          entityId: created.lease.id,
+          details: {
+            approvalId: created.approval.id,
+            anchorIssueId: created.lease.anchorIssueId,
+            interruptedRunCount: created.runIdsToInterrupt.length,
+          },
+        });
+        if (created.runIdsToInterrupt.length > 0) {
+          await interruptRunsForDecisionLease(db, { cancelRun: heartbeat.cancelRun }, {
+            companyId,
+            leaseId: created.lease.id,
+            anchorIssueId: created.lease.anchorIssueId,
+            runIds: created.runIdsToInterrupt,
+            actorType: actor.actorType === "user" ? "user" : "agent",
+            actorId: actor.actorId,
+          });
+        }
+      }
+      await slack.postApprovalRequested(created.approval.id);
+      res.status(201).json(redactApprovalPayload(created.approval));
+      return;
+    }
+
     const approval = await svc.create(companyId, {
       ...approvalInput,
       payload: normalizedPayload,
@@ -234,7 +314,26 @@ export function approvalRoutes(
         },
       });
 
-      if (approval.requestedByAgentId) {
+      // Lease-bound approvals deliver the requester wake through the
+      // continuation outbox exclusively (R2.10); the legacy immediate wake
+      // below remains ONLY for approvals without a lease (documented PR-2a
+      // deviation: full outbox unification for non-lease approvals needs a
+      // lease row and lands with the broker migration). Fail OPEN on lookup
+      // errors: an active lease still freeze-skips the legacy wake, and the
+      // orphan sweep + outbox deliver exactly once.
+      let leaseOutcome: Awaited<ReturnType<typeof resolveApprovalDecisionLease>> = null;
+      try {
+        leaseOutcome = await resolveApprovalDecisionLease(db, {
+          approval,
+          disposition: "approved",
+          actorUserId: decidedByUserId,
+          enqueueWakeup: heartbeat.wakeup,
+        });
+      } catch (err) {
+        logger.warn({ err, approvalId: approval.id }, "decision lease resolution failed on approve; falling back to legacy wake path");
+      }
+
+      if (!leaseOutcome && approval.requestedByAgentId) {
         try {
           const wakeRun = await heartbeat.wakeup(approval.requestedByAgentId, {
             source: "automation",
@@ -321,6 +420,19 @@ export function approvalRoutes(
         entityId: approval.id,
         details: { type: approval.type },
       });
+
+      // Lease-bound rejections now wake the requester too, via the outbox
+      // (R2.5: every decision outcome is a resolving disposition).
+      try {
+        await resolveApprovalDecisionLease(db, {
+          approval,
+          disposition: "rejected",
+          actorUserId: decidedByUserId,
+          enqueueWakeup: heartbeat.wakeup,
+        });
+      } catch (err) {
+        logger.warn({ err, approvalId: approval.id }, "decision lease resolution failed on reject; orphan sweep will resolve");
+      }
     }
 
     res.json(redactApprovalPayload(approval));
@@ -348,6 +460,24 @@ export function approvalRoutes(
         entityId: approval.id,
         details: { type: approval.type },
       });
+
+      // R3.1: revision is a NON-releasing lease substate — the cone stays
+      // frozen, no continuation is written, and the owner gets one bounded
+      // revision wake keyed per distinct revision request.
+      try {
+        await resolveApprovalDecisionLease(db, {
+          approval,
+          disposition: "revision_requested",
+          actorUserId: decidedByUserId,
+          enqueueWakeup: heartbeat.wakeup,
+          revisionEventId: approval.decidedAt instanceof Date
+            ? String(approval.decidedAt.getTime())
+            : String(Date.now()),
+          decisionNote: req.body.decisionNote ?? null,
+        });
+      } catch (err) {
+        logger.warn({ err, approvalId: approval.id }, "decision lease revision transition failed; lease remains active");
+      }
 
       res.json(redactApprovalPayload(approval));
     },

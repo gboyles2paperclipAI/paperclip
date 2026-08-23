@@ -35,6 +35,7 @@ import { executionWorkspaceRoutes } from "./routes/execution-workspaces.js";
 import { goalRoutes } from "./routes/goals.js";
 import { boardChatRoutes } from "./routes/board-chat.js";
 import { approvalRoutes } from "./routes/approvals.js";
+import { decisionLeaseRoutes } from "./routes/decision-leases.js";
 import { slackIntegrationRoutes } from "./routes/slack-integrations.js";
 import { secretRoutes } from "./routes/secrets.js";
 import { costRoutes } from "./routes/costs.js";
@@ -276,6 +277,7 @@ export async function createApp(
   api.use(boardChatRoutes(db, { deploymentMode: opts.deploymentMode }));
   api.use(slackIntegrationRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(approvalRoutes(db, { pluginWorkerManager: workerManager }));
+  api.use(decisionLeaseRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(secretRoutes(db));
   api.use(costRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(activityRoutes(db));

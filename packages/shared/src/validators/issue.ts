@@ -30,6 +30,7 @@ import {
   REQUEST_CHECKBOX_CONFIRMATION_OPTION_LIMIT,
   REQUEST_ITEM_VERDICTS_ITEM_LIMIT,
 } from "../constants.js";
+import { decisionLeaseRequestSchema } from "./decision-lease.js";
 import { multilineTextSchema } from "./text.js";
 import { lowTrustReviewPresetPolicySchema, trustAuthorizationPolicySchema } from "./trust-policy.js";
 
@@ -1092,6 +1093,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+    decisionLease: decisionLeaseRequestSchema.nullable().optional(),
     payload: suggestTasksPayloadSchema,
   }),
   z.object({
@@ -1102,6 +1104,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+    decisionLease: decisionLeaseRequestSchema.nullable().optional(),
     payload: askUserQuestionsPayloadSchema,
   }),
   z.object({
@@ -1112,6 +1115,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+    decisionLease: decisionLeaseRequestSchema.nullable().optional(),
     payload: requestConfirmationPayloadSchema,
   }),
   z.object({
@@ -1122,6 +1126,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+    decisionLease: decisionLeaseRequestSchema.nullable().optional(),
     payload: requestCheckboxConfirmationPayloadSchema,
   }),
   z.object({
@@ -1132,6 +1137,7 @@ export const createIssueThreadInteractionSchema = z.discriminatedUnion("kind", [
     title: z.string().trim().max(240).nullable().optional(),
     summary: z.string().trim().max(1000).nullable().optional(),
     continuationPolicy: issueThreadInteractionContinuationPolicySchema.optional().default("wake_assignee"),
+    decisionLease: decisionLeaseRequestSchema.nullable().optional(),
     payload: requestItemVerdictsPayloadSchema,
   }),
 ]);

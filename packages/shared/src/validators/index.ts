@@ -527,6 +527,11 @@ export {
 } from "./approval.js";
 
 export {
+  decisionLeaseRequestSchema,
+  type DecisionLeaseRequest,
+} from "./decision-lease.js";
+
+export {
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingUserSecretRefSchema,

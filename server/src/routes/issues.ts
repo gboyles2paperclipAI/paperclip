@@ -118,6 +118,7 @@ import {
   workProductService,
 } from "../services/index.js";
 import { buildPlanReviewContext } from "../services/plan-review-context.js";
+import { findDecisionLeaseForDecision } from "../services/decision-leases.js";
 import {
   TASK_WATCHDOG_ORIGIN_KIND,
   resolveTaskWatchdogMutationScope,
@@ -1800,6 +1801,7 @@ function buildRequestItemVerdictsWakeIdempotencyKey(args: {
 }
 
 function queueResolvedInteractionContinuationWakeup(input: {
+  db: Db;
   heartbeat: ReturnType<typeof heartbeatService>;
   issue: { id: string; assigneeAgentId: string | null; status: string };
   interaction: {
@@ -1830,6 +1832,59 @@ function queueResolvedInteractionContinuationWakeup(input: {
   if (input.interaction.status === "expired") return;
   if (!input.issue.assigneeAgentId || isClosedIssueStatus(input.issue.status)) return;
 
+  void suppressWakeForDecisionLeaseBoundInteraction(input.db, input.interaction.id)
+    .catch((err): boolean => {
+      // Fail OPEN: a lease-lookup failure must never swallow the legacy wake
+      // for non-lease interactions. If a lease actually exists, the wake-guard
+      // skips the non-bypass wake anyway and the outbox still delivers.
+      logger.warn({
+        err,
+        issueId: input.issue.id,
+        interactionId: input.interaction.id,
+      }, "failed to check decision lease binding before interaction continuation wake");
+      return false;
+    })
+    .then((suppressed) => {
+      if (suppressed) return;
+      queueResolvedInteractionContinuationWakeupUnchecked(input);
+    });
+}
+
+/**
+ * The continuation outbox is the ONLY decision wake path (ADR R2.10): a lease
+ * ever bound to this interaction — active, revising, or already released —
+ * means the legacy direct wake below must not also fire.
+ */
+async function suppressWakeForDecisionLeaseBoundInteraction(db: Db, interactionId: string) {
+  const lease = await findDecisionLeaseForDecision(db, {
+    decisionKind: "interaction",
+    decisionId: interactionId,
+    anyState: true,
+  });
+  return Boolean(lease);
+}
+
+function queueResolvedInteractionContinuationWakeupUnchecked(input: {
+  heartbeat: ReturnType<typeof heartbeatService>;
+  issue: { id: string; assigneeAgentId: string | null; status: string };
+  interaction: {
+    id: string;
+    kind: string;
+    status: string;
+    continuationPolicy: string;
+    sourceCommentId?: string | null;
+    sourceRunId?: string | null;
+    payload?: unknown;
+    result?: unknown;
+  };
+  actor: { actorType: "user" | "agent"; actorId: string };
+  source: string;
+  forceFreshSession?: boolean;
+  workspaceRefreshReason?: string | null;
+  newlyResolvedItemIds?: string[];
+  idempotencyKey?: string | null;
+}) {
+  if (!input.issue.assigneeAgentId) return;
   const forceFreshSession = input.forceFreshSession === true;
   const workspaceRefreshReason = readNonEmptyString(input.workspaceRefreshReason);
   const planTarget = readPlanConfirmationTargetForIssue(input.interaction.payload, input.issue.id);
@@ -9651,7 +9706,7 @@ export function issueRoutes(
     const agentSourceRunId = req.actor.type === "agent" ? requireAgentRunId(req, res) : null;
     if (req.actor.type === "agent" && !agentSourceRunId) return;
 
-    const interaction = await issueThreadInteractionService(db).create(issue, {
+    const interaction = await issueThreadInteractionService(db, { cancelRun: heartbeat.cancelRun }).create(issue, {
       ...req.body,
       sourceRunId: req.actor.type === "agent" ? agentSourceRunId : req.body.sourceRunId ?? null,
     }, {
@@ -9770,6 +9825,7 @@ export function issueRoutes(
         acceptedPlanTarget?.issueId === issue.id &&
         acceptedPlanTarget.key === "plan";
       queueResolvedInteractionContinuationWakeup({
+        db,
         heartbeat,
         issue: continuationWakeIssue,
         interaction,
@@ -9830,6 +9886,7 @@ export function issueRoutes(
       });
 
       queueResolvedInteractionContinuationWakeup({
+        db,
         heartbeat,
         issue,
         interaction,
@@ -9883,6 +9940,7 @@ export function issueRoutes(
       });
 
       queueResolvedInteractionContinuationWakeup({
+        db,
         heartbeat,
         issue,
         interaction,
@@ -9947,6 +10005,7 @@ export function issueRoutes(
 
       if (newlyResolvedItemIds.length > 0) {
         queueResolvedInteractionContinuationWakeup({
+          db,
           heartbeat,
           issue,
           interaction,
@@ -10006,6 +10065,7 @@ export function issueRoutes(
       });
 
       queueResolvedInteractionContinuationWakeup({
+        db,
         heartbeat,
         issue,
         interaction,
@@ -10069,6 +10129,7 @@ export function issueRoutes(
       });
 
       queueResolvedInteractionContinuationWakeup({
+        db,
         heartbeat,
         issue,
         interaction,

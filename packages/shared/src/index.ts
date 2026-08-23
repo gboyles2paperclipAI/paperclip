@@ -1658,6 +1658,8 @@ export {
   type RequestApprovalRevision,
   type ResubmitApproval,
   type AddApprovalComment,
+  decisionLeaseRequestSchema,
+  type DecisionLeaseRequest,
   envBindingPlainSchema,
   envBindingSecretRefSchema,
   envBindingUserSecretRefSchema,

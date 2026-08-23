@@ -7,6 +7,7 @@ import { badRequest, forbidden, HttpError, unauthorized, unprocessable } from ".
 import { redactEventPayload, redactSensitiveText } from "../redaction.js";
 import { approvalService, heartbeatService, issueApprovalService, logActivity, secretService } from "./index.js";
 import { logger } from "../middleware/logger.js";
+import { resolveApprovalDecisionLease } from "./decision-leases.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 
 const SLACK_VERSION = "v0";
@@ -944,7 +945,36 @@ export function slackIntegrationService(
         },
       });
 
-      if (interaction.action === "approve" && result.applied) {
+      // Lease-bound approvals deliver every decision wake through the
+      // continuation outbox (R2.10); the direct wakeRequester below stays only
+      // for non-lease approvals. Replay protection is keyed on the approval id
+      // + applied-state: `result.applied` is false for a second Slack payload
+      // against an already-applied approval, so it performs zero wakes.
+      let leaseOutcome: Awaited<ReturnType<typeof resolveApprovalDecisionLease>> = null;
+      if (result.applied) {
+        try {
+          leaseOutcome = await resolveApprovalDecisionLease(db, {
+            approval: result.approval,
+            disposition: interaction.action === "approve"
+              ? "approved"
+              : interaction.action === "reject"
+                ? "rejected"
+                : "revision_requested",
+            actorUserId: paperclipUserId,
+            enqueueWakeup: heartbeat.wakeup,
+            revisionEventId: result.approval.decidedAt instanceof Date
+              ? String(result.approval.decidedAt.getTime())
+              : String(Date.now()),
+            decisionNote,
+          });
+        } catch (err) {
+          // Fail OPEN: an active lease still freeze-skips the legacy wake and
+          // the orphan sweep + outbox deliver exactly once.
+          logger.warn({ err, approvalId: result.approval.id }, "decision lease resolution failed on Slack decision; falling back to legacy wake path");
+        }
+      }
+
+      if (interaction.action === "approve" && result.applied && !leaseOutcome) {
         try {
           await wakeRequester({ approval: result.approval, linkedIssueIds, actorUserId: paperclipUserId });
         } catch (err) {
