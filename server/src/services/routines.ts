@@ -2417,6 +2417,7 @@ export function routineService(
             status,
             concurrencyPolicy: input.concurrencyPolicy,
             catchUpPolicy: input.catchUpPolicy,
+            trackingMode: input.trackingMode,
             variables,
             env,
             responsibleUserId,
@@ -2527,6 +2528,7 @@ export function routineService(
           status: nextStatus,
           concurrencyPolicy: patch.concurrencyPolicy ?? locked.concurrencyPolicy,
           catchUpPolicy: patch.catchUpPolicy ?? locked.catchUpPolicy,
+          trackingMode: patch.trackingMode ?? locked.trackingMode,
           variables: nextVariables,
           env: nextEnv,
           responsibleUserId: locked.responsibleUserId ?? responsibleUserId,
@@ -2534,7 +2536,13 @@ export function routineService(
           updatedByUserId: actor.userId ?? null,
         };
 
-        if (locked.latestRevisionId && routineCurrentFieldsMatch(locked, candidate)) {
+        if (
+          locked.latestRevisionId &&
+          routineCurrentFieldsMatch(locked, candidate) &&
+          // trackingMode is intentionally outside the .strict() revision
+          // snapshot, so a trackingMode-only change must not short-circuit.
+          locked.trackingMode === candidate.trackingMode
+        ) {
           return locked;
         }
 
@@ -2577,6 +2585,7 @@ export function routineService(
             status: candidate.status,
             concurrencyPolicy: candidate.concurrencyPolicy,
             catchUpPolicy: candidate.catchUpPolicy,
+            trackingMode: candidate.trackingMode,
             variables: candidate.variables,
             env: candidate.env,
             responsibleUserId: candidate.responsibleUserId,
