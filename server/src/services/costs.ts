@@ -5,6 +5,7 @@ import { activityLog, agents, companies, costEvents, heartbeatRuns, issues, proj
 import { notFound, unprocessable } from "../errors.js";
 import { budgetService, type BudgetServiceHooks } from "./budgets.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
+import { sumEstimatedSubscriptionCents } from "./usage-cost-estimates.js";
 
 export interface CostDateRange {
   from?: Date;
@@ -40,13 +41,25 @@ async function getMonthlySpendTotal(
   if (scope.agentId) {
     conditions.push(eq(costEvents.agentId, scope.agentId));
   }
-  const [row] = await db
-    .select({
-      total: sumAsNumber(costEvents.costCents),
-    })
-    .from(costEvents)
-    .where(and(...conditions));
-  return Number(row?.total ?? 0);
+  const [[row], estimatedCents] = await Promise.all([
+    db
+      .select({
+        total: sumAsNumber(costEvents.costCents),
+      })
+      .from(costEvents)
+      .where(and(...conditions)),
+    // Effective month spend = billed cents + usage-derived estimate for
+    // subscription-included runs, which the ledger deliberately bills at 0.
+    // Without the estimate, subscription-auth fleets persist
+    // spentMonthlyCents = 0 forever and budget surfaces are vacuous.
+    sumEstimatedSubscriptionCents(db, {
+      companyId: scope.companyId,
+      agentId: scope.agentId ?? null,
+      from: start,
+      to: end,
+    }),
+  ]);
+  return Number(row?.total ?? 0) + estimatedCents;
 }
 
 export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {

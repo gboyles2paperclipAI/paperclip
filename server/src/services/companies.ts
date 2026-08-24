@@ -30,6 +30,7 @@ import {
   documents,
 } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
+import { sumEstimatedSubscriptionCentsByCompany } from "./usage-cost-estimates.js";
 import { environmentService } from "./environments.js";
 import { heartbeatService } from "./heartbeat.js";
 import { logActivity } from "./activity-log.js";
@@ -167,21 +168,33 @@ export function companyService(db: Db) {
   ) {
     if (companyIds.length === 0) return new Map<string, number>();
     const { start, end } = currentUtcMonthWindow();
-    const rows = await database
+    const [rows, estimatedByCompanyId] = await Promise.all([
+      database
         .select({
           companyId: costEvents.companyId,
           spentMonthlyCents: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
         })
-      .from(costEvents)
-      .where(
-        and(
-          inArray(costEvents.companyId, companyIds),
-          gte(costEvents.occurredAt, start),
-          lt(costEvents.occurredAt, end),
-        ),
-      )
-      .groupBy(costEvents.companyId);
-    return new Map(rows.map((row) => [row.companyId, Number(row.spentMonthlyCents ?? 0)]));
+        .from(costEvents)
+        .where(
+          and(
+            inArray(costEvents.companyId, companyIds),
+            gte(costEvents.occurredAt, start),
+            lt(costEvents.occurredAt, end),
+          ),
+        )
+        .groupBy(costEvents.companyId),
+      // Subscription-included runs bill zero ledger dollars; fold in the
+      // usage-derived estimate so company month spend reflects real
+      // consumption (see usage-cost-estimates.ts).
+      sumEstimatedSubscriptionCentsByCompany(database, { companyIds, from: start, to: end }),
+    ]);
+    const spendByCompanyId = new Map(
+      rows.map((row) => [row.companyId, Number(row.spentMonthlyCents ?? 0)]),
+    );
+    for (const [companyId, estimated] of estimatedByCompanyId) {
+      spendByCompanyId.set(companyId, (spendByCompanyId.get(companyId) ?? 0) + estimated);
+    }
+    return spendByCompanyId;
   }
 
   async function hydrateCompanySpend<T extends { id: string; spentMonthlyCents: number }>(

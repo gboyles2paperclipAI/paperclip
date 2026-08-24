@@ -69,3 +69,21 @@ describe("agent runtime config validation", () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe("agent pause attribution on update", () => {
+  it("accepts a paused status with an optional pause reason", () => {
+    expect(updateAgentSchema.safeParse({ status: "paused" }).success).toBe(true);
+    expect(
+      updateAgentSchema.safeParse({ status: "paused", pauseReason: "manual" }).success,
+    ).toBe(true);
+    expect(
+      updateAgentSchema.safeParse({ status: "paused", pauseReason: "system" }).success,
+    ).toBe(true);
+  });
+
+  it("rejects unknown pause reasons", () => {
+    expect(
+      updateAgentSchema.safeParse({ status: "paused", pauseReason: "because" }).success,
+    ).toBe(false);
+  });
+});

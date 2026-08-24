@@ -29,11 +29,13 @@ function createDbStub(selectResults: SelectResult[]) {
   const selectWhere = vi.fn(async () => pendingSelects.shift() ?? []);
   const selectThen = vi.fn((resolve: (value: unknown[]) => unknown) => Promise.resolve(resolve(pendingSelects.shift() ?? [])));
   const selectOrderBy = vi.fn(async () => pendingSelects.shift() ?? []);
-  const selectFrom = vi.fn(() => ({
+  const selectChain: Record<string, unknown> = {
     where: selectWhere,
     then: selectThen,
     orderBy: selectOrderBy,
-  }));
+  };
+  selectChain.innerJoin = vi.fn(() => selectChain);
+  const selectFrom = vi.fn(() => selectChain);
   const select = vi.fn(() => ({
     from: selectFrom,
   }));
@@ -98,6 +100,8 @@ describe("budgetService", () => {
     const dbStub = createDbStub([
       [policy],
       [{ total: 150 }],
+      // usage-derived subscription estimate (computeObservedAmount's second query)
+      [{ estimated: 0 }],
       [],
       [{
         companyId: "company-1",
@@ -195,6 +199,8 @@ describe("budgetService", () => {
       [],
       [agentPolicy],
       [{ total: 120 }],
+      // usage-derived subscription estimate (computeObservedAmount's second query)
+      [{ estimated: 0 }],
     ]);
 
     const service = budgetService(dbStub.db as any);
@@ -252,6 +258,8 @@ describe("budgetService", () => {
         windowKind: "calendar_month_utc",
       }],
       [{ total: 150 }],
+      // usage-derived subscription estimate (computeObservedAmount's second query)
+      [{ estimated: 0 }],
     ]);
 
     const service = budgetService(dbStub.db as any);
@@ -298,6 +306,8 @@ describe("budgetService", () => {
         amount: 100,
       }],
       [{ total: 120 }],
+      // usage-derived subscription estimate (computeObservedAmount's second query)
+      [{ estimated: 0 }],
       [{ id: "approval-1", status: "approved" }],
       [{
         companyId: "company-1",

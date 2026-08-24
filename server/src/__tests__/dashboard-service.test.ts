@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
+import { agents, companies, costEvents, createDb, heartbeatRuns } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -47,6 +47,7 @@ describeEmbeddedPostgres("dashboard service", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await db.delete(costEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companies);
@@ -170,6 +171,82 @@ describeEmbeddedPostgres("dashboard service", () => {
       // failed + timed_out with no error code both bucket under "unknown"
       failedByErrorCode: { unknown: 2 },
     });
+  });
+
+  it("folds usage-derived subscription estimates into month spend alongside billed cents", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const subscriptionRunId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      budgetMonthlyCents: 50_000,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "running",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    // Subscription-auth run: the ledger bills 0 cents but the adapter reported
+    // a usage-derived estimate of $12.34.
+    await db.insert(heartbeatRuns).values({
+      id: subscriptionRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "succeeded",
+      usageJson: {
+        inputTokens: 100,
+        outputTokens: 50,
+        costUsd: 12.34,
+        billingType: "subscription_included",
+      },
+    });
+
+    const baseEvent = {
+      companyId,
+      agentId,
+      provider: "anthropic",
+      biller: "anthropic",
+      model: "claude-test",
+      inputTokens: 100,
+      cachedInputTokens: 0,
+      outputTokens: 50,
+      occurredAt: new Date(),
+    };
+    await db.insert(costEvents).values([
+      {
+        ...baseEvent,
+        heartbeatRunId: subscriptionRunId,
+        billingType: "subscription_included",
+        costCents: 0,
+      },
+      {
+        ...baseEvent,
+        heartbeatRunId: null,
+        billingType: "metered_api",
+        costCents: 500,
+      },
+    ]);
+
+    const summary = await dashboardService(db).summary(companyId);
+
+    expect(summary.costs.monthBilledCents).toBe(500);
+    expect(summary.costs.monthEstimatedCents).toBe(1234);
+    expect(summary.costs.monthSpendCents).toBe(1734);
+    expect(summary.costs.monthBudgetCents).toBe(50_000);
+    expect(summary.costs.monthUtilizationPercent).toBeCloseTo((1734 / 50_000) * 100, 2);
   });
 
   it("separates recovered restart kills from true failures and breaks failures down by error code", async () => {
