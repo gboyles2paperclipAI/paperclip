@@ -4,6 +4,7 @@ import {
   AGENT_ROLES,
   AGENT_STATUSES,
   INBOX_MINE_ISSUE_STATUS_FILTER,
+  PAUSE_REASONS,
 } from "../constants.js";
 import { agentAdapterTypeSchema } from "../adapter-type.js";
 import { envConfigSchema } from "./secret.js";
@@ -142,6 +143,13 @@ export const updateAgentSchema = createAgentSchema
     permissions: z.never().optional(),
     replaceAdapterConfig: z.boolean().optional(),
     status: z.enum(AGENT_STATUSES).optional(),
+    /**
+     * Optional pause attribution when status is set to "paused". The service
+     * always stamps pausedAt + pauseReason on a status transition into
+     * "paused" (defaulting pauseReason to "manual") and clears both when the
+     * agent leaves the paused state.
+     */
+    pauseReason: z.enum(PAUSE_REASONS).optional(),
     spentMonthlyCents: z.number().int().nonnegative().optional(),
   });
 

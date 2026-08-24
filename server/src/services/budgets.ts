@@ -23,6 +23,7 @@ import type {
   BudgetWindowKind,
 } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
+import { sumEstimatedSubscriptionCents } from "./usage-cost-estimates.js";
 import { logActivity } from "./activity-log.js";
 
 type ScopeRecord = {
@@ -150,19 +151,33 @@ async function computeObservedAmount(
   if (policy.scopeType === "agent") conditions.push(eq(costEvents.agentId, policy.scopeId));
   if (policy.scopeType === "project") conditions.push(eq(costEvents.projectId, policy.scopeId));
   const { start, end } = resolveWindow(policy.windowKind as BudgetWindowKind);
-  if (policy.windowKind === "calendar_month_utc") {
+  const windowed = policy.windowKind === "calendar_month_utc";
+  if (windowed) {
     conditions.push(gte(costEvents.occurredAt, start));
     conditions.push(lt(costEvents.occurredAt, end));
   }
 
-  const [row] = await db
-    .select({
-      total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
-    })
-    .from(costEvents)
-    .where(and(...conditions));
+  const [[row], estimatedCents] = await Promise.all([
+    db
+      .select({
+        total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
+      })
+      .from(costEvents)
+      .where(and(...conditions)),
+    // Effective observed spend = billed cents + the usage-derived estimate
+    // for subscription-included runs, which the ledger deliberately bills at
+    // 0. Without the estimate, budget policies never trigger on
+    // subscription-auth fleets and the whole guard is vacuous.
+    sumEstimatedSubscriptionCents(db, {
+      companyId: policy.companyId,
+      agentId: policy.scopeType === "agent" ? policy.scopeId : null,
+      projectId: policy.scopeType === "project" ? policy.scopeId : null,
+      from: windowed ? start : undefined,
+      to: windowed ? end : undefined,
+    }),
+  ]);
 
-  return Number(row?.total ?? 0);
+  return Number(row?.total ?? 0) + estimatedCents;
 }
 
 function buildApprovalPayload(input: {

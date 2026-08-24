@@ -4,6 +4,7 @@ import { agents, approvals, companies, costEvents, heartbeatRuns, issues } from 
 import { notFound } from "../errors.js";
 import { budgetService } from "./budgets.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
+import { sumEstimatedSubscriptionCents } from "./usage-cost-estimates.js";
 
 const DASHBOARD_RUN_ACTIVITY_DAYS = 14;
 
@@ -84,19 +85,27 @@ export function dashboardService(db: Db) {
       const monthStart = getUtcMonthStart(now);
       const runActivityDays = getRecentUtcDateKeys(now, DASHBOARD_RUN_ACTIVITY_DAYS);
       const runActivityStart = new Date(`${runActivityDays[0]}T00:00:00.000Z`);
-      const [{ monthSpend }] = await db
-        .select({
-          monthSpend: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
-        })
-        .from(costEvents)
-        .where(
-          and(
-            eq(costEvents.companyId, companyId),
-            gte(costEvents.occurredAt, monthStart),
+      const [[{ monthSpend }], monthEstimatedCents] = await Promise.all([
+        db
+          .select({
+            monthSpend: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
+          })
+          .from(costEvents)
+          .where(
+            and(
+              eq(costEvents.companyId, companyId),
+              gte(costEvents.occurredAt, monthStart),
+            ),
           ),
-        );
+        // Subscription-auth fleets bill zero marginal dollars, so the ledger
+        // sum alone reads 0 while agents run all day. Fold in the
+        // usage-derived estimate so the budget surface reflects real
+        // consumption (see usage-cost-estimates.ts).
+        sumEstimatedSubscriptionCents(db, { companyId, from: monthStart }),
+      ]);
 
-      const monthSpendCents = Number(monthSpend);
+      const monthBilledCents = Number(monthSpend);
+      const monthSpendCents = monthBilledCents + monthEstimatedCents;
       // Per-day run breakdown. A run is "recovered" when its retry chain later
       // succeeded (recovered_runs = all ancestors of a succeeded retry), so a
       // restart-killed run whose retry succeeded is pulled out of the headline
@@ -190,6 +199,8 @@ export function dashboardService(db: Db) {
         tasks: taskCounts,
         costs: {
           monthSpendCents,
+          monthBilledCents,
+          monthEstimatedCents,
           monthBudgetCents: company.budgetMonthlyCents,
           monthUtilizationPercent: Number(utilization.toFixed(2)),
         },

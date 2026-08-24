@@ -39,7 +39,17 @@ export interface DashboardSummary {
     done: number;
   };
   costs: {
+    /**
+     * Effective month-to-date spend: billed ledger cents plus the
+     * usage-derived estimate for subscription-included runs (which bill zero
+     * marginal dollars but still consume real capacity). This is the number
+     * budget surfaces compare against `monthBudgetCents`.
+     */
     monthSpendCents: number;
+    /** Actual billed cents from the cost ledger (metered API, overage, etc.). */
+    monthBilledCents: number;
+    /** Usage-derived estimated cents for subscription-included runs. */
+    monthEstimatedCents: number;
     monthBudgetCents: number;
     monthUtilizationPercent: number;
   };

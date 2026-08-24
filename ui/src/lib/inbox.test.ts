@@ -294,6 +294,8 @@ const dashboard: DashboardSummary = {
   },
   costs: {
     monthSpendCents: 900,
+    monthBilledCents: 900,
+    monthEstimatedCents: 0,
     monthBudgetCents: 1000,
     monthUtilizationPercent: 90,
   },

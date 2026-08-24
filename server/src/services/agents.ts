@@ -29,6 +29,7 @@ import {
   type AgentApiKeyScope,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
+import { sumEstimatedSubscriptionCentsByAgent } from "./usage-cost-estimates.js";
 import { syncAgentAdapterEnvBindings } from "./agent-secret-bindings.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
@@ -406,22 +407,34 @@ export function agentService(db: Db) {
   async function getMonthlySpendByAgentIds(companyId: string, agentIds: string[]) {
     if (agentIds.length === 0) return new Map<string, number>();
     const { start, end } = currentUtcMonthWindow();
-    const rows = await db
-      .select({
-        agentId: costEvents.agentId,
-        spentMonthlyCents: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
-      })
-      .from(costEvents)
-      .where(
-        and(
-          eq(costEvents.companyId, companyId),
-          inArray(costEvents.agentId, agentIds),
-          gte(costEvents.occurredAt, start),
-          lt(costEvents.occurredAt, end),
-        ),
-      )
-      .groupBy(costEvents.agentId);
-    return new Map(rows.map((row) => [row.agentId, Number(row.spentMonthlyCents ?? 0)]));
+    const [rows, estimatedByAgentId] = await Promise.all([
+      db
+        .select({
+          agentId: costEvents.agentId,
+          spentMonthlyCents: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
+        })
+        .from(costEvents)
+        .where(
+          and(
+            eq(costEvents.companyId, companyId),
+            inArray(costEvents.agentId, agentIds),
+            gte(costEvents.occurredAt, start),
+            lt(costEvents.occurredAt, end),
+          ),
+        )
+        .groupBy(costEvents.agentId),
+      // Subscription-included runs bill zero ledger dollars; fold in the
+      // usage-derived estimate so per-agent month spend reflects real
+      // consumption (see usage-cost-estimates.ts).
+      sumEstimatedSubscriptionCentsByAgent(db, { companyId, agentIds, from: start, to: end }),
+    ]);
+    const spendByAgentId = new Map(
+      rows.map((row) => [row.agentId, Number(row.spentMonthlyCents ?? 0)]),
+    );
+    for (const [agentId, estimated] of estimatedByAgentId) {
+      spendByAgentId.set(agentId, (spendByAgentId.get(agentId) ?? 0) + estimated);
+    }
+    return spendByAgentId;
   }
 
   async function hydrateAgentSpend<T extends { id: string; companyId: string; spentMonthlyCents: number }>(rows: T[]) {
@@ -579,6 +592,27 @@ export function agentService(db: Db) {
     }
 
     const normalizedPatch = { ...data } as Partial<typeof agents.$inferInsert>;
+    // Every path that sets an agent's status to "paused" must stamp the pause
+    // audit fields, and leaving the paused state must clear them. Callers that
+    // PATCH status directly (e.g. board/CTO lifecycle mutations) historically
+    // bypassed pause()/resume() and left pausedAt/pauseReason null, making the
+    // pause unattributable. Explicit caller-supplied values win; otherwise the
+    // service stamps defaults.
+    if (data.status === "paused") {
+      if (data.pausedAt === undefined) {
+        normalizedPatch.pausedAt = existing.pausedAt ?? new Date();
+      }
+      if (data.pauseReason === undefined) {
+        normalizedPatch.pauseReason = existing.pauseReason ?? "manual";
+      }
+    } else if (data.status !== undefined && data.status !== "paused") {
+      if (data.pausedAt === undefined) normalizedPatch.pausedAt = null;
+      if (data.pauseReason === undefined) normalizedPatch.pauseReason = null;
+    } else if (data.pauseReason !== undefined && existing.status !== "paused") {
+      // A pause reason only makes sense while paused; ignore stray writes so a
+      // non-paused agent never carries a dangling attribution.
+      delete normalizedPatch.pauseReason;
+    }
     if (data.permissions !== undefined) {
       const role = (data.role ?? existing.role) as string;
       normalizedPatch.permissions = normalizeAgentPermissions(data.permissions, role);
