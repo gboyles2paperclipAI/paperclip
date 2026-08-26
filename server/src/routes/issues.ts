@@ -3555,6 +3555,17 @@ export function issueRoutes(
       : null;
   }
 
+  function taskBridgeScopeAllowsDocumentWrite(req: Request, issueId: string, documentKey: string) {
+    const scope = req.actor.type === "agent" &&
+      req.actor.source === "agent_key" &&
+      req.actor.keyScope?.kind === "task_bridge"
+      ? req.actor.keyScope
+      : null;
+    return (scope?.documentWriteGrants ?? []).some((grant) =>
+      grant.issueId === issueId && grant.key === documentKey
+    );
+  }
+
   async function assertTaskBridgeCreateAllowed(
     req: Request,
     companyId: string,
@@ -6304,14 +6315,15 @@ export function issueRoutes(
       res.status(404).json({ error: "Issue not found" });
       return;
     }
-    assertCompanyAccess(req, issue.companyId);
-    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
-    if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
     const keyParsed = issueDocumentKeySchema.safeParse(String(req.params.key ?? "").trim().toLowerCase());
     if (!keyParsed.success) {
       res.status(400).json({ error: "Invalid document key", details: keyParsed.error.issues });
       return;
     }
+    const taskBridgeDocumentWriteAllowed = taskBridgeScopeAllowsDocumentWrite(req, issue.id, keyParsed.data);
+    assertCompanyAccess(req, issue.companyId);
+    if (!taskBridgeDocumentWriteAllowed && !(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+    if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
 
     const actor = getActorInfo(req);
     const sourceTrust = await sourceTrustForActorWrite(issue, actor);

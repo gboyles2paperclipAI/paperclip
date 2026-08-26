@@ -947,6 +947,64 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
+  it("allows task bridge keys to update an explicitly granted issue document without issue ownership", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({ status: "todo", assigneeAgentId: ownerAgentId }));
+    mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+      allowed: false,
+      action: input.action,
+      reason: "deny_scope",
+      explanation: "Denied by test default.",
+    }));
+
+    const res = await request(await createApp(peerActor({
+      keyId: "99999999-9999-4999-8999-999999999999",
+      keyScope: {
+        kind: "task_bridge",
+        parentIssueId: "88888888-8888-4888-8888-888888888888",
+        documentWriteGrants: [{ issueId, key: "digest" }],
+      },
+    })))
+      .put(`/api/issues/${issueId}/documents/digest`)
+      .send({ format: "markdown", body: "# aggregate digest" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAccessService.decide).not.toHaveBeenCalledWith(expect.objectContaining({ action: "issue:mutate" }));
+    expect(mockIssueService.assertCheckoutOwner).not.toHaveBeenCalled();
+    expect(mockDocumentService.upsertIssueDocument).toHaveBeenCalledWith(
+      expect.objectContaining({
+        issueId,
+        key: "digest",
+        createdByAgentId: peerAgentId,
+        lockedDocumentStrategy: "create_new_document",
+      }),
+    );
+  });
+
+  it("keeps task bridge document grants scoped to the listed document key", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({ status: "todo", assigneeAgentId: ownerAgentId }));
+    mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+      allowed: false,
+      action: input.action,
+      reason: "deny_scope",
+      explanation: "Denied by test default.",
+    }));
+
+    const res = await request(await createApp(peerActor({
+      keyId: "99999999-9999-4999-8999-999999999999",
+      keyScope: {
+        kind: "task_bridge",
+        parentIssueId: "88888888-8888-4888-8888-888888888888",
+        documentWriteGrants: [{ issueId, key: "digest" }],
+      },
+    })))
+      .put(`/api/issues/${issueId}/documents/plan`)
+      .send({ format: "markdown", body: "# blocked" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Issue is outside this actor's authorization boundary");
+    expect(mockDocumentService.upsertIssueDocument).not.toHaveBeenCalled();
+  });
+
   it("blocks agents from assigning issues directly to board users before checkout ownership", async () => {
     const res = await request(await createApp(ownerActor()))
       .patch(`/api/issues/${issueId}`)

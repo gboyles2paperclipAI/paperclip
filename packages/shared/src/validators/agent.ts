@@ -9,6 +9,7 @@ import { agentAdapterTypeSchema } from "../adapter-type.js";
 import { envConfigSchema } from "./secret.js";
 import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-policy.js";
 import { agentDesiredSkillSelectionSchema } from "./adapter-skills.js";
+import { issueDocumentKeySchema } from "./issue.js";
 
 export const agentPermissionsSchema = z.object({
   canCreateAgents: z.boolean().optional().default(false),
@@ -160,6 +161,10 @@ export const taskBridgeAgentKeyScopeSchema = z.object({
   parentIssueId: z.string().uuid().optional().nullable(),
   parentIssueIds: z.array(z.string().uuid()).max(50).optional(),
   allowedAssigneeAgentIds: z.array(z.string().uuid()).max(50).optional(),
+  documentWriteGrants: z.array(z.object({
+    issueId: z.string().uuid(),
+    key: issueDocumentKeySchema,
+  }).strict()).max(50).optional(),
 }).strict().superRefine((value, ctx) => {
   const hasProjectBoundary = Boolean(value.projectId) || Boolean(value.projectIds?.length);
   const hasParentBoundary = Boolean(value.parentIssueId) || Boolean(value.parentIssueIds?.length);
