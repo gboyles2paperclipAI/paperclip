@@ -2,6 +2,7 @@ import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issueWorkProducts } from "@paperclipai/db";
 import type { IssueWorkProduct } from "@paperclipai/shared";
+import { guardValueForPersistence } from "./output-egress-guard.js";
 
 type IssueWorkProductRow = typeof issueWorkProducts.$inferSelect;
 
@@ -32,6 +33,10 @@ function toIssueWorkProduct(row: IssueWorkProductRow): IssueWorkProduct {
 }
 
 export function workProductService(db: Db) {
+  function guardWorkProductPatch<T extends Partial<typeof issueWorkProducts.$inferInsert>>(data: T): T {
+    return guardValueForPersistence(data, { surface: "work_product" });
+  }
+
   return {
     listForIssue: async (issueId: string) => {
       const rows = await db
@@ -52,8 +57,9 @@ export function workProductService(db: Db) {
     },
 
     createForIssue: async (issueId: string, companyId: string, data: Omit<typeof issueWorkProducts.$inferInsert, "issueId" | "companyId">) => {
+      const guardedData = guardWorkProductPatch(data);
       const row = await db.transaction(async (tx) => {
-        if (data.isPrimary) {
+        if (guardedData.isPrimary) {
           await tx
             .update(issueWorkProducts)
             .set({ isPrimary: false, updatedAt: new Date() })
@@ -61,14 +67,14 @@ export function workProductService(db: Db) {
               and(
                 eq(issueWorkProducts.companyId, companyId),
                 eq(issueWorkProducts.issueId, issueId),
-                eq(issueWorkProducts.type, data.type),
+                eq(issueWorkProducts.type, guardedData.type),
               ),
             );
         }
         return await tx
           .insert(issueWorkProducts)
           .values({
-            ...data,
+            ...guardedData,
             companyId,
             issueId,
           })
@@ -79,6 +85,7 @@ export function workProductService(db: Db) {
     },
 
     update: async (id: string, patch: Partial<typeof issueWorkProducts.$inferInsert>) => {
+      const guardedPatch = guardWorkProductPatch(patch);
       const row = await db.transaction(async (tx) => {
         const existing = await tx
           .select()
@@ -87,7 +94,7 @@ export function workProductService(db: Db) {
           .then((rows) => rows[0] ?? null);
         if (!existing) return null;
 
-        if (patch.isPrimary === true) {
+        if (guardedPatch.isPrimary === true) {
           await tx
             .update(issueWorkProducts)
             .set({ isPrimary: false, updatedAt: new Date() })
@@ -102,7 +109,7 @@ export function workProductService(db: Db) {
 
         return await tx
           .update(issueWorkProducts)
-          .set({ ...patch, updatedAt: new Date() })
+          .set({ ...guardedPatch, updatedAt: new Date() })
           .where(eq(issueWorkProducts.id, id))
           .returning()
           .then((rows) => rows[0] ?? null);

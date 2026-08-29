@@ -113,6 +113,34 @@ describeEmbeddedPostgres("documentService system issue documents", () => {
     }));
   });
 
+  it("guards document bodies before persistence", async () => {
+    const { issueId } = await createIssueWithDocuments();
+    const created = await svc.upsertIssueDocument({
+      issueId,
+      key: "evidence",
+      title: "Evidence",
+      format: "markdown",
+      body: [
+        "PATH=/usr/bin",
+        "HOME=/home/example",
+        "SHELL=/bin/bash",
+        "LANG=C.UTF-8",
+        "TERM=xterm",
+        "CI=true",
+        "PAPERCLIP_API_KEY=synthetic-paperclip-key",
+        "DATABASE_URL=postgres://user:pass@example.invalid/db",
+      ].join("\n"),
+      changeSummary: "Authorization: Bearer synthetic-bearer-token",
+    });
+
+    expect(created.document.body).toContain("reason=env_dump");
+    expect(created.document.body).not.toContain("synthetic-paperclip-key");
+    const revisions = await svc.listIssueDocumentRevisions(issueId, "evidence");
+    expect(revisions[0]?.body).toContain("reason=env_dump");
+    expect(revisions[0]?.changeSummary).toContain("***REDACTED***");
+    expect(revisions[0]?.changeSummary).not.toContain("synthetic-bearer-token");
+  });
+
   it("locks and unlocks issue documents", async () => {
     const { issueId } = await createIssueWithDocuments();
 

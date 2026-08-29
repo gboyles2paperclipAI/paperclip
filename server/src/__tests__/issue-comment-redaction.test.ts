@@ -206,6 +206,30 @@ describeEmbeddedPostgres("deleted issue comment redaction", () => {
     expect(result.results).toEqual([]);
   });
 
+  it("guards issue comment bodies and metadata before persistence", async () => {
+    const { issueId } = await seedIssue();
+    const comment = await issueService(db).addComment(issueId, [
+      "PATH=/usr/bin",
+      "HOME=/home/example",
+      "SHELL=/bin/bash",
+      "LANG=C.UTF-8",
+      "TERM=xterm",
+      "CI=true",
+      "PAPERCLIP_API_KEY=synthetic-paperclip-key",
+      "DATABASE_URL=postgres://user:pass@example.invalid/db",
+    ].join("\n"), {}, {
+      metadata: {
+        version: 1,
+        sections: [{ rows: [{ type: "text", text: "Authorization: Bearer synthetic-bearer-token" }] }],
+      },
+    });
+
+    expect(comment.body).toContain("reason=env_dump");
+    expect(comment.body).not.toContain("synthetic-paperclip-key");
+    expect(JSON.stringify(comment.metadata)).toContain("***REDACTED***");
+    expect(JSON.stringify(comment.metadata)).not.toContain("synthetic-bearer-token");
+  });
+
   it("clears issue references sourced from deleted comment bodies", async () => {
     const companyId = randomUUID();
     const sourceIssueId = randomUUID();

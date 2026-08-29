@@ -61,6 +61,42 @@ describe("workProductService", () => {
     expect(result?.id).toBe("work-product-1");
   });
 
+  it("guards work product summaries and metadata before persistence", async () => {
+    const insertReturning = vi.fn(async () => [createWorkProductRow()]);
+    const insertValues = vi.fn(() => ({ returning: insertReturning }));
+    const txInsert = vi.fn(() => ({ values: insertValues }));
+    const tx = { insert: txInsert };
+    const transaction = vi.fn(async (callback: (input: typeof tx) => Promise<unknown>) => await callback(tx));
+
+    const svc = workProductService({ transaction } as any);
+    await svc.createForIssue("issue-1", "company-1", {
+      type: "artifact",
+      provider: "paperclip",
+      title: "Synthetic output",
+      status: "ready",
+      reviewState: "draft",
+      isPrimary: false,
+      summary: [
+        "PATH=/usr/bin",
+        "HOME=/home/example",
+        "SHELL=/bin/bash",
+        "LANG=C.UTF-8",
+        "TERM=xterm",
+        "CI=true",
+        "PAPERCLIP_API_KEY=synthetic-paperclip-key",
+        "DATABASE_URL=postgres://user:pass@example.invalid/db",
+      ].join("\n"),
+      metadata: {
+        Authorization: "Bearer synthetic-bearer-token",
+      },
+    } as any);
+
+    const persisted = insertValues.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(persisted.summary).toContain("reason=env_dump");
+    expect(String(persisted.summary)).not.toContain("synthetic-paperclip-key");
+    expect(persisted.metadata).toEqual({ Authorization: "***REDACTED***" });
+  });
+
   it("uses a transaction when promoting an existing work product to primary", async () => {
     const existingRow = createWorkProductRow({ isPrimary: false });
 

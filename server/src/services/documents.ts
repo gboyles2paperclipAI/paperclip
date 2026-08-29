@@ -3,6 +3,7 @@ import type { Db } from "@paperclipai/db";
 import { documentRevisions, documents, issueDocuments, issues } from "@paperclipai/db";
 import { isSystemIssueDocumentKey, issueDocumentKeySchema } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
+import { guardTextForPersistence } from "./output-egress-guard.js";
 
 function normalizeDocumentKey(key: string) {
   const normalized = key.trim().toLowerCase();
@@ -209,6 +210,10 @@ export function documentService(db: Db) {
       lockedDocumentStrategy?: "conflict" | "create_new_document";
     }) => {
       const key = normalizeDocumentKey(input.key);
+      const guardedBody = guardTextForPersistence(input.body, { surface: "issue_document" }).content;
+      const guardedChangeSummary = input.changeSummary == null
+        ? input.changeSummary
+        : guardTextForPersistence(input.changeSummary, { surface: "issue_document" }).content;
       const issue = await db
         .select({ id: issues.id, companyId: issues.companyId })
         .from(issues)
@@ -263,7 +268,7 @@ export function documentService(db: Db) {
                     companyId: issue.companyId,
                     title: input.title ?? null,
                     format: input.format,
-                    latestBody: input.body,
+                    latestBody: guardedBody,
                     latestRevisionId: null,
                     latestRevisionNumber: 1,
                     createdByAgentId: input.createdByAgentId ?? null,
@@ -287,8 +292,8 @@ export function documentService(db: Db) {
                     revisionNumber: 1,
                     title: input.title ?? null,
                     format: input.format,
-                    body: input.body,
-                    changeSummary: input.changeSummary ?? null,
+                    body: guardedBody,
+                    changeSummary: guardedChangeSummary ?? null,
                     createdByAgentId: input.createdByAgentId ?? null,
                     createdByUserId: input.createdByUserId ?? null,
                     createdByRunId: input.createdByRunId ?? null,
@@ -367,8 +372,8 @@ export function documentService(db: Db) {
                 revisionNumber: nextRevisionNumber,
                 title: input.title ?? null,
                 format: input.format,
-                body: input.body,
-                changeSummary: input.changeSummary ?? null,
+                body: guardedBody,
+                changeSummary: guardedChangeSummary ?? null,
                 createdByAgentId: input.createdByAgentId ?? null,
                 createdByUserId: input.createdByUserId ?? null,
                 createdByRunId: input.createdByRunId ?? null,
@@ -381,7 +386,7 @@ export function documentService(db: Db) {
               .set({
                 title: input.title ?? null,
                 format: input.format,
-                latestBody: input.body,
+                latestBody: guardedBody,
                 latestRevisionId: revision.id,
                 latestRevisionNumber: nextRevisionNumber,
                 updatedByAgentId: input.createdByAgentId ?? null,
@@ -402,7 +407,7 @@ export function documentService(db: Db) {
                 ...existing,
                 title: input.title ?? null,
                 format: input.format,
-                body: input.body,
+                body: guardedBody,
                 latestRevisionId: revision.id,
                 latestRevisionNumber: nextRevisionNumber,
                 updatedByAgentId: input.createdByAgentId ?? null,
@@ -426,7 +431,7 @@ export function documentService(db: Db) {
               companyId: issue.companyId,
               title: input.title ?? null,
               format: input.format,
-              latestBody: input.body,
+              latestBody: guardedBody,
               latestRevisionId: null,
               latestRevisionNumber: 1,
               createdByAgentId: input.createdByAgentId ?? null,
@@ -450,8 +455,8 @@ export function documentService(db: Db) {
               revisionNumber: 1,
               title: input.title ?? null,
               format: input.format,
-              body: input.body,
-              changeSummary: input.changeSummary ?? null,
+              body: guardedBody,
+              changeSummary: guardedChangeSummary ?? null,
               createdByAgentId: input.createdByAgentId ?? null,
               createdByUserId: input.createdByUserId ?? null,
               createdByRunId: input.createdByRunId ?? null,

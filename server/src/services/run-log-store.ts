@@ -3,6 +3,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { notFound } from "../errors.js";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
+import { guardTextForPersistence } from "./output-egress-guard.js";
 
 export type RunLogStoreType = "local_file";
 
@@ -50,7 +51,7 @@ function resolveWithin(basePath: string, relativePath: string) {
   return resolved;
 }
 
-function createLocalFileRunLogStore(basePath: string): RunLogStore {
+export function createLocalFileRunLogStore(basePath: string): RunLogStore {
   async function ensureDir(relativeDir: string) {
     const dir = resolveWithin(basePath, relativeDir);
     await fs.mkdir(dir, { recursive: true });
@@ -109,10 +110,11 @@ function createLocalFileRunLogStore(basePath: string): RunLogStore {
     async append(handle, event) {
       if (handle.store !== "local_file") return 0;
       const absPath = resolveWithin(basePath, handle.logRef);
+      const guarded = guardTextForPersistence(event.chunk, { surface: "run_log" });
       const line = JSON.stringify({
         ts: event.ts,
         stream: event.stream,
-        chunk: event.chunk,
+        chunk: guarded.content,
         // Monotonic per-run sequence so readers can dedupe and order records
         // even when several identical chunks share the same millisecond ts
         // (common for ACP-style token deltas).

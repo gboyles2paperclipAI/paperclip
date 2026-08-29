@@ -87,6 +87,7 @@ import {
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText } from "../redaction.js";
+import { guardTextForPersistence, guardValueForPersistence } from "./output-egress-guard.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getRunLogStore } from "./run-log-store.js";
 import { getDefaultCompanyGoal } from "./goals.js";
@@ -7245,13 +7246,22 @@ export function issueService(db: Db) {
       const currentUserRedactionOptions = {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
       };
-      const redactedBody = redactCurrentUserText(body, currentUserRedactionOptions);
+      const redactedBody = guardTextForPersistence(
+        redactCurrentUserText(body, currentUserRedactionOptions),
+        { surface: "issue_comment" },
+      ).content;
       const authorType = issueCommentAuthorTypeSchema.parse(
         options?.authorType ?? (actor.agentId ? "agent" : actor.userId ? "user" : "system"),
       );
       assertIssueCommentAuthorTypeAllowed(actor, authorType);
-      const presentation = issueCommentPresentationSchema.nullable().parse(options?.presentation ?? null);
-      const metadata = issueCommentMetadataSchema.nullable().parse(options?.metadata ?? null);
+      const presentation = guardValueForPersistence(
+        issueCommentPresentationSchema.nullable().parse(options?.presentation ?? null),
+        { surface: "issue_comment" },
+      );
+      const metadata = guardValueForPersistence(
+        issueCommentMetadataSchema.nullable().parse(options?.metadata ?? null),
+        { surface: "issue_comment" },
+      );
       const createdAt = options?.createdAt ? new Date(options.createdAt) : null;
       const [comment] = await dbOrTx
         .insert(issueComments)
