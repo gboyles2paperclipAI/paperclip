@@ -65,7 +65,7 @@ echo "Paperclip board user candidates:"
 echo
 
 if [[ -n "$CONNECTION_STRING" ]]; then
-  psql "$CONNECTION_STRING" -P pager=off -c "$QUERY"
+  PGDATABASE="$CONNECTION_STRING" psql -P pager=off -c "$QUERY"
   exit 0
 fi
 

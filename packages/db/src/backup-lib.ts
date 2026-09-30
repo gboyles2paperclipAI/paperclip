@@ -73,6 +73,51 @@ const BACKUP_BREAKPOINT_DETECT_BYTES = 64 * 1024;
 
 const STATEMENT_BREAKPOINT = "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
 
+function buildPostgresCliEnv(connectionString: string, connectTimeout: number): NodeJS.ProcessEnv {
+  const url = new URL(connectionString);
+  if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
+    throw new Error(`Unsupported PostgreSQL connection URL protocol: ${url.protocol}`);
+  }
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PGCONNECT_TIMEOUT: String(connectTimeout),
+  };
+  const setIfPresent = (name: string, value: string | null | undefined) => {
+    if (value !== null && value !== undefined && value.length > 0) {
+      env[name] = value;
+    }
+  };
+  const decodeUserinfo = (value: string) => decodeURIComponent(value);
+  const authorityHost = url.hostname.startsWith("[") && url.hostname.endsWith("]")
+    ? url.hostname.slice(1, -1)
+    : url.hostname;
+  const authorityDatabase = url.pathname.replace(/^\/+/, "");
+
+  setIfPresent("PGHOST", authorityHost);
+  setIfPresent("PGPORT", url.port);
+  setIfPresent("PGUSER", decodeUserinfo(url.username));
+  setIfPresent("PGDATABASE", decodeUserinfo(authorityDatabase));
+  setIfPresent("PGPASSWORD", decodeUserinfo(url.password));
+
+  // libpq permits these core connection values in the URI query string too;
+  // query parameters take precedence over their authority/path counterparts.
+  const queryEnvNames: Record<string, string> = {
+    host: "PGHOST",
+    port: "PGPORT",
+    user: "PGUSER",
+    dbname: "PGDATABASE",
+    password: "PGPASSWORD",
+    sslmode: "PGSSLMODE",
+    connect_timeout: "PGCONNECT_TIMEOUT",
+  };
+  for (const [parameter, envName] of Object.entries(queryEnvNames)) {
+    setIfPresent(envName, url.searchParams.get(parameter));
+  }
+
+  return env;
+}
+
 function sanitizeRestoreErrorMessage(error: unknown): string {
   if (error && typeof error === "object") {
     const record = error as Record<string, unknown>;
@@ -320,7 +365,6 @@ async function runPgDumpBackup(opts: {
   const child = spawn(
     pgDumpBin,
     [
-      `--dbname=${opts.connectionString}`,
       "--format=plain",
       "--clean",
       "--if-exists",
@@ -329,10 +373,7 @@ async function runPgDumpBackup(opts: {
     ],
     {
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PGCONNECT_TIMEOUT: String(opts.connectTimeout),
-      },
+      env: buildPostgresCliEnv(opts.connectionString, opts.connectTimeout),
     },
   );
 
@@ -351,17 +392,13 @@ async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: 
   const child = spawn(
     psqlBin,
     [
-      `--dbname=${opts.connectionString}`,
       "--set=ON_ERROR_STOP=1",
       "--quiet",
       "--no-psqlrc",
     ],
     {
       stdio: ["pipe", "ignore", "pipe"],
-      env: {
-        ...process.env,
-        PGCONNECT_TIMEOUT: String(connectTimeout),
-      },
+      env: buildPostgresCliEnv(opts.connectionString, connectTimeout),
     },
   );
 
