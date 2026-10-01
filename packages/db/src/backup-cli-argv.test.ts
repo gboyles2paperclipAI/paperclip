@@ -176,6 +176,94 @@ describe("PostgreSQL CLI credentials", () => {
   });
 
   it.each([
+    ["literal plus", "+"],
+    ["percent-encoded plus", "%2B"],
+  ])("preserves %s in query credentials without exposing them in argv", async (_label, encodedPlus) => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-db-cli-query-plus-"));
+    tempDirs.push(tempDir);
+    const connectionString = [
+      "postgresql://db.example.test/paperclip?sslmode=verify-full",
+      `&user=backup${encodedPlus}user`,
+      `&password=synthetic${encodedPlus}password`,
+      `&sslpassword=synthetic${encodedPlus}key-passphrase`,
+    ].join("");
+
+    const backup = await runDatabaseBackup({
+      connectionString,
+      backupDir: tempDir,
+      retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+      filenamePrefix: "query-plus-test",
+      backupEngine: "pg_dump",
+    });
+    await runDatabaseRestore({ connectionString, backupFile: backup.backupFile });
+
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    for (const call of spawnMock.mock.calls) {
+      const args = call[1] as string[];
+      expect(args.join(" ")).not.toContain("backup+user");
+      expect(args.join(" ")).not.toContain("synthetic+password");
+      expect(args.join(" ")).not.toContain("synthetic+key-passphrase");
+
+      const env = (call[2] as { env: NodeJS.ProcessEnv }).env;
+      expect(env.PGUSER).toBe("backup+user");
+      expect(env.PGPASSWORD).toBe("synthetic+password");
+      expect(env.PGSSLPASSWORD).toBe("synthetic+key-passphrase");
+    }
+  });
+
+  it("preserves encoded Unix-socket routing and advanced libpq parameters", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-db-cli-unix-socket-"));
+    tempDirs.push(tempDir);
+    const connectionString = [
+      "postgresql:///paperclip?host=%2Fvar%2Frun%2Fpostgresql",
+      "&hostaddr=127.0.0.1",
+      "&sslmode=verify-full",
+      "&sslrootcert=%2Fcerts%2Froot.pem",
+      "&sslcert=%2Fcerts%2Fclient.pem",
+      "&sslkey=%2Fcerts%2Fclient.key",
+      "&application_name=paperclip-backup",
+      "&target_session_attrs=read-write",
+      "&options=-c%20statement_timeout%3D5000",
+      "&user=backup-user",
+      "&password=synthetic-password",
+      "&sslpassword=synthetic-key-passphrase",
+    ].join("");
+    const expectedDatabaseTarget = [
+      "postgresql:///paperclip?host=%2Fvar%2Frun%2Fpostgresql",
+      "&hostaddr=127.0.0.1",
+      "&sslmode=verify-full",
+      "&sslrootcert=%2Fcerts%2Froot.pem",
+      "&sslcert=%2Fcerts%2Fclient.pem",
+      "&sslkey=%2Fcerts%2Fclient.key",
+      "&application_name=paperclip-backup",
+      "&target_session_attrs=read-write",
+      "&options=-c%20statement_timeout%3D5000",
+    ].join("");
+
+    const backup = await runDatabaseBackup({
+      connectionString,
+      backupDir: tempDir,
+      retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+      filenamePrefix: "unix-socket-test",
+      backupEngine: "pg_dump",
+    });
+    await runDatabaseRestore({ connectionString, backupFile: backup.backupFile });
+
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    for (const call of spawnMock.mock.calls) {
+      const args = call[1] as string[];
+      expect(args[0]).toBe(`--dbname=${expectedDatabaseTarget}`);
+      expect(args.join(" ")).not.toContain("synthetic-password");
+      expect(args.join(" ")).not.toContain("synthetic-key-passphrase");
+
+      const env = (call[2] as { env: NodeJS.ProcessEnv }).env;
+      expect(env.PGUSER).toBe("backup-user");
+      expect(env.PGPASSWORD).toBe("synthetic-password");
+      expect(env.PGSSLPASSWORD).toBe("synthetic-key-passphrase");
+    }
+  });
+
+  it.each([
     "oauth_client_secret",
     "scram_client_key",
     "scram_server_key",

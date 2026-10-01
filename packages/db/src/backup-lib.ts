@@ -145,8 +145,8 @@ function buildPostgresCliConnection(connectionString: string, connectTimeout: nu
     const separator = part.indexOf("=");
     const rawKey = separator < 0 ? part : part.slice(0, separator);
     const rawValue = separator < 0 ? "" : part.slice(separator + 1);
-    const key = decodePostgresUrlComponent(rawKey.replaceAll("+", " "), "query parameter").toLowerCase();
-    const value = decodePostgresUrlComponent(rawValue.replaceAll("+", " "), `${key} parameter`);
+    const key = decodePostgresUrlComponent(rawKey, "query parameter").toLowerCase();
+    const value = decodePostgresUrlComponent(rawValue, `${key} parameter`);
     if (key === "user") {
       username = value;
     } else if (key === "password") {
