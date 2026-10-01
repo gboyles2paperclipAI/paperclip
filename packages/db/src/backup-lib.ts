@@ -76,6 +76,7 @@ const UNSAFE_CLI_CREDENTIAL_PARAMETERS = new Set([
   "oauth_client_secret",
   "scram_client_key",
   "scram_server_key",
+  "sslpassword",
 ]);
 
 function decodePostgresUrlComponent(value: string, label: string): string {
@@ -116,7 +117,6 @@ function buildPostgresCliConnection(connectionString: string, connectTimeout: nu
 
   let username: string | undefined;
   let password: string | undefined;
-  let sslPassword: string | undefined;
   if (rawUserInfo !== null) {
     const passwordSeparator = rawUserInfo.indexOf(":");
     const rawUsername = passwordSeparator < 0
@@ -151,8 +151,6 @@ function buildPostgresCliConnection(connectionString: string, connectTimeout: nu
       username = value;
     } else if (key === "password") {
       password = value;
-    } else if (key === "sslpassword") {
-      sslPassword = value;
     } else if (UNSAFE_CLI_CREDENTIAL_PARAMETERS.has(key)) {
       throw new Error(`PostgreSQL CLI cannot safely pass credential parameter "${key}" outside process argv`);
     } else {
@@ -173,7 +171,6 @@ function buildPostgresCliConnection(connectionString: string, connectTimeout: nu
   };
   if (username !== undefined) env.PGUSER = username;
   if (password !== undefined) env.PGPASSWORD = password;
-  if (sslPassword !== undefined) env.PGSSLPASSWORD = sslPassword;
 
   return { connectionString: sanitizedConnectionString, env };
 }
@@ -625,6 +622,9 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
   const connectTimeout = Math.max(1, Math.trunc(opts.connectTimeoutSeconds ?? 5));
   const backupEngine = opts.backupEngine ?? "auto";
   const canUsePgDump = !hasBackupTransforms(opts);
+  if (backupEngine === "pg_dump" || (backupEngine === "auto" && canUsePgDump)) {
+    buildPostgresCliConnection(opts.connectionString, connectTimeout);
+  }
   const excludedTableNames = normalizeTableNameSet(opts.excludeTables);
   const nullifiedColumnsByTable = normalizeNullifyColumnMap(opts.nullifyColumns);
   let sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
@@ -1086,6 +1086,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
 
 export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promise<void> {
   const connectTimeout = Math.max(1, Math.trunc(opts.connectTimeoutSeconds ?? 5));
+  buildPostgresCliConnection(opts.connectionString, connectTimeout);
   let psqlRestoreError: unknown = null;
   try {
     await restoreWithPsql(opts, connectTimeout);

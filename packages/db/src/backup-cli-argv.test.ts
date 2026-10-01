@@ -142,38 +142,35 @@ describe("PostgreSQL CLI credentials", () => {
     }
   });
 
-  it("keeps sslpassword out of pg_dump and psql argv", async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-db-cli-sslpassword-"));
-    tempDirs.push(tempDir);
-    const sslPassword = "synthetic-client-key-passphrase";
-    const connectionString = [
-      "postgresql://backup-user:synthetic-password@db.example.test/paperclip",
-      `?sslmode=verify-full&sslkey=%2Fcerts%2Fclient.key&sslpassword=${sslPassword}`,
-    ].join("");
+  it.each(["backup", "restore"] as const)(
+    "fails closed before spawning for sslpassword during %s",
+    async (operation) => {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-db-cli-sslpassword-"));
+      tempDirs.push(tempDir);
+      const connectionString = [
+        "postgresql://backup-user:synthetic-password@db.example.test/paperclip",
+        "?sslmode=verify-full&sslkey=%2Fcerts%2Fclient.key&sslpassword=synthetic-client-key-passphrase",
+      ].join("");
 
-    const backup = await runDatabaseBackup({
-      connectionString,
-      backupDir: tempDir,
-      retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
-      filenamePrefix: "sslpassword-test",
-      backupEngine: "pg_dump",
-    });
-    await runDatabaseRestore({ connectionString, backupFile: backup.backupFile });
+      const result = operation === "backup"
+        ? runDatabaseBackup({
+          connectionString,
+          backupDir: tempDir,
+          retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+          filenamePrefix: "sslpassword-test",
+          backupEngine: "pg_dump",
+        })
+        : runDatabaseRestore({
+          connectionString,
+          backupFile: path.join(tempDir, "backup.sql"),
+        });
 
-    expect(spawnMock).toHaveBeenCalledTimes(2);
-    for (const call of spawnMock.mock.calls) {
-      const args = call[1] as string[];
-      expect(args.some((arg) => arg.includes("sslpassword") || arg.includes(sslPassword))).toBe(false);
-      const env = (call[2] as { env: NodeJS.ProcessEnv }).env;
-      expect(env.PGPASSWORD).toBe("synthetic-password");
-      expect(env.PGSSLPASSWORD).toBe(sslPassword);
-      expect(args[0]).toBe([
-        "--dbname=postgresql://db.example.test/paperclip",
-        "?sslmode=verify-full",
-        "&sslkey=%2Fcerts%2Fclient.key",
-      ].join(""));
-    }
-  });
+      await expect(result).rejects.toThrow(
+        'cannot safely pass credential parameter "sslpassword"',
+      );
+      expect(spawnMock).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     ["literal plus", "+"],
@@ -185,7 +182,6 @@ describe("PostgreSQL CLI credentials", () => {
       "postgresql://db.example.test/paperclip?sslmode=verify-full",
       `&user=backup${encodedPlus}user`,
       `&password=synthetic${encodedPlus}password`,
-      `&sslpassword=synthetic${encodedPlus}key-passphrase`,
     ].join("");
 
     const backup = await runDatabaseBackup({
@@ -202,12 +198,10 @@ describe("PostgreSQL CLI credentials", () => {
       const args = call[1] as string[];
       expect(args.join(" ")).not.toContain("backup+user");
       expect(args.join(" ")).not.toContain("synthetic+password");
-      expect(args.join(" ")).not.toContain("synthetic+key-passphrase");
 
       const env = (call[2] as { env: NodeJS.ProcessEnv }).env;
       expect(env.PGUSER).toBe("backup+user");
       expect(env.PGPASSWORD).toBe("synthetic+password");
-      expect(env.PGSSLPASSWORD).toBe("synthetic+key-passphrase");
     }
   });
 
@@ -226,7 +220,6 @@ describe("PostgreSQL CLI credentials", () => {
       "&options=-c%20statement_timeout%3D5000",
       "&user=backup-user",
       "&password=synthetic-password",
-      "&sslpassword=synthetic-key-passphrase",
     ].join("");
     const expectedDatabaseTarget = [
       "postgresql:///paperclip?host=%2Fvar%2Frun%2Fpostgresql",
@@ -254,12 +247,10 @@ describe("PostgreSQL CLI credentials", () => {
       const args = call[1] as string[];
       expect(args[0]).toBe(`--dbname=${expectedDatabaseTarget}`);
       expect(args.join(" ")).not.toContain("synthetic-password");
-      expect(args.join(" ")).not.toContain("synthetic-key-passphrase");
 
       const env = (call[2] as { env: NodeJS.ProcessEnv }).env;
       expect(env.PGUSER).toBe("backup-user");
       expect(env.PGPASSWORD).toBe("synthetic-password");
-      expect(env.PGSSLPASSWORD).toBe("synthetic-key-passphrase");
     }
   });
 
@@ -288,7 +279,7 @@ describe("PostgreSQL CLI credentials", () => {
 
   it("keeps the helper script connection string out of psql argv", () => {
     const helperSource = fs.readFileSync(
-      path.resolve(process.cwd(), "scripts/find-paperclip-user-id.sh"),
+      new URL("../../../scripts/find-paperclip-user-id.sh", import.meta.url),
       "utf8",
     );
 
