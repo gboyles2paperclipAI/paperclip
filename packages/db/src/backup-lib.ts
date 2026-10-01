@@ -72,6 +72,11 @@ const BACKUP_CLI_STDERR_BYTES = 64 * 1024;
 const BACKUP_BREAKPOINT_DETECT_BYTES = 64 * 1024;
 
 const STATEMENT_BREAKPOINT = "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
+const UNSAFE_CLI_CREDENTIAL_PARAMETERS = new Set([
+  "oauth_client_secret",
+  "scram_client_key",
+  "scram_server_key",
+]);
 
 function decodePostgresUrlComponent(value: string, label: string): string {
   try {
@@ -148,6 +153,8 @@ function buildPostgresCliConnection(connectionString: string, connectTimeout: nu
       password = value;
     } else if (key === "sslpassword") {
       sslPassword = value;
+    } else if (UNSAFE_CLI_CREDENTIAL_PARAMETERS.has(key)) {
+      throw new Error(`PostgreSQL CLI cannot safely pass credential parameter "${key}" outside process argv`);
     } else {
       retainedQueryParts.push(part);
     }

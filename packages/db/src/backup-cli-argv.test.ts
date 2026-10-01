@@ -175,6 +175,29 @@ describe("PostgreSQL CLI credentials", () => {
     }
   });
 
+  it.each([
+    "oauth_client_secret",
+    "scram_client_key",
+    "scram_server_key",
+  ])("fails closed before spawning for %s", async (parameter) => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-db-cli-credential-param-"));
+    tempDirs.push(tempDir);
+    const connectionString = [
+      "postgresql://backup-user@db.example.test/paperclip?sslmode=require&",
+      `${parameter}=synthetic-credential-material`,
+    ].join("");
+
+    await expect(runDatabaseBackup({
+      connectionString,
+      backupDir: tempDir,
+      retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+      filenamePrefix: "credential-param-test",
+      backupEngine: "pg_dump",
+    })).rejects.toThrow(`cannot safely pass credential parameter \"${parameter}\"`);
+
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
   it("keeps the helper script connection string out of psql argv", () => {
     const helperSource = fs.readFileSync(
       path.resolve(process.cwd(), "scripts/find-paperclip-user-id.sh"),
