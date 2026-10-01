@@ -46,7 +46,7 @@ afterEach(() => {
 });
 
 describe("PostgreSQL CLI credentials", () => {
-  it("keeps the complete database URI out of argv and passes it through libpq", async () => {
+  it("keeps database credentials out of argv while passing a sanitized URI", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-db-cli-argv-"));
     tempDirs.push(tempDir);
     const password = "synthetic-sensitive-password";
@@ -74,11 +74,13 @@ describe("PostgreSQL CLI credentials", () => {
 
     for (const call of spawnMock.mock.calls) {
       const env = (call[2] as { env: NodeJS.ProcessEnv }).env;
-      expect(env.PGDATABASE).toBe(connectionString);
+      expect(env.PGUSER).toBe("backup-user");
+      expect(env.PGPASSWORD).toBe(password);
       expect(env.PGCONNECT_TIMEOUT).toBe("5");
     }
 
     expect(spawnMock.mock.calls[0]?.[1]).toEqual([
+      "--dbname=postgresql://db.example.test:6543/paperclip?sslmode=require",
       "--format=plain",
       "--clean",
       "--if-exists",
@@ -86,6 +88,7 @@ describe("PostgreSQL CLI credentials", () => {
       "--no-privileges",
     ]);
     expect(spawnMock.mock.calls[1]?.[1]).toEqual([
+      "--dbname=postgresql://db.example.test:6543/paperclip?sslmode=require",
       "--set=ON_ERROR_STOP=1",
       "--quiet",
       "--no-psqlrc",
@@ -124,8 +127,18 @@ describe("PostgreSQL CLI credentials", () => {
       const args = call[1] as string[];
       expect(args.some((arg) => arg.includes(connectionString))).toBe(false);
       const env = (call[2] as { env: NodeJS.ProcessEnv }).env;
-      expect(env.PGDATABASE).toBe(connectionString);
+      expect(env.PGUSER).toBe("backup-user");
+      expect(env.PGPASSWORD).toBe("synthetic-password");
       expect(env.PGCONNECT_TIMEOUT).toBe("23");
+      expect(args[0]).toBe([
+        "--dbname=postgresql://",
+        "db-a.example.test:5432,db-b.example.test:5433/paperclip",
+        "?sslmode=verify-full",
+        "&sslrootcert=%2Fcerts%2Froot.pem",
+        "&sslcert=%2Fcerts%2Fclient.pem",
+        "&application_name=paperclip-backup",
+        "&target_session_attrs=read-write",
+      ].join(""));
     }
   });
 
@@ -152,7 +165,13 @@ describe("PostgreSQL CLI credentials", () => {
       const args = call[1] as string[];
       expect(args.some((arg) => arg.includes("sslpassword") || arg.includes(sslPassword))).toBe(false);
       const env = (call[2] as { env: NodeJS.ProcessEnv }).env;
-      expect(env.PGDATABASE).toBe(connectionString);
+      expect(env.PGPASSWORD).toBe("synthetic-password");
+      expect(env.PGSSLPASSWORD).toBe(sslPassword);
+      expect(args[0]).toBe([
+        "--dbname=postgresql://db.example.test/paperclip",
+        "?sslmode=verify-full",
+        "&sslkey=%2Fcerts%2Fclient.key",
+      ].join(""));
     }
   });
 
