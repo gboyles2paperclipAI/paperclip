@@ -73,97 +73,20 @@ const BACKUP_BREAKPOINT_DETECT_BYTES = 64 * 1024;
 
 const STATEMENT_BREAKPOINT = "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
 
-function decodePostgresUrlComponent(value: string, label: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    throw new Error(`Invalid percent-encoding in PostgreSQL connection URL ${label}`);
-  }
-}
-
-function buildPostgresCliConnection(connectionString: string, connectTimeout: number): {
-  connectionString: string;
-  env: NodeJS.ProcessEnv;
-} {
+function buildPostgresCliEnv(connectionString: string, connectTimeout: number): NodeJS.ProcessEnv {
   const protocol = connectionString.match(/^([a-z][a-z\d+.-]*):/i)?.[1]?.toLowerCase();
   if (protocol !== "postgres" && protocol !== "postgresql") {
     throw new Error(`Unsupported PostgreSQL connection URL protocol: ${protocol ? `${protocol}:` : "unknown"}`);
   }
 
-  const schemeSeparator = connectionString.indexOf("://");
-  if (schemeSeparator < 0) {
-    throw new Error("PostgreSQL connection URL must include an authority");
-  }
-
-  const authorityStart = schemeSeparator + 3;
-  const authorityEndMatch = connectionString.slice(authorityStart).search(/[/?#]/);
-  const authorityEnd = authorityEndMatch < 0
-    ? connectionString.length
-    : authorityStart + authorityEndMatch;
-  const authority = connectionString.slice(authorityStart, authorityEnd);
-  const userInfoSeparator = authority.lastIndexOf("@");
-  const hostAuthority = userInfoSeparator < 0
-    ? authority
-    : authority.slice(userInfoSeparator + 1);
-  const rawUserInfo = userInfoSeparator < 0
-    ? null
-    : authority.slice(0, userInfoSeparator);
-
-  let username: string | undefined;
-  let password: string | undefined;
-  if (rawUserInfo !== null) {
-    const passwordSeparator = rawUserInfo.indexOf(":");
-    const rawUsername = passwordSeparator < 0
-      ? rawUserInfo
-      : rawUserInfo.slice(0, passwordSeparator);
-    const rawPassword = passwordSeparator < 0
-      ? null
-      : rawUserInfo.slice(passwordSeparator + 1);
-    username = decodePostgresUrlComponent(rawUsername, "username");
-    if (rawPassword !== null) {
-      password = decodePostgresUrlComponent(rawPassword, "password");
-    }
-  }
-
-  const suffix = connectionString.slice(authorityEnd);
-  const fragmentIndex = suffix.indexOf("#");
-  const beforeFragment = fragmentIndex < 0 ? suffix : suffix.slice(0, fragmentIndex);
-  const fragment = fragmentIndex < 0 ? "" : suffix.slice(fragmentIndex);
-  const queryIndex = beforeFragment.indexOf("?");
-  const path = queryIndex < 0 ? beforeFragment : beforeFragment.slice(0, queryIndex);
-  const rawQuery = queryIndex < 0 ? "" : beforeFragment.slice(queryIndex + 1);
-  const retainedQueryParts: string[] = [];
-
-  for (const part of rawQuery.split("&")) {
-    if (part.length === 0) continue;
-    const separator = part.indexOf("=");
-    const rawKey = separator < 0 ? part : part.slice(0, separator);
-    const rawValue = separator < 0 ? "" : part.slice(separator + 1);
-    const key = decodePostgresUrlComponent(rawKey.replaceAll("+", " "), "query parameter").toLowerCase();
-    if (key === "user") {
-      username = decodePostgresUrlComponent(rawValue.replaceAll("+", " "), "user parameter");
-    } else if (key === "password") {
-      password = decodePostgresUrlComponent(rawValue.replaceAll("+", " "), "password parameter");
-    } else {
-      retainedQueryParts.push(part);
-    }
-  }
-
-  const sanitizedConnectionString = [
-    connectionString.slice(0, authorityStart),
-    hostAuthority,
-    path,
-    retainedQueryParts.length > 0 ? `?${retainedQueryParts.join("&")}` : "",
-    fragment,
-  ].join("");
-  const env: NodeJS.ProcessEnv = {
+  return {
     ...process.env,
+    // libpq accepts a complete connection URI through PGDATABASE. Passing the
+    // original value preserves every supported connection parameter without
+    // exposing credentials or TLS passphrases in the spawned process argv.
+    PGDATABASE: connectionString,
     PGCONNECT_TIMEOUT: String(connectTimeout),
   };
-  if (username !== undefined) env.PGUSER = username;
-  if (password !== undefined) env.PGPASSWORD = password;
-
-  return { connectionString: sanitizedConnectionString, env };
 }
 
 function sanitizeRestoreErrorMessage(error: unknown): string {
@@ -410,11 +333,9 @@ async function runPgDumpBackup(opts: {
   connectTimeout: number;
 }): Promise<void> {
   const pgDumpBin = process.env.PAPERCLIP_PG_DUMP_PATH || "pg_dump";
-  const connection = buildPostgresCliConnection(opts.connectionString, opts.connectTimeout);
   const child = spawn(
     pgDumpBin,
     [
-      `--dbname=${connection.connectionString}`,
       "--format=plain",
       "--clean",
       "--if-exists",
@@ -423,7 +344,7 @@ async function runPgDumpBackup(opts: {
     ],
     {
       stdio: ["ignore", "pipe", "pipe"],
-      env: connection.env,
+      env: buildPostgresCliEnv(opts.connectionString, opts.connectTimeout),
     },
   );
 
@@ -439,18 +360,16 @@ async function runPgDumpBackup(opts: {
 
 async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: number): Promise<void> {
   const psqlBin = process.env.PAPERCLIP_PSQL_PATH || "psql";
-  const connection = buildPostgresCliConnection(opts.connectionString, connectTimeout);
   const child = spawn(
     psqlBin,
     [
-      `--dbname=${connection.connectionString}`,
       "--set=ON_ERROR_STOP=1",
       "--quiet",
       "--no-psqlrc",
     ],
     {
       stdio: ["pipe", "ignore", "pipe"],
-      env: connection.env,
+      env: buildPostgresCliEnv(opts.connectionString, connectTimeout),
     },
   );
 
