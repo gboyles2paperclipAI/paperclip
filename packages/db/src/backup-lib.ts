@@ -74,48 +74,19 @@ const BACKUP_BREAKPOINT_DETECT_BYTES = 64 * 1024;
 const STATEMENT_BREAKPOINT = "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
 
 function buildPostgresCliEnv(connectionString: string, connectTimeout: number): NodeJS.ProcessEnv {
-  const url = new URL(connectionString);
-  if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
-    throw new Error(`Unsupported PostgreSQL connection URL protocol: ${url.protocol}`);
+  const protocol = connectionString.match(/^([a-z][a-z\d+.-]*):/i)?.[1]?.toLowerCase();
+  if (protocol !== "postgres" && protocol !== "postgresql") {
+    throw new Error(`Unsupported PostgreSQL connection URL protocol: ${protocol ? `${protocol}:` : "unknown"}`);
   }
 
-  const env: NodeJS.ProcessEnv = {
+  return {
     ...process.env,
+    // libpq accepts a complete connection URI through PGDATABASE. Passing the
+    // original value preserves multi-host routing and every supported query
+    // option without exposing credentials in the spawned process argv.
+    PGDATABASE: connectionString,
     PGCONNECT_TIMEOUT: String(connectTimeout),
   };
-  const setIfPresent = (name: string, value: string | null | undefined) => {
-    if (value !== null && value !== undefined && value.length > 0) {
-      env[name] = value;
-    }
-  };
-  const decodeUserinfo = (value: string) => decodeURIComponent(value);
-  const authorityHost = url.hostname.startsWith("[") && url.hostname.endsWith("]")
-    ? url.hostname.slice(1, -1)
-    : url.hostname;
-  const authorityDatabase = url.pathname.replace(/^\/+/, "");
-
-  setIfPresent("PGHOST", authorityHost);
-  setIfPresent("PGPORT", url.port);
-  setIfPresent("PGUSER", decodeUserinfo(url.username));
-  setIfPresent("PGDATABASE", decodeUserinfo(authorityDatabase));
-  setIfPresent("PGPASSWORD", decodeUserinfo(url.password));
-
-  // libpq permits these core connection values in the URI query string too;
-  // query parameters take precedence over their authority/path counterparts.
-  const queryEnvNames: Record<string, string> = {
-    host: "PGHOST",
-    port: "PGPORT",
-    user: "PGUSER",
-    dbname: "PGDATABASE",
-    password: "PGPASSWORD",
-    sslmode: "PGSSLMODE",
-    connect_timeout: "PGCONNECT_TIMEOUT",
-  };
-  for (const [parameter, envName] of Object.entries(queryEnvNames)) {
-    setIfPresent(envName, url.searchParams.get(parameter));
-  }
-
-  return env;
 }
 
 function sanitizeRestoreErrorMessage(error: unknown): string {

@@ -46,7 +46,7 @@ afterEach(() => {
 });
 
 describe("PostgreSQL CLI credentials", () => {
-  it("keeps database URL userinfo and passwords out of spawned argv", async () => {
+  it("keeps the complete database URI out of argv and passes it through libpq", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-db-cli-argv-"));
     tempDirs.push(tempDir);
     const password = "synthetic-sensitive-password";
@@ -74,12 +74,8 @@ describe("PostgreSQL CLI credentials", () => {
 
     for (const call of spawnMock.mock.calls) {
       const env = (call[2] as { env: NodeJS.ProcessEnv }).env;
-      expect(env.PGHOST).toBe("db.example.test");
-      expect(env.PGPORT).toBe("6543");
-      expect(env.PGUSER).toBe("backup-user");
-      expect(env.PGDATABASE).toBe("paperclip");
-      expect(env.PGPASSWORD === password).toBe(true);
-      expect(env.PGSSLMODE).toBe("require");
+      expect(env.PGDATABASE).toBe(connectionString);
+      expect(env.PGCONNECT_TIMEOUT).toBe("5");
     }
 
     expect(spawnMock.mock.calls[0]?.[1]).toEqual([
@@ -94,6 +90,43 @@ describe("PostgreSQL CLI credentials", () => {
       "--quiet",
       "--no-psqlrc",
     ]);
+  });
+
+  it("preserves multi-host routing and supported TLS and session parameters", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-db-cli-multihost-"));
+    tempDirs.push(tempDir);
+    const connectionString = [
+      "postgresql://backup-user:synthetic-password@",
+      "db-a.example.test:5432,db-b.example.test:5433/paperclip",
+      "?sslmode=verify-full",
+      "&sslrootcert=%2Fcerts%2Froot.pem",
+      "&sslcert=%2Fcerts%2Fclient.pem",
+      "&application_name=paperclip-backup",
+      "&target_session_attrs=read-write",
+    ].join("");
+
+    const backup = await runDatabaseBackup({
+      connectionString,
+      backupDir: tempDir,
+      retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+      filenamePrefix: "multihost-test",
+      connectTimeoutSeconds: 23,
+      backupEngine: "pg_dump",
+    });
+    await runDatabaseRestore({
+      connectionString,
+      backupFile: backup.backupFile,
+      connectTimeoutSeconds: 23,
+    });
+
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    for (const call of spawnMock.mock.calls) {
+      const args = call[1] as string[];
+      expect(args.some((arg) => arg.includes(connectionString))).toBe(false);
+      const env = (call[2] as { env: NodeJS.ProcessEnv }).env;
+      expect(env.PGDATABASE).toBe(connectionString);
+      expect(env.PGCONNECT_TIMEOUT).toBe("23");
+    }
   });
 
   it("keeps the helper script connection string out of psql argv", () => {
