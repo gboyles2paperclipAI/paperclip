@@ -395,6 +395,101 @@ describe("approval routes idempotent retries", () => {
     );
   });
 
+  it("preserves an exact governed authorization scope through create and read responses", async () => {
+    const authorization = {
+      companyId: "company-1",
+      repository: "gboyles2paperclipAI/help2day",
+      pullRequestNumber: 991,
+      baseBranch: "main",
+      headSha: "a".repeat(40),
+      actions: ["merge"],
+    };
+    const approval = {
+      id: "84a7cc73-6c81-4b17-84ef-1184cc1b3e57",
+      companyId: "company-1",
+      type: "request_board_approval",
+      requestedByAgentId: "agent-1",
+      requestedByUserId: null,
+      status: "pending",
+      payload: { title: "Approve governed merge", authorization },
+      decisionNote: null,
+      decidedByUserId: null,
+      decidedAt: null,
+      createdAt: new Date("2026-10-06T00:00:00.000Z"),
+      updatedAt: new Date("2026-10-06T00:00:00.000Z"),
+    };
+    mockApprovalService.create.mockResolvedValue(approval);
+    mockApprovalService.getById.mockResolvedValue(approval);
+
+    const app = await createAgentApp();
+    const created = await request(app)
+      .post("/api/companies/company-1/approvals")
+      .send({ type: "request_board_approval", payload: approval.payload });
+    const read = await request(app).get(`/api/approvals/${approval.id}`);
+
+    expect(created.status).toBe(201);
+    expect(read.status).toBe(200);
+    expect(created.body.payload.authorization).toEqual(authorization);
+    expect(read.body.payload.authorization).toEqual(authorization);
+    expect(mockApprovalService.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ payload: expect.objectContaining({ authorization }) }),
+    );
+  });
+
+  it.each([
+    ["bearer string", "Bearer not-a-real-token"],
+    ["malformed object", { companyId: "company-1" }],
+    ["nested credential field", {
+      companyId: "company-1",
+      repository: "gboyles2paperclipAI/help2day",
+      pullRequestNumber: 991,
+      baseBranch: "main",
+      headSha: "a".repeat(40),
+      actions: ["merge"],
+      credential: { token: "not-a-real-token" },
+    }],
+  ])("keeps unsafe %s authorization values redacted", async (_label, authorization) => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "84a7cc73-6c81-4b17-84ef-1184cc1b3e57",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "pending",
+      payload: { authorization },
+    });
+
+    const res = await request(await createAgentApp())
+      .get("/api/approvals/84a7cc73-6c81-4b17-84ef-1184cc1b3e57");
+
+    expect(res.status).toBe(200);
+    expect(res.body.payload.authorization).toBe("***REDACTED***");
+  });
+
+  it("does not preserve a valid-looking authorization object for unrelated approvals", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "84a7cc73-6c81-4b17-84ef-1184cc1b3e57",
+      companyId: "company-1",
+      type: "hire_agent",
+      status: "pending",
+      payload: {
+        authorization: {
+          companyId: "company-1",
+          repository: "gboyles2paperclipAI/help2day",
+          pullRequestNumber: 991,
+          baseBranch: "main",
+          headSha: "a".repeat(40),
+          actions: ["merge"],
+        },
+      },
+    });
+
+    const res = await request(await createAgentApp())
+      .get("/api/approvals/84a7cc73-6c81-4b17-84ef-1184cc1b3e57");
+
+    expect(res.status).toBe(200);
+    expect(res.body.payload.authorization).toBe("***REDACTED***");
+  });
+
   it("blocks status-only recovery runs from creating approvals", async () => {
     const res = await request(await createAgentApp({
       contextSnapshot: {
