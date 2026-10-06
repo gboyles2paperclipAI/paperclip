@@ -32,10 +32,64 @@ import {
 import { assertDecisionFreezeMutationAllowed } from "../services/decision-freeze.js";
 import { bindBrokerOperationRequestToApprovalPayload } from "../services/broker-operations.js";
 
-function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
+const GOVERNED_AUTHORIZATION_KEYS = [
+  "actions",
+  "baseBranch",
+  "companyId",
+  "headSha",
+  "pullRequestNumber",
+  "repository",
+] as const;
+const GOVERNED_REPOSITORY_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const GOVERNED_BRANCH_RE = /^[A-Za-z0-9._/-]+$/;
+const GOVERNED_SHA_RE = /^[0-9a-f]{40}$/;
+const GOVERNED_ACTION_RE = /^[A-Za-z][A-Za-z0-9:_-]{0,63}$/;
+
+function governedAuthorizationScope(
+  approval: { companyId: string; type: string; payload: Record<string, unknown> },
+): Record<string, unknown> | null {
+  if (approval.type !== "request_board_approval") return null;
+  const candidate = approval.payload.authorization;
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+
+  const scope = candidate as Record<string, unknown>;
+  const keys = Object.keys(scope).sort();
+  if (
+    keys.length !== GOVERNED_AUTHORIZATION_KEYS.length ||
+    keys.some((key, index) => key !== GOVERNED_AUTHORIZATION_KEYS[index])
+  ) return null;
+
+  if (scope.companyId !== approval.companyId) return null;
+  if (typeof scope.repository !== "string" || !GOVERNED_REPOSITORY_RE.test(scope.repository)) return null;
+  if (typeof scope.pullRequestNumber !== "number" || !Number.isSafeInteger(scope.pullRequestNumber) || scope.pullRequestNumber <= 0) return null;
+  if (typeof scope.baseBranch !== "string" || !GOVERNED_BRANCH_RE.test(scope.baseBranch)) return null;
+  if (typeof scope.headSha !== "string" || !GOVERNED_SHA_RE.test(scope.headSha)) return null;
+  if (
+    !Array.isArray(scope.actions) ||
+    scope.actions.length === 0 ||
+    scope.actions.some((action) => typeof action !== "string" || !GOVERNED_ACTION_RE.test(action)) ||
+    new Set(scope.actions).size !== scope.actions.length
+  ) return null;
+
+  return {
+    companyId: scope.companyId,
+    repository: scope.repository,
+    pullRequestNumber: scope.pullRequestNumber,
+    baseBranch: scope.baseBranch,
+    headSha: scope.headSha,
+    actions: [...scope.actions],
+  };
+}
+
+function redactApprovalPayload<
+  T extends { companyId: string; type: string; payload: Record<string, unknown> },
+>(approval: T): T {
+  const payload = redactEventPayload(approval.payload) ?? {};
+  const authorization = governedAuthorizationScope(approval);
+  if (authorization) payload.authorization = authorization;
   return {
     ...approval,
-    payload: redactEventPayload(approval.payload) ?? {},
+    payload,
   };
 }
 
