@@ -54,7 +54,12 @@ describe("paperclip MCP tools", () => {
 
   it("uses default company id for company-scoped list tools", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
-      mockJsonResponse([{ id: "issue-1" }]),
+      mockJsonResponse([{
+        id: "issue-1",
+        identifier: "PAP-1",
+        status: "todo",
+        priority: "medium",
+      }]),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -67,6 +72,75 @@ describe("paperclip MCP tools", () => {
       "http://localhost:3100/api/companies/11111111-1111-1111-1111-111111111111/issues",
     );
     expect(response.content[0]?.text).toContain("issue-1");
+  });
+
+  it("projects issue-list responses to metadata before serialization", async () => {
+    const sentinels = {
+      title: "ghp_SYNTHETIC_TITLE_SENTINEL_000000000000",
+      description: "sk-SYNTHETIC_DESCRIPTION_SENTINEL_000000",
+      comment: "xoxb-SYNTHETIC_COMMENT_SENTINEL_000000",
+      body: "AKIA_SYNTHETIC_BODY_SENTINEL_000000",
+      nested: "pat_SYNTHETIC_NESTED_SENTINEL_000000",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockJsonResponse([{
+        id: "issue-1",
+        identifier: "PAP-1",
+        status: "in_progress",
+        priority: "high",
+        assigneeAgentId: "22222222-2222-2222-2222-222222222222",
+        assigneeUserId: null,
+        projectId: "44444444-4444-4444-4444-444444444444",
+        goalId: "55555555-5555-5555-5555-555555555555",
+        parentId: null,
+        createdAt: "2026-10-08T00:00:00.000Z",
+        updatedAt: "2026-10-08T01:00:00.000Z",
+        title: sentinels.title,
+        description: sentinels.description,
+        comment: sentinels.comment,
+        comments: [{ body: sentinels.body }],
+        body: sentinels.body,
+        unknownRawField: { nested: sentinels.nested },
+      }]),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const tool = getTool("paperclipListIssues");
+    const response = await tool.execute({ q: "coordination", status: "in_progress" });
+
+    const [url] = fetchMock.mock.calls[0] as [string];
+    const requestedUrl = new URL(String(url));
+    expect(requestedUrl.searchParams.get("q")).toBe("coordination");
+    expect(requestedUrl.searchParams.get("status")).toBe("in_progress");
+
+    const text = response.content[0]?.text ?? "";
+    expect(JSON.parse(text)).toEqual([{
+      id: "issue-1",
+      identifier: "PAP-1",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: "22222222-2222-2222-2222-222222222222",
+      assigneeUserId: null,
+      projectId: "44444444-4444-4444-4444-444444444444",
+      goalId: "55555555-5555-5555-5555-555555555555",
+      parentId: null,
+      createdAt: "2026-10-08T00:00:00.000Z",
+      updatedAt: "2026-10-08T01:00:00.000Z",
+    }]);
+    for (const sentinel of Object.values(sentinels)) {
+      expect(text).not.toContain(sentinel);
+    }
+    for (const forbiddenKey of [
+      "title",
+      "description",
+      "comment",
+      "comments",
+      "body",
+      "unknownRawField",
+      "nested",
+    ]) {
+      expect(text).not.toContain(`"${forbiddenKey}"`);
+    }
   });
 
   it("uses default agent id for checkout requests", async () => {
