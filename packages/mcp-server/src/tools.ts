@@ -55,6 +55,60 @@ function parseOptionalJson(raw: string | undefined | null): unknown {
   return JSON.parse(raw);
 }
 
+type IssueListMetadata = {
+  id: string;
+  identifier: string;
+  status: string;
+  priority: string;
+  assigneeAgentId?: string | null;
+  assigneeUserId?: string | null;
+  projectId?: string | null;
+  goalId?: string | null;
+  parentId?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+function projectIssueListMetadata(value: unknown): IssueListMetadata[] {
+  if (!Array.isArray(value)) {
+    throw new Error("Paperclip issue list response must be an array");
+  }
+
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error("Paperclip issue list response entries must be objects");
+    }
+
+    const issue = entry as Record<string, unknown>;
+    if (
+      typeof issue.id !== "string"
+      || typeof issue.identifier !== "string"
+      || typeof issue.status !== "string"
+      || typeof issue.priority !== "string"
+    ) {
+      throw new Error("Paperclip issue list response entry is missing required metadata");
+    }
+
+    const projected: IssueListMetadata = {
+      id: issue.id,
+      identifier: issue.identifier,
+      status: issue.status,
+      priority: issue.priority,
+    };
+
+    for (const key of ["assigneeAgentId", "assigneeUserId", "projectId", "goalId", "parentId"] as const) {
+      const field = issue[key];
+      if (typeof field === "string" || field === null) projected[key] = field;
+    }
+    for (const key of ["createdAt", "updatedAt"] as const) {
+      const field = issue[key];
+      if (typeof field === "string") projected[key] = field;
+    }
+
+    return projected;
+  });
+}
+
 const companyIdOptional = z.string().uuid().optional().nullable();
 const agentIdOptional = z.string().uuid().optional().nullable();
 const issueIdSchema = z.string().min(1);
@@ -284,7 +338,8 @@ export function createToolDefinitions(client: PaperclipApiClient): ToolDefinitio
           params.set(key, String(value));
         }
         const qs = params.toString();
-        return client.requestJson("GET", `/companies/${companyId}/issues${qs ? `?${qs}` : ""}`);
+        const response = await client.requestJson("GET", `/companies/${companyId}/issues${qs ? `?${qs}` : ""}`);
+        return projectIssueListMetadata(response);
       },
     ),
     makeTool(
