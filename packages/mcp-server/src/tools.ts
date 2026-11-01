@@ -19,7 +19,7 @@ import { formatErrorResponse, formatTextResponse } from "./format.js";
 export interface ToolDefinition {
   name: string;
   description: string;
-  schema: z.AnyZodObject;
+  schema: z.ZodObject;
   execute: (input: Record<string, unknown>) => Promise<{
     content: Array<{ type: "text"; text: string }>;
   }>;
@@ -167,7 +167,7 @@ const checkoutIssueToolSchema = z.object({
   expectedStatuses: checkoutIssueSchema.shape.expectedStatuses.optional(),
 });
 
-const addIssueCommentToolFieldsSchema = addIssueCommentSchema.innerType();
+const addIssueCommentToolFieldsSchema = addIssueCommentSchema.out;
 const addCommentToolInputSchema = z.object({
   issueId: issueIdSchema,
 }).merge(addIssueCommentToolFieldsSchema);

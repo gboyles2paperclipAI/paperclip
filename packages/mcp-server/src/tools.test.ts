@@ -7,7 +7,7 @@ function makeClient() {
     apiUrl: "http://localhost:3100/api",
     apiKey: "token-123",
     companyId: "11111111-1111-1111-1111-111111111111",
-    agentId: "22222222-2222-2222-2222-222222222222",
+    agentId: "22222222-2222-2222-8222-222222222222",
     runId: "33333333-3333-3333-3333-333333333333",
   });
 }
@@ -88,10 +88,10 @@ describe("paperclip MCP tools", () => {
         identifier: "PAP-1",
         status: "in_progress",
         priority: "high",
-        assigneeAgentId: "22222222-2222-2222-2222-222222222222",
+        assigneeAgentId: "22222222-2222-2222-8222-222222222222",
         assigneeUserId: null,
-        projectId: "44444444-4444-4444-4444-444444444444",
-        goalId: "55555555-5555-5555-5555-555555555555",
+        projectId: "44444444-4444-4444-8444-444444444444",
+        goalId: "55555555-5555-5555-8555-555555555555",
         parentId: null,
         createdAt: "2026-10-08T00:00:00.000Z",
         updatedAt: "2026-10-08T01:00:00.000Z",
@@ -119,10 +119,10 @@ describe("paperclip MCP tools", () => {
       identifier: "PAP-1",
       status: "in_progress",
       priority: "high",
-      assigneeAgentId: "22222222-2222-2222-2222-222222222222",
+      assigneeAgentId: "22222222-2222-2222-8222-222222222222",
       assigneeUserId: null,
-      projectId: "44444444-4444-4444-4444-444444444444",
-      goalId: "55555555-5555-5555-5555-555555555555",
+      projectId: "44444444-4444-4444-8444-444444444444",
+      goalId: "55555555-5555-5555-8555-555555555555",
       parentId: null,
       createdAt: "2026-10-08T00:00:00.000Z",
       updatedAt: "2026-10-08T01:00:00.000Z",
@@ -156,7 +156,7 @@ describe("paperclip MCP tools", () => {
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(JSON.parse(String(init.body))).toEqual({
-      agentId: "22222222-2222-2222-2222-222222222222",
+      agentId: "22222222-2222-2222-8222-222222222222",
       expectedStatuses: ["todo", "backlog", "blocked"],
     });
   });
@@ -170,7 +170,7 @@ describe("paperclip MCP tools", () => {
     const tool = getTool("paperclipCreateIssue");
     await tool.execute({
       title: "Assigned follow-up",
-      assigneeAgentId: "22222222-2222-2222-2222-222222222222",
+      assigneeAgentId: "22222222-2222-2222-8222-222222222222",
     });
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -182,7 +182,7 @@ describe("paperclip MCP tools", () => {
       title: "Assigned follow-up",
       workMode: "standard",
       priority: "medium",
-      assigneeAgentId: "22222222-2222-2222-2222-222222222222",
+      assigneeAgentId: "22222222-2222-2222-8222-222222222222",
       requestDepth: 0,
     });
   });
@@ -474,7 +474,7 @@ describe("paperclip MCP tools", () => {
     await tool.execute({
       type: "hire_agent",
       payload: { branch: "pap-1167" },
-      issueIds: ["44444444-4444-4444-4444-444444444444"],
+      issueIds: ["44444444-4444-4444-8444-444444444444"],
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -486,7 +486,7 @@ describe("paperclip MCP tools", () => {
     expect(JSON.parse(String(init.body))).toEqual({
       type: "hire_agent",
       payload: { branch: "pap-1167" },
-      issueIds: ["44444444-4444-4444-4444-444444444444"],
+      issueIds: ["44444444-4444-4444-8444-444444444444"],
     });
   });
 
