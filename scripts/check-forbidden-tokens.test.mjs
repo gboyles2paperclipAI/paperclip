@@ -70,7 +70,7 @@ test("publishable bundled content containing a forbidden account reference fails
       error: (message) => errors.push(message),
     });
     assert.equal(status, 1);
-    assert.match(errors.join("\n"), /package\/dist\/index\.js:1:\[REDACTED forbidden token\]/);
+    assert.equal(errors.join("\n"), "ERROR: Publishable package forbidden-token check failed.");
     assert.doesNotMatch(errors.join("\n"), new RegExp(forbidden, "i"));
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
@@ -91,7 +91,7 @@ test("publishable README content containing a case-varied forbidden reference fa
       error: (message) => errors.push(message),
     });
     assert.equal(status, 1);
-    assert.match(errors.join("\n"), /package\/README\.md:1:\[REDACTED forbidden token\]/);
+    assert.equal(errors.join("\n"), "ERROR: Publishable package forbidden-token check failed.");
     assert.doesNotMatch(errors.join("\n"), new RegExp(forbidden, "i"));
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
@@ -114,7 +114,7 @@ test("publishable file names containing a forbidden account reference fail close
     });
     assert.equal(status, 1);
     const output = errors.join("\n");
-    assert.match(output, /\[REDACTED publishable path\]/);
+    assert.equal(output, "ERROR: Publishable package forbidden-token check failed.");
     assert.doesNotMatch(output, new RegExp(forbidden, "i"));
     assert.doesNotMatch(output, new RegExp(rawRelativePath, "i"));
   } finally {

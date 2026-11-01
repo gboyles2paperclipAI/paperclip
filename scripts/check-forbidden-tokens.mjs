@@ -201,7 +201,6 @@ export function resolveNpmPackageFiles(packageDir, exec = execFileSync) {
 export function runForbiddenTokenFileCheck({
   files,
   tokens,
-  displayRoot,
   log = console.log,
   error = console.error,
 }) {
@@ -214,37 +213,21 @@ export function runForbiddenTokenFileCheck({
     return 1;
   }
 
+  // SH-9 explicit release exception: npm supplies the exact publishable file set,
+  // and this primitive returns pass/fail only. It never reports a matched value,
+  // path, line, structured-file content, or caught read error.
   const normalizedTokens = tokens.map((token) => token.toLocaleLowerCase("en-US"));
   let found = false;
 
   for (const file of files) {
-    const displayPath = relative(displayRoot, file) || file;
-    const safeDisplayPath = redactDiagnosticPath(
-      displayPath,
-      normalizedTokens,
-      "[REDACTED publishable path]",
-    );
-    const pathContainsToken = safeDisplayPath !== displayPath;
-    if (pathContainsToken) {
-      if (!found) error("ERROR: Forbidden tokens found in publishable package files:\n");
-      found = true;
-      error(`  ${safeDisplayPath}:[REDACTED forbidden token]`);
-    }
-
-    const lines = readFileSync(file, "utf8").split(/\r?\n/);
-    for (let index = 0; index < lines.length; index += 1) {
-      const lowerLine = lines[index].toLocaleLowerCase("en-US");
-      for (const token of normalizedTokens) {
-        if (!lowerLine.includes(token)) continue;
-        if (!found) error("ERROR: Forbidden tokens found in publishable package files:\n");
-        found = true;
-        error(`  ${safeDisplayPath}:${index + 1}:[REDACTED forbidden token]`);
-      }
-    }
+    const relativePath = relative(process.cwd(), file).toLocaleLowerCase("en-US");
+    if (normalizedTokens.some((token) => relativePath.includes(token))) found = true;
+    const contents = readFileSync(file, "utf8").toLocaleLowerCase("en-US");
+    if (normalizedTokens.some((token) => contents.includes(token))) found = true;
   }
 
   if (found) {
-    error("\nBuild blocked. Remove the forbidden token(s) from publishable package files.");
+    error("ERROR: Publishable package forbidden-token check failed.");
     return 1;
   }
 

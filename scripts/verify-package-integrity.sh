@@ -42,7 +42,9 @@ abs_path() {
 
 is_paperclipai_package_root() {
   local dir="$1"
-  [ -f "$dir/package.json" ] && grep -Eq '"name"[[:space:]]*:[[:space:]]*"paperclipai"' "$dir/package.json"
+  local name
+  name="$(basename "$dir")"
+  [ -f "$dir/dist/index.js" ] && { [ "$name" = "paperclipai" ] || [ "$name" = "cli" ]; }
 }
 
 detect_cli_entrypoint() {
@@ -146,13 +148,31 @@ companies_js="$dist_dir/routes/companies.js"
 config_js="$dist_dir/config.js"
 workspace_runtime_js="$dist_dir/services/workspace-runtime.js"
 missing=()
+quiet_search="$(cd "$(dirname "$0")" && pwd -P)/sh9-quiet-search.mjs"
+
+quiet_search_status() {
+  local status
+  set +e
+  node "$quiet_search" "$@"
+  status=$?
+  set -e
+  if [ "$status" -eq 2 ]; then
+    echo "Package integrity check failed: SH-9 quiet search could not complete safely" >&2
+    exit 1
+  fi
+  return "$status"
+}
 
 require_in_file() {
   local file="$1"
   local marker="$2"
   local label="$3"
 
-  if ! grep -Fq "$marker" "$file"; then
+  if [ ! -f "$file" ]; then
+    missing+=("$label in $file")
+    return
+  fi
+  if ! quiet_search_status --literal "$marker" --file "$file"; then
     missing+=("$label in $file")
   fi
 }
@@ -161,7 +181,7 @@ require_in_dist() {
   local marker="$1"
   local label="$2"
 
-  if ! grep -R --include='*.js' --include='*.mjs' --include='*.cjs' -Fq "$marker" "$dist_dir"; then
+  if ! quiet_search_status --literal "$marker" --tree "$dist_dir"; then
     missing+=("$label")
   fi
 }
@@ -171,7 +191,7 @@ forbid_in_file() {
   local marker="$2"
   local label="$3"
 
-  if [ -f "$file" ] && grep -Fq "$marker" "$file"; then
+  if [ -f "$file" ] && quiet_search_status --literal "$marker" --file "$file"; then
     missing+=("$label in $file")
   fi
 }
