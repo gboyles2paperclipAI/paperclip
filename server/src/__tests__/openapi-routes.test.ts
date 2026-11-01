@@ -4,9 +4,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import request from "supertest";
 import SwaggerParser from "@apidevtools/swagger-parser";
+import Ajv from "ajv";
 import { describe, expect, it } from "vitest";
 import { errorHandler } from "../middleware/index.js";
-import { buildOpenApiSpec, openApiRoutes } from "../routes/openapi.js";
+import {
+  buildOpenApiSpec,
+  normalizeJsonSchemaForOpenApi,
+  openApiRoutes,
+} from "../routes/openapi.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROUTES_DIR = path.resolve(__dirname, "../routes");
@@ -176,6 +181,20 @@ describe("openapi routes", () => {
     const spec = buildOpenApiSpec();
 
     await expect(SwaggerParser.validate(spec)).resolves.toBeDefined();
+  });
+
+  it("preserves nullable union value constraints", () => {
+    const schema = normalizeJsonSchemaForOpenApi({
+      anyOf: [{ type: "string" }, { type: "null" }],
+    }) as Record<string, unknown>;
+    const validate = new Ajv({ strict: false }).compile(schema);
+
+    expect(schema).toMatchObject({ type: "string", nullable: true });
+    expect(schema).not.toHaveProperty("anyOf");
+    expect(validate("description")).toBe(true);
+    expect(validate(null)).toBe(true);
+    expect(validate(42)).toBe(false);
+    expect(validate({})).toBe(false);
   });
 
   it("covers the mounted server routes exactly", () => {

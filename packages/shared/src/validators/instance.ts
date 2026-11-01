@@ -36,7 +36,21 @@ export const instanceGeneralSettingsSchema = z.object({
   executionMode: z.enum(["kubernetes", "any"]).optional(),
 }).strict();
 
-export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.partial();
+const generalSettingsShape = instanceGeneralSettingsSchema.shape;
+const backupRetentionShape = backupRetentionPolicySchema.shape;
+
+export const patchInstanceGeneralSettingsSchema = z.object({
+  censorUsernameInLogs: generalSettingsShape.censorUsernameInLogs.removeDefault().optional(),
+  keyboardShortcuts: generalSettingsShape.keyboardShortcuts.removeDefault().optional(),
+  feedbackDataSharingPreference:
+    generalSettingsShape.feedbackDataSharingPreference.removeDefault().optional(),
+  backupRetention: z.object({
+    dailyDays: backupRetentionShape.dailyDays.removeDefault().optional(),
+    weeklyWeeks: backupRetentionShape.weeklyWeeks.removeDefault().optional(),
+    monthlyMonths: backupRetentionShape.monthlyMonths.removeDefault().optional(),
+  }).strict().optional(),
+  executionMode: generalSettingsShape.executionMode,
+}).strict();
 
 export const instanceExperimentalSettingsSchema = z.object({
   enableEnvironments: z.boolean().default(false),

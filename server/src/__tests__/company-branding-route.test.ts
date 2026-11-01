@@ -332,7 +332,7 @@ describe("PATCH /api/companies/:companyId", () => {
   });
 
   it("keeps full company settings updates board-only", async () => {
-    const company = createCompany();
+    const company = { ...createCompany(), budgetMonthlyCents: 12_345 };
     mockCompanyService.getById.mockResolvedValue(company);
     mockCompanyService.update.mockResolvedValue({
       ...company,
@@ -349,6 +349,7 @@ describe("PATCH /api/companies/:companyId", () => {
       .send({ status: "paused" });
 
     expect(res.status).toBe(200);
+    expect(res.body.budgetMonthlyCents).toBe(12_345);
     expect(mockCompanyService.update).toHaveBeenCalledWith("company-1", { status: "paused" }, expect.objectContaining({
       actorType: "user",
       actorId: "user-1",

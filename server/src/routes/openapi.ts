@@ -178,13 +178,35 @@ type OpenApiPathRegistration = {
   [key: string]: unknown;
 };
 
-function normalizeJsonSchemaForOpenApi(value: unknown): unknown {
+export function normalizeJsonSchemaForOpenApi(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(normalizeJsonSchemaForOpenApi);
   if (!value || typeof value !== "object") return value;
 
-  const schema = Object.fromEntries(
+  const source = Object.fromEntries(
     Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => !["$schema", "$id", "propertyNames"].includes(key))
+      .filter(([key]) => !["$schema", "$id", "propertyNames"].includes(key)),
+  );
+  if (Array.isArray(source.anyOf)) {
+    const nonNull = source.anyOf.filter((entry) => (
+      !entry || typeof entry !== "object" || (entry as Record<string, unknown>).type !== "null"
+    ));
+    const nonNullSchema = nonNull[0];
+    if (
+      nonNull.length === 1
+      && nonNull.length !== source.anyOf.length
+      && nonNullSchema
+      && typeof nonNullSchema === "object"
+      && typeof (nonNullSchema as Record<string, unknown>).type === "string"
+    ) {
+      delete source.anyOf;
+      Object.assign(source, nonNullSchema, { nullable: true });
+      delete source.$schema;
+      delete source.$id;
+      delete source.propertyNames;
+    }
+  }
+  const schema = Object.fromEntries(
+    Object.entries(source)
       .map(([key, entry]) => [key, normalizeJsonSchemaForOpenApi(entry)]),
   );
   if (Array.isArray(schema.anyOf)) {

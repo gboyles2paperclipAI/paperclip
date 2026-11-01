@@ -560,6 +560,39 @@ describe("instance settings routes", () => {
     expect(mockLogActivity).toHaveBeenCalledTimes(2);
   });
 
+  it("preserves omitted general settings during a sparse update", async () => {
+    mockInstanceSettingsService.updateGeneral.mockResolvedValue({
+      id: "instance-settings-1",
+      general: {
+        censorUsernameInLogs: true,
+        keyboardShortcuts: true,
+        feedbackDataSharingPreference: "allowed",
+        backupRetention: { dailyDays: 14, weeklyWeeks: 4, monthlyMonths: 6 },
+      },
+    });
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    });
+
+    const res = await request(app)
+      .patch("/api/instance/settings/general")
+      .send({ keyboardShortcuts: true });
+
+    expect(res.status).toBe(200);
+    expect(mockInstanceSettingsService.updateGeneral).toHaveBeenCalledWith({
+      keyboardShortcuts: true,
+    });
+    expect(res.body).toEqual({
+      censorUsernameInLogs: true,
+      keyboardShortcuts: true,
+      feedbackDataSharingPreference: "allowed",
+      backupRetention: { dailyDays: 14, weeklyWeeks: 4, monthlyMonths: 6 },
+    });
+  });
+
   it("allows non-admin board users to read general settings", async () => {
     const app = await createApp({
       type: "board",
