@@ -580,6 +580,32 @@ describe("routine routes", () => {
     expect(mockRoutineService.update).not.toHaveBeenCalled();
   });
 
+  it("renames a paused routine without changing its state, policies, or variables", async () => {
+    mockRoutineService.get.mockResolvedValue(pausedRoutine);
+    mockRoutineService.update.mockResolvedValue({
+      ...pausedRoutine,
+      title: "Renamed routine",
+    });
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await request(app)
+      .patch(`/api/routines/${routineId}`)
+      .send({ title: "Renamed routine" });
+
+    expect(res.status).toBe(200);
+    expect(mockRoutineService.update).toHaveBeenCalledWith(
+      routineId,
+      { title: "Renamed routine" },
+      { agentId: null, userId: "board-user", runId: null },
+    );
+  });
+
   it("requires tasks:assign permission to create a trigger", async () => {
     const app = await createApp({
       type: "board",

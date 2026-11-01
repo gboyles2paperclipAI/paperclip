@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { attachmentArtifactWorkProductMetadataSchema } from "./work-product.js";
+import {
+  attachmentArtifactWorkProductMetadataSchema,
+  updateIssueWorkProductSchema,
+} from "./work-product.js";
 
 describe("attachmentArtifactWorkProductMetadataSchema", () => {
+  it("does not inject create defaults into sparse work product updates", () => {
+    expect(updateIssueWorkProductSchema.parse({ title: "Renamed product" })).toEqual({
+      title: "Renamed product",
+    });
+  });
+
   it("accepts the attachment-backed artifact metadata contract", () => {
     const parsed = attachmentArtifactWorkProductMetadataSchema.parse({
       attachmentId: "11111111-1111-4111-8111-111111111111",

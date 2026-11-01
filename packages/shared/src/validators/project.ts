@@ -103,7 +103,7 @@ const projectFields = {
   goalIds: z.array(z.string().uuid()).optional(),
   name: z.string().min(1),
   description: z.string().optional().nullable(),
-  status: z.enum(PROJECT_STATUSES).optional().default("backlog"),
+  status: z.enum(PROJECT_STATUSES).optional(),
   leadAgentId: z.string().uuid().optional().nullable(),
   targetDate: z.string().optional().nullable(),
   color: z.string().optional().nullable(),
@@ -115,6 +115,7 @@ const projectFields = {
 
 export const createProjectSchema = z.object({
   ...projectFields,
+  status: z.enum(PROJECT_STATUSES).optional().default("backlog"),
   workspace: createProjectWorkspaceSchema.optional(),
 });
 
