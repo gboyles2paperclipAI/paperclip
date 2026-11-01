@@ -87,6 +87,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@apidevtools/swagger-parser": "^12.1.0",
     "@types/express": "^5.0.0",
     "@types/express-serve-static-core": "^5.0.0",
     "@types/jsdom": "^28.0.0",

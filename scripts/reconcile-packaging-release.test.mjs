@@ -111,10 +111,10 @@ test("dependency override policy preserves fork security pins and frozen upstrea
 
 test("Cursor Cloud pins the newest SDK release without the vulnerable Node transport chain", () => {
   const cursorPkg = readJson("packages/adapters/cursor-cloud/package.json");
-  assert.equal(cursorPkg.dependencies["@cursor/sdk"], "1.0.20");
+  assert.equal(cursorPkg.dependencies["@cursor/sdk"], "1.2.0");
 
   const lockfile = readText("pnpm-lock.yaml");
-  assert.match(lockfile, /'@cursor\/sdk@1\.0\.20':/);
+  assert.match(lockfile, /'@cursor\/sdk@1\.2\.0':/);
   assert.doesNotMatch(lockfile, /'@connectrpc\/connect-node@/);
   assert.doesNotMatch(lockfile, /undici@5\.29\.0/);
 });

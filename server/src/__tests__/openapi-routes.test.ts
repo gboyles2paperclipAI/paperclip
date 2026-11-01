@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import request from "supertest";
+import SwaggerParser from "@apidevtools/swagger-parser";
 import { describe, expect, it } from "vitest";
 import { errorHandler } from "../middleware/index.js";
 import { buildOpenApiSpec, openApiRoutes } from "../routes/openapi.js";
@@ -169,6 +170,12 @@ describe("openapi routes", () => {
         name: { type: "string" },
       },
     });
+  });
+
+  it("emits a complete OpenAPI 3.0-valid document", async () => {
+    const spec = buildOpenApiSpec();
+
+    await expect(SwaggerParser.validate(spec)).resolves.toBeDefined();
   });
 
   it("covers the mounted server routes exactly", () => {

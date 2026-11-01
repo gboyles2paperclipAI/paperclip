@@ -184,15 +184,44 @@ function normalizeJsonSchemaForOpenApi(value: unknown): unknown {
 
   const schema = Object.fromEntries(
     Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => key !== "$schema")
+      .filter(([key]) => !["$schema", "$id", "propertyNames"].includes(key))
       .map(([key, entry]) => [key, normalizeJsonSchemaForOpenApi(entry)]),
   );
+  if (Array.isArray(schema.anyOf)) {
+    const nonNull = schema.anyOf.filter((entry) => (
+      !entry || typeof entry !== "object" || (entry as Record<string, unknown>).type !== "null"
+    ));
+    if (nonNull.length === 1 && nonNull.length !== schema.anyOf.length) {
+      delete schema.anyOf;
+      Object.assign(schema, nonNull[0]);
+      schema.nullable = true;
+    }
+  }
   const types = Array.isArray(schema.type) ? schema.type : null;
   if (types?.includes("null")) {
     const nonNullTypes = types.filter((type) => type !== "null");
     if (nonNullTypes.length === 1) schema.type = nonNullTypes[0];
     else delete schema.type;
     schema.nullable = true;
+  } else if (types) {
+    schema.anyOf = types.map((type) => ({ type }));
+    delete schema.type;
+  }
+  if (schema.type === "null") {
+    delete schema.type;
+    schema.nullable = true;
+  }
+  if (Object.hasOwn(schema, "const")) {
+    schema.enum = [schema.const];
+    delete schema.const;
+  }
+  if (typeof schema.exclusiveMinimum === "number") {
+    schema.minimum = schema.exclusiveMinimum;
+    schema.exclusiveMinimum = true;
+  }
+  if (typeof schema.exclusiveMaximum === "number") {
+    schema.maximum = schema.exclusiveMaximum;
+    schema.exclusiveMaximum = true;
   }
   return schema;
 }

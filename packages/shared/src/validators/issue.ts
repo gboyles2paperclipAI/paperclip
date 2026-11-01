@@ -486,6 +486,8 @@ export const updateIssueSchema = createIssueBaseSchema.omit({
   responsibleUserId: true,
   watchdog: true,
 }).partial().extend({
+  workMode: z.enum(ISSUE_WORK_MODES).optional(),
+  priority: z.enum(ISSUE_PRIORITIES).optional(),
   requestDepth: issueRequestDepthInputSchema.optional(),
   assigneeAgentId: z.string().trim().min(1).optional().nullable(),
   comment: issueCommentTextInputSchema.optional(),

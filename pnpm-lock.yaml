@@ -868,6 +868,9 @@ importers:
         specifier: ^4.6.7
         version: 4.6.7
     devDependencies:
+      '@apidevtools/swagger-parser':
+        specifier: ^12.1.0
+        version: 12.1.0(openapi-types@12.1.3)
       '@types/express':
         specifier: ^5.0.0
         version: 5.0.6
@@ -1162,6 +1165,22 @@ packages:
     peerDependenciesMeta:
       zod:
         optional: true
+
+  '@apidevtools/json-schema-ref-parser@14.0.1':
+    resolution: {integrity: sha512-Oc96zvmxx1fqoSEdUmfmvvb59/KDOnUoJ7s2t7bISyAn0XEz57LCCw8k2Y4Pf3mwKaZLMciESALORLgfe2frCw==}
+    engines: {node: '>= 16'}
+
+  '@apidevtools/openapi-schemas@2.1.0':
+    resolution: {integrity: sha512-Zc1AlqrJlX3SlpupFGpiLi2EbteyP7fXmUOGup6/DnkRgjP9bgMM/ag+n91rsv0U1Gpz0H3VILA/o3bW7Ua6BQ==}
+    engines: {node: '>=10'}
+
+  '@apidevtools/swagger-methods@3.0.2':
+    resolution: {integrity: sha512-QAkD5kK2b1WfjDS/UQn/qQkbwF31uqRjPTrsCs5ZG9BQGAkjwvqGFjjPqAuzac/IYzpPtRzjCP1WrTuAIjMrXg==}
+
+  '@apidevtools/swagger-parser@12.1.0':
+    resolution: {integrity: sha512-e5mJoswsnAX0jG+J09xHFYQXb/bUc5S3pLpMxUuRUA2H8T2kni3yEoyz2R3Dltw5f4A6j6rPNMpWTK+iVDFlng==}
+    peerDependencies:
+      openapi-types: '>=7'
 
   '@asamuzakjp/css-color@5.0.1':
     resolution: {integrity: sha512-2SZFvqMyvboVV1d15lMf7XiI3m7SDqXUuKaTymJYLN6dSGadqp+fVojqJlVoMlbZnlTmu3S0TLwLTJpvBMO1Aw==}
@@ -4911,6 +4930,9 @@ packages:
   '@types/jsdom@28.0.0':
     resolution: {integrity: sha512-A8TBQQC/xAOojy9kM8E46cqT00sF0h7dWjV8t8BJhUi2rG6JRh7XXQo/oLoENuZIQEpXsxLccLCnknyQd7qssQ==}
 
+  '@types/json-schema@7.0.15':
+    resolution: {integrity: sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==}
+
   '@types/mdast@4.0.4':
     resolution: {integrity: sha512-kGaNbPh1k7AFzgpud/gMdvIm5xuECykRR+JnWKQno9TAXVa6WIVCGTPvYGekIDL4uwCZQSYbUxNBSb1aUo79oA==}
 
@@ -5146,6 +5168,14 @@ packages:
   aggregate-error@3.1.0:
     resolution: {integrity: sha512-4I7Td01quW/RpocfNayFdFVk1qSuoh0E7JrbRJ16nH01HhKFQ88INq9Sd+nd72zqRySlr9BmDA8xlEJ6vJMrYA==}
     engines: {node: '>=8'}
+
+  ajv-draft-04@1.0.0:
+    resolution: {integrity: sha512-mv00Te6nmYbRp5DCwclxtt7yV/joXJPGS7nM+97GdxvuttCOfgI3K4U25zboyeX0O+myI8ERluxQe5wljMmVIw==}
+    peerDependencies:
+      ajv: ^8.5.0
+    peerDependenciesMeta:
+      ajv:
+        optional: true
 
   ajv-formats-draft2019@1.6.1:
     resolution: {integrity: sha512-JQPvavpkWDvIsBp2Z33UkYCtXCSpW4HD3tAZ+oL4iEFOk9obQZffx0yANwECt6vzr6ET+7HN5czRyqXbnq/u0Q==}
@@ -5473,6 +5503,9 @@ packages:
   call-bound@1.0.4:
     resolution: {integrity: sha512-+ys997U96po4Kx/ABpBCqhA9EuxJaQWDQg7295H4hBphv3IZg0boBKuwYpt4YXp6MZ5AmZQnU/tyMTlRpaSejg==}
     engines: {node: '>= 0.4'}
+
+  call-me-maybe@1.0.2:
+    resolution: {integrity: sha512-HpX65o1Hnr9HH25ojC1YGs7HCQLq0GCOibSaWER0eNpgJ/Z1MZv2mTc7+xh6WOPxbRVcmgbv4hGU+uSQ/2xFZQ==}
 
   caniuse-lite@1.0.30001770:
     resolution: {integrity: sha512-x/2CLQ1jHENRbHg5PSId2sXq1CIO1CISvwWAj027ltMVG2UNgW+w9oH2+HzgEIRFembL8bUlXtfbBHR1fCg2xw==}
@@ -7357,6 +7390,9 @@ packages:
     resolution: {integrity: sha512-smsWv2LzFjP03xmvFoJ331ss6h+jixfA4UUV/Bsiyuu4YJPfN+FIQGOIiv4w9/+MoHkfkJ22UIaQWRVFRfH6Vw==}
     engines: {node: '>=20'}
 
+  openapi-types@12.1.3:
+    resolution: {integrity: sha512-N4YtSYJqghVu4iek2ZUvcN/0aqH1kRDuNqzcycDxhOUpg7GdvLa2F3DgS6yBNhInhv2r/6I0Flkn7CqL8+nIcw==}
+
   outvariant@1.4.0:
     resolution: {integrity: sha512-AlWY719RF02ujitly7Kk/0QlV+pXGFDHrHf9O2OKqyqgBieaPOIeuSkL8sRK6j2WK+/ZAURq2kZsY0d8JapUiw==}
 
@@ -8827,6 +8863,25 @@ snapshots:
       json-schema-to-ts: 3.1.1
     optionalDependencies:
       zod: 4.6.7
+
+  '@apidevtools/json-schema-ref-parser@14.0.1':
+    dependencies:
+      '@types/json-schema': 7.0.15
+      js-yaml: 4.1.1
+
+  '@apidevtools/openapi-schemas@2.1.0': {}
+
+  '@apidevtools/swagger-methods@3.0.2': {}
+
+  '@apidevtools/swagger-parser@12.1.0(openapi-types@12.1.3)':
+    dependencies:
+      '@apidevtools/json-schema-ref-parser': 14.0.1
+      '@apidevtools/openapi-schemas': 2.1.0
+      '@apidevtools/swagger-methods': 3.0.2
+      ajv: 8.20.0
+      ajv-draft-04: 1.0.0(ajv@8.20.0)
+      call-me-maybe: 1.0.2
+      openapi-types: 12.1.3
 
   '@asamuzakjp/css-color@5.0.1':
     dependencies:
@@ -12690,6 +12745,8 @@ snapshots:
       parse5: 7.3.0
       undici-types: 7.24.4
 
+  '@types/json-schema@7.0.15': {}
+
   '@types/mdast@4.0.4':
     dependencies:
       '@types/unist': 3.0.3
@@ -12989,6 +13046,10 @@ snapshots:
       clean-stack: 2.2.0
       indent-string: 4.0.0
     optional: true
+
+  ajv-draft-04@1.0.0(ajv@8.20.0):
+    optionalDependencies:
+      ajv: 8.20.0
 
   ajv-formats-draft2019@1.6.1(ajv@8.20.0):
     dependencies:
@@ -13306,6 +13367,8 @@ snapshots:
     dependencies:
       call-bind-apply-helpers: 1.0.2
       get-intrinsic: 1.3.0
+
+  call-me-maybe@1.0.2: {}
 
   caniuse-lite@1.0.30001770: {}
 
@@ -15637,6 +15700,8 @@ snapshots:
       is-inside-container: 1.0.0
       powershell-utils: 0.1.0
       wsl-utils: 0.3.1
+
+  openapi-types@12.1.3: {}
 
   outvariant@1.4.0: {}
 
