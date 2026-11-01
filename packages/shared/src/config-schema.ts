@@ -101,7 +101,7 @@ export const secretsConfigSchema = z.object({
 
 export const telemetryConfigSchema = z.object({
   enabled: z.boolean().default(true),
-}).default({});
+}).prefault({});
 
 export const paperclipConfigSchema = z
   .object({

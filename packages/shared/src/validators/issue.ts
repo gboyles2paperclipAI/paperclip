@@ -419,7 +419,7 @@ const createIssueBaseSchema = z.object({
   // Completion contract (ADR-20260823 R2.12, PR-3). Structural typing and
   // preimage binding are enforced server-side (services/completion-contracts);
   // agents may never attach or modify one.
-  completionContract: z.record(z.unknown()).optional().nullable(),
+  completionContract: z.record(z.string(), z.unknown()).optional().nullable(),
 });
 
 export const createIssueInputSchema = createIssueBaseSchema.extend({
@@ -497,7 +497,7 @@ export const updateIssueSchema = createIssueBaseSchema.omit({
   // Completion receipt submission (ADR-20260823 R2.12, PR-3): allowed for the
   // assignee agent and board/system actors; validated fail-closed server-side
   // at the `done` gate in issueService.update.
-  completionReceipt: z.record(z.unknown()).optional().nullable(),
+  completionReceipt: z.record(z.string(), z.unknown()).optional().nullable(),
   // Explicit terminal disposition (board/system actors only; the server
   // defaults completed/cancelled by terminal status).
   resolutionDisposition: z.enum(ISSUE_RESOLUTION_DISPOSITIONS).optional().nullable(),
