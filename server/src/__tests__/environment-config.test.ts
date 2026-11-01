@@ -13,7 +13,7 @@ describe("environment config helpers", () => {
         remoteWorkspacePath: "/srv/paperclip/workspace",
         privateKeySecretRef: {
           type: "secret_ref",
-          secretId: "11111111-1111-1111-1111-111111111111",
+          secretId: "11111111-1111-4111-8111-111111111111",
           version: "latest",
         },
         knownHosts: "",
@@ -28,7 +28,7 @@ describe("environment config helpers", () => {
       privateKey: null,
       privateKeySecretRef: {
         type: "secret_ref",
-        secretId: "11111111-1111-1111-1111-111111111111",
+        secretId: "11111111-1111-4111-8111-111111111111",
         version: "latest",
       },
       knownHosts: null,
