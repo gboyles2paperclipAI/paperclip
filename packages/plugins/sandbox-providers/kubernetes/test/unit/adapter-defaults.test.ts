@@ -104,6 +104,19 @@ describe("getAdapterDefaults", () => {
     expect(d.allowFqdns).toEqual([]);
     expect(d.probeCommand).toEqual([]);
   });
+
+  it("preserves a string-valued default environment record", () => {
+    const registry: AdapterRegistryEntry[] = [
+      {
+        adapterType: "opencode_local",
+        runtimeImage: "img",
+        defaultEnv: { ANTHROPIC_BASE_URL: "http://bifrost:8080" },
+      },
+    ];
+    expect(getAdapterDefaults("opencode_local", registry).defaultEnv).toEqual({
+      ANTHROPIC_BASE_URL: "http://bifrost:8080",
+    });
+  });
 });
 
 describe("buildAdapterEnv", () => {
