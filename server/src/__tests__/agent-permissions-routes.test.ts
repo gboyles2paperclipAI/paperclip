@@ -2012,6 +2012,46 @@ describe.sequential("agent permission routes", () => {
     expect(mockAgentService.update).not.toHaveBeenCalled();
   });
 
+  it("preserves persisted agent configuration on a name-only update", async () => {
+    const persisted = {
+      ...baseAgent,
+      role: "devops",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      budgetMonthlyCents: 12_345,
+    };
+    mockAgentService.getById.mockResolvedValue(persisted);
+    mockAgentService.update.mockImplementation(async (_id, patch) => ({
+      ...persisted,
+      ...patch,
+    }));
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ name: "Renamed builder" }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalledWith(
+      agentId,
+      { name: "Renamed builder" },
+      expect.anything(),
+    );
+    expect(res.body).toMatchObject({
+      name: "Renamed builder",
+      role: "devops",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      budgetMonthlyCents: 12_345,
+    });
+  });
+
   for (const adapterCase of sshCapableAdapterCases) {
     it(`allows updating a ${adapterCase.adapterType} agent with an SSH default environment`, async () => {
       const environmentId = "33333333-3333-4333-8333-333333333333";

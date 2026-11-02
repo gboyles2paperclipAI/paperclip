@@ -366,7 +366,7 @@ describe("approval routes idempotent retries", () => {
       .post("/api/companies/company-1/approvals")
       .send({
         type: "request_board_approval",
-        issueIds: ["00000000-0000-0000-0000-000000000001"],
+        issueIds: ["11111111-1111-4111-8111-111111111111"],
         payload: { title: "Approve hosting spend" },
       });
 
@@ -381,7 +381,7 @@ describe("approval routes idempotent retries", () => {
     expect(mockSecretService.normalizeHireApprovalPayloadForPersistence).not.toHaveBeenCalled();
     expect(mockIssueApprovalService.linkManyForApproval).toHaveBeenCalledWith(
       "approval-1",
-      ["00000000-0000-0000-0000-000000000001"],
+      ["11111111-1111-4111-8111-111111111111"],
       { agentId: "agent-1", userId: null },
     );
     expect(mockLogActivity).toHaveBeenCalledWith(

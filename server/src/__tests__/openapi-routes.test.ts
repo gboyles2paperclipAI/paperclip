@@ -3,9 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import request from "supertest";
+import SwaggerParser from "@apidevtools/swagger-parser";
+import Ajv from "ajv";
 import { describe, expect, it } from "vitest";
 import { errorHandler } from "../middleware/index.js";
-import { buildOpenApiSpec, openApiRoutes } from "../routes/openapi.js";
+import {
+  buildOpenApiSpec,
+  normalizeJsonSchemaForOpenApi,
+  openApiRoutes,
+} from "../routes/openapi.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROUTES_DIR = path.resolve(__dirname, "../routes");
@@ -169,6 +175,62 @@ describe("openapi routes", () => {
         name: { type: "string" },
       },
     });
+  });
+
+  it("emits a complete OpenAPI 3.0-valid document", async () => {
+    const spec = buildOpenApiSpec();
+
+    await expect(SwaggerParser.validate(spec)).resolves.toBeDefined();
+  });
+
+  it("preserves nullable union value constraints", () => {
+    const schema = normalizeJsonSchemaForOpenApi({
+      anyOf: [{ type: "string" }, { type: "null" }],
+    }) as Record<string, unknown>;
+    const validate = new Ajv({ strict: false }).compile(schema);
+
+    expect(schema).toMatchObject({ type: "string", nullable: true });
+    expect(schema).not.toHaveProperty("anyOf");
+    expect(validate("description")).toBe(true);
+    expect(validate(null)).toBe(true);
+    expect(validate(42)).toBe(false);
+    expect(validate({})).toBe(false);
+  });
+
+  it("preserves every scalar branch in generated create and update routine schemas", () => {
+    const spec = buildOpenApiSpec();
+    const requestSchemas = [
+      spec.paths["/api/companies/{companyId}/routines"].post
+        .requestBody.content["application/json"].schema,
+      spec.paths["/api/routines/{id}"].patch
+        .requestBody.content["application/json"].schema,
+    ];
+
+    for (const requestSchema of requestSchemas) {
+      const schema = requestSchema.properties.variables.items.properties.defaultValue;
+      const validate = new Ajv({ strict: false }).compile(schema);
+
+      expect(validate("description")).toBe(true);
+      expect(validate(42)).toBe(true);
+      expect(validate(true)).toBe(true);
+      expect(validate(null)).toBe(true);
+      expect(validate({})).toBe(false);
+      expect(validate([])).toBe(false);
+    }
+  });
+
+  it("keeps null inside normalized enum constraints", () => {
+    const schema = normalizeJsonSchemaForOpenApi({
+      anyOf: [
+        { type: "string", enum: ["schedule", "webhook", "api"] },
+        { type: "null" },
+      ],
+    }) as Record<string, unknown>;
+    const validate = new Ajv({ strict: false }).compile(schema);
+
+    expect(validate("schedule")).toBe(true);
+    expect(validate(null)).toBe(true);
+    expect(validate("unknown")).toBe(false);
   });
 
   it("covers the mounted server routes exactly", () => {

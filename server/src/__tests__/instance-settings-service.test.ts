@@ -1,12 +1,33 @@
 import { describe, expect, it, vi } from "vitest";
 import type { InstanceExperimentalSettings } from "@paperclipai/shared";
 import {
+  applyGeneralSettingsPatch,
   applyExperimentalSettingsPatch,
   normalizeExperimentalSettings,
   resolveWorktreeRunExecutionActivationState,
 } from "../services/instance-settings.js";
 
 describe("instance settings service", () => {
+  it("preserves omitted general settings and nested retention values", () => {
+    expect(applyGeneralSettingsPatch(
+      {
+        censorUsernameInLogs: true,
+        keyboardShortcuts: false,
+        feedbackDataSharingPreference: "allowed",
+        backupRetention: { dailyDays: 14, weeklyWeeks: 4, monthlyMonths: 6 },
+      },
+      {
+        keyboardShortcuts: true,
+        backupRetention: { dailyDays: 3 },
+      },
+    )).toEqual({
+      censorUsernameInLogs: true,
+      keyboardShortcuts: true,
+      feedbackDataSharingPreference: "allowed",
+      backupRetention: { dailyDays: 3, weeklyWeeks: 4, monthlyMonths: 6 },
+    });
+  });
+
   it("ignores retired experimental flags without resetting current settings", () => {
     expect(normalizeExperimentalSettings({
       enableEnvironments: true,

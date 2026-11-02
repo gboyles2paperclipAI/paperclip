@@ -36,7 +36,21 @@ export const instanceGeneralSettingsSchema = z.object({
   executionMode: z.enum(["kubernetes", "any"]).optional(),
 }).strict();
 
-export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.partial();
+const generalSettingsShape = instanceGeneralSettingsSchema.shape;
+const backupRetentionShape = backupRetentionPolicySchema.shape;
+
+export const patchInstanceGeneralSettingsSchema = z.object({
+  censorUsernameInLogs: generalSettingsShape.censorUsernameInLogs.removeDefault().optional(),
+  keyboardShortcuts: generalSettingsShape.keyboardShortcuts.removeDefault().optional(),
+  feedbackDataSharingPreference:
+    generalSettingsShape.feedbackDataSharingPreference.removeDefault().optional(),
+  backupRetention: z.object({
+    dailyDays: backupRetentionShape.dailyDays.removeDefault().optional(),
+    weeklyWeeks: backupRetentionShape.weeklyWeeks.removeDefault().optional(),
+    monthlyMonths: backupRetentionShape.monthlyMonths.removeDefault().optional(),
+  }).strict().optional(),
+  executionMode: generalSettingsShape.executionMode,
+}).strict();
 
 export const instanceExperimentalSettingsSchema = z.object({
   enableEnvironments: z.boolean().default(false),
@@ -71,13 +85,44 @@ export const instanceExperimentalSettingsSchema = z.object({
     .default(DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS),
 }).strict();
 
-export const patchInstanceExperimentalSettingsSchema = instanceExperimentalSettingsSchema
-  .omit({
-    worktreeRunExecutionActivatedAt: true,
-    worktreeRunExecutionActivationInstanceId: true,
-  })
-  .partial()
-  .strip();
+const experimentalSettingsShape = instanceExperimentalSettingsSchema.shape;
+
+export const patchInstanceExperimentalSettingsSchema = z.object({
+  enableEnvironments: experimentalSettingsShape.enableEnvironments.removeDefault().optional(),
+  enableIsolatedWorkspaces:
+    experimentalSettingsShape.enableIsolatedWorkspaces.removeDefault().optional(),
+  enableStreamlinedLeftNavigation:
+    experimentalSettingsShape.enableStreamlinedLeftNavigation.removeDefault().optional(),
+  enableApps: experimentalSettingsShape.enableApps.removeDefault().optional(),
+  enablePipelines: experimentalSettingsShape.enablePipelines.removeDefault().optional(),
+  enableCases: experimentalSettingsShape.enableCases.removeDefault().optional(),
+  enableConferenceRoomChat:
+    experimentalSettingsShape.enableConferenceRoomChat.removeDefault().optional(),
+  enableTaskWatchdogs: experimentalSettingsShape.enableTaskWatchdogs.removeDefault().optional(),
+  enableIssuePlanDecompositions:
+    experimentalSettingsShape.enableIssuePlanDecompositions.removeDefault().optional(),
+  enableExperimentalFileViewer:
+    experimentalSettingsShape.enableExperimentalFileViewer.removeDefault().optional(),
+  enableCloudSync: experimentalSettingsShape.enableCloudSync.removeDefault().optional(),
+  enableExternalObjects: experimentalSettingsShape.enableExternalObjects.removeDefault().optional(),
+  enableSmokeLab: experimentalSettingsShape.enableSmokeLab.removeDefault().optional(),
+  enableBuiltInAgents: experimentalSettingsShape.enableBuiltInAgents.removeDefault().optional(),
+  enableDecisions: experimentalSettingsShape.enableDecisions.removeDefault().optional(),
+  enableGoalsSidebarLink: experimentalSettingsShape.enableGoalsSidebarLink.removeDefault().optional(),
+  enableServerInfoDebugView:
+    experimentalSettingsShape.enableServerInfoDebugView.removeDefault().optional(),
+  autoRestartDevServerWhenIdle:
+    experimentalSettingsShape.autoRestartDevServerWhenIdle.removeDefault().optional(),
+  enableIssueGraphLivenessAutoRecovery:
+    experimentalSettingsShape.enableIssueGraphLivenessAutoRecovery.removeDefault().optional(),
+  enableWorkspaceBranchReconcileForward:
+    experimentalSettingsShape.enableWorkspaceBranchReconcileForward.removeDefault().optional(),
+  enableWorkspaceDirtyQuarantineRepair:
+    experimentalSettingsShape.enableWorkspaceDirtyQuarantineRepair.removeDefault().optional(),
+  enableWorktreeRunExecution: experimentalSettingsShape.enableWorktreeRunExecution.removeDefault().optional(),
+  issueGraphLivenessAutoRecoveryLookbackHours:
+    experimentalSettingsShape.issueGraphLivenessAutoRecoveryLookbackHours.removeDefault().optional(),
+}).strip();
 
 export const patchInstanceSettingsSchema = z.object({
   defaultEnvironmentId: z.string().uuid().nullable().optional(),

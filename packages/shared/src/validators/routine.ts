@@ -104,6 +104,11 @@ export const createRoutineSchema = createRoutineBaseSchema.superRefine(requireFa
 export type CreateRoutine = z.infer<typeof createRoutineSchema>;
 
 export const updateRoutineSchema = createRoutineBaseSchema.partial().extend({
+  priority: z.enum(ISSUE_PRIORITIES).optional(),
+  status: z.enum(ROUTINE_STATUSES).optional(),
+  concurrencyPolicy: z.enum(ROUTINE_CONCURRENCY_POLICIES).optional(),
+  catchUpPolicy: z.enum(ROUTINE_CATCH_UP_POLICIES).optional(),
+  variables: z.array(routineVariableSchema).optional(),
   baseRevisionId: z.string().uuid().optional().nullable(),
 }).superRefine(requireFailureOwnerForRunOnly);
 export type UpdateRoutine = z.infer<typeof updateRoutineSchema>;

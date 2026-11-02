@@ -198,6 +198,25 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
   };
 }
 
+export function applyGeneralSettingsPatch(
+  current: unknown,
+  patch: PatchInstanceGeneralSettings,
+): InstanceGeneralSettings {
+  const previousGeneral = normalizeGeneralSettings(current);
+  return normalizeGeneralSettings({
+    ...previousGeneral,
+    ...patch,
+    ...(patch.backupRetention
+      ? {
+          backupRetention: {
+            ...previousGeneral.backupRetention,
+            ...patch.backupRetention,
+          },
+        }
+      : {}),
+  });
+}
+
 export function normalizeExperimentalSettings(raw: unknown): InstanceExperimentalSettings {
   const parsed = instanceExperimentalSettingsStorageSchema.safeParse(raw ?? {});
   if (parsed.success) {
@@ -339,10 +358,7 @@ export function instanceSettingsService(db: Db, options: InstanceSettingsService
 
     updateGeneral: async (patch: PatchInstanceGeneralSettings): Promise<InstanceSettings> => {
       const current = await getOrCreateRow();
-      const nextGeneral = normalizeGeneralSettings({
-        ...normalizeGeneralSettings(current.general),
-        ...patch,
-      });
+      const nextGeneral = applyGeneralSettingsPatch(current.general, patch);
       const now = new Date();
       const [updated] = await db
         .update(instanceSettings)

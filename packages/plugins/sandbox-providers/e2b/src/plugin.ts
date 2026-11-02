@@ -2,8 +2,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   CommandExitError,
+  NotFoundError,
   Sandbox,
-  SandboxNotFoundError,
   TimeoutError,
 } from "e2b";
 import { definePlugin } from "@paperclipai/plugin-sdk";
@@ -120,7 +120,7 @@ async function connectForCleanup(config: E2bDriverConfig, providerLeaseId: strin
   try {
     return await connectSandbox(config, providerLeaseId);
   } catch (error) {
-    if (error instanceof SandboxNotFoundError) return null;
+    if (error instanceof NotFoundError) return null;
     throw error;
   }
 }
@@ -198,14 +198,17 @@ async function killSandboxBestEffort(sandbox: Sandbox, reason: string): Promise<
   });
 }
 
-async function releaseSandboxBestEffort(sandbox: Sandbox, reuseLease: boolean): Promise<void> {
-  if (!reuseLease) {
+async function releaseSandboxBestEffort(sandbox: Sandbox, config: E2bDriverConfig): Promise<void> {
+  if (!config.reuseLease) {
     await killSandboxBestEffort(sandbox, "lease release");
     return;
   }
 
   try {
-    await sandbox.pause();
+    // Unlike kill(), E2B 2.x betaPause() does not merge the connection
+    // options stored on the Sandbox instance. Pass the resolved key explicitly
+    // so config-only credentials authenticate the pause request.
+    await sandbox.betaPause({ apiKey: resolveApiKey(config) });
   } catch (error) {
     console.warn(
       `Failed to pause E2B sandbox during lease release: ${formatErrorMessage(error)}. Attempting kill instead.`,
@@ -325,7 +328,7 @@ const plugin = definePlugin({
         throw error;
       }
     } catch (error) {
-      if (error instanceof SandboxNotFoundError) {
+      if (error instanceof NotFoundError) {
         return { providerLeaseId: null, metadata: { expired: true } };
       }
       throw error;
@@ -340,7 +343,7 @@ const plugin = definePlugin({
     const sandbox = await connectForCleanup(config, params.providerLeaseId);
     if (!sandbox) return;
 
-    await releaseSandboxBestEffort(sandbox, config.reuseLease);
+    await releaseSandboxBestEffort(sandbox, config);
   },
 
   async onEnvironmentDestroyLease(

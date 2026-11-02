@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockCreate = vi.hoisted(() => vi.fn());
 const mockConnect = vi.hoisted(() => vi.fn());
-const { MockCommandExitError, MockSandboxNotFoundError, MockTimeoutError } = vi.hoisted(() => {
+const { MockCommandExitError, MockNotFoundError, MockTimeoutError } = vi.hoisted(() => {
   class MockCommandExitError extends Error {
     exitCode: number;
     stdout: string;
@@ -15,7 +15,7 @@ const { MockCommandExitError, MockSandboxNotFoundError, MockTimeoutError } = vi.
       this.stderr = result.stderr;
     }
   }
-  class MockSandboxNotFoundError extends Error {}
+  class MockNotFoundError extends Error {}
   class MockTimeoutError extends Error {
     stdout: string;
     stderr: string;
@@ -28,12 +28,12 @@ const { MockCommandExitError, MockSandboxNotFoundError, MockTimeoutError } = vi.
       this.result = streams.nested ? { stdout: streams.stdout, stderr: streams.stderr } : undefined;
     }
   }
-  return { MockCommandExitError, MockSandboxNotFoundError, MockTimeoutError };
+  return { MockCommandExitError, MockNotFoundError, MockTimeoutError };
 });
 
 vi.mock("e2b", () => ({
   CommandExitError: MockCommandExitError,
-  SandboxNotFoundError: MockSandboxNotFoundError,
+  NotFoundError: MockNotFoundError,
   TimeoutError: MockTimeoutError,
   Sandbox: {
     create: mockCreate,
@@ -64,7 +64,7 @@ function createMockSandbox(overrides: {
     sandboxDomain: overrides.sandboxDomain ?? "sandbox.example.test",
     setTimeout: vi.fn().mockResolvedValue(undefined),
     kill: vi.fn().mockResolvedValue(undefined),
-    pause: vi.fn().mockResolvedValue(undefined),
+    betaPause: vi.fn().mockResolvedValue(true),
     files: {
       write: vi.fn().mockResolvedValue(undefined),
       remove: vi.fn().mockResolvedValue(undefined),
@@ -582,7 +582,7 @@ describe("E2B sandbox provider plugin", () => {
       providerLeaseId: "sandbox-ephemeral",
     });
 
-    expect(reusable.pause).toHaveBeenCalled();
+    expect(reusable.betaPause).toHaveBeenCalledWith({ apiKey: "resolved-key" });
     expect(reusable.kill).not.toHaveBeenCalled();
     expect(ephemeral.kill).toHaveBeenCalled();
   });
@@ -590,7 +590,7 @@ describe("E2B sandbox provider plugin", () => {
   it("falls back to kill when pausing a reusable lease fails", async () => {
     const sandbox = createMockSandbox({ sandboxId: "sandbox-reusable" });
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    sandbox.pause.mockRejectedValueOnce(new Error("pause failed"));
+    sandbox.betaPause.mockRejectedValueOnce(new Error("pause failed"));
     mockConnect.mockResolvedValue(sandbox);
 
     await expect(plugin.definition.onEnvironmentReleaseLease?.({
@@ -606,7 +606,7 @@ describe("E2B sandbox provider plugin", () => {
       providerLeaseId: "sandbox-reusable",
     })).resolves.toBeUndefined();
 
-    expect(sandbox.pause).toHaveBeenCalled();
+    expect(sandbox.betaPause).toHaveBeenCalledWith({ apiKey: "resolved-key" });
     expect(sandbox.kill).toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalled();
   });

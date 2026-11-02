@@ -257,7 +257,7 @@ describe("environment routes", () => {
     mockSecretService.syncSecretRefsForTarget.mockReset();
     mockSecretService.remove.mockReset();
     mockSecretService.create.mockResolvedValue({
-      id: "11111111-1111-1111-1111-111111111111",
+      id: "11111111-1111-4111-8111-111111111111",
     });
     mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["company-1"]);
     mockIssueService.clearExecutionWorkspaceEnvironmentSelection.mockResolvedValue(0);
@@ -795,7 +795,7 @@ describe("environment routes", () => {
         privateKey: null,
         privateKeySecretRef: {
           type: "secret_ref",
-          secretId: "11111111-1111-1111-1111-111111111111",
+          secretId: "11111111-1111-4111-8111-111111111111",
           version: "latest",
         },
         knownHosts: null,
@@ -835,7 +835,7 @@ describe("environment routes", () => {
         { replaceAll: true },
       );
     }
-    expect(mockSecretService.remove).toHaveBeenCalledWith("11111111-1111-1111-1111-111111111111");
+    expect(mockSecretService.remove).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111");
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -884,7 +884,7 @@ describe("environment routes", () => {
         privateKey: null,
         privateKeySecretRef: {
           type: "secret_ref",
-          secretId: "11111111-1111-1111-1111-111111111111",
+          secretId: "11111111-1111-4111-8111-111111111111",
           version: "latest",
         },
         knownHosts: null,
@@ -918,7 +918,7 @@ describe("environment routes", () => {
         privateKey: null,
         privateKeySecretRef: {
           type: "secret_ref",
-          secretId: "11111111-1111-1111-1111-111111111111",
+          secretId: "11111111-1111-4111-8111-111111111111",
           version: "latest",
         },
       }),
@@ -950,7 +950,7 @@ describe("environment routes", () => {
         privateKey: null,
         privateKeySecretRef: {
           type: "secret_ref",
-          secretId: "11111111-1111-1111-1111-111111111111",
+          secretId: "11111111-1111-4111-8111-111111111111",
           version: "latest",
         },
         knownHosts: null,
@@ -1080,7 +1080,7 @@ describe("environment routes", () => {
       config: {
         provider: "secure-plugin",
         template: "base",
-        apiKey: "11111111-1111-1111-1111-111111111111",
+        apiKey: "11111111-1111-4111-8111-111111111111",
         timeoutMs: 450000,
         reuseLease: true,
       },
@@ -1150,7 +1150,7 @@ describe("environment routes", () => {
       config: {
         provider: "secure-plugin",
         template: "base",
-        apiKey: "11111111-1111-1111-1111-111111111111",
+        apiKey: "11111111-1111-4111-8111-111111111111",
         timeoutMs: 450000,
         reuseLease: true,
       },
@@ -1177,7 +1177,7 @@ describe("environment routes", () => {
       config: {
         provider: "secure-plugin",
         template: "base",
-        apiKey: "11111111-1111-1111-1111-111111111111",
+        apiKey: "11111111-1111-4111-8111-111111111111",
         timeoutMs: 450000,
         reuseLease: true,
       },
@@ -1812,7 +1812,7 @@ describe("environment routes", () => {
     mockValidatePluginSandboxProviderConfig.mockResolvedValue({
       normalizedConfig: {
         template: "base",
-        apiKey: "11111111-1111-1111-1111-111111111111",
+        apiKey: "11111111-1111-4111-8111-111111111111",
         timeoutMs: 300000,
         reuseLease: true,
       },
@@ -1855,7 +1855,7 @@ describe("environment routes", () => {
         config: {
           provider: "secure-plugin",
           template: "base",
-          apiKey: "11111111-1111-1111-1111-111111111111",
+          apiKey: "11111111-1111-4111-8111-111111111111",
           timeoutMs: 300000,
           reuseLease: true,
         },
@@ -1866,7 +1866,7 @@ describe("environment routes", () => {
     expect(mockSecretService.create).not.toHaveBeenCalled();
     expect(mockSecretService.resolveSecretValueForEphemeralAccess).toHaveBeenCalledWith(
       "company-1",
-      "11111111-1111-1111-1111-111111111111",
+      "11111111-1111-4111-8111-111111111111",
       "latest",
       {
         consumerType: "system",
@@ -1904,7 +1904,7 @@ describe("environment routes", () => {
     mockValidatePluginSandboxProviderConfig.mockResolvedValue({
       normalizedConfig: {
         template: "base",
-        apiKey: "11111111-1111-1111-1111-111111111111",
+        apiKey: "11111111-1111-4111-8111-111111111111",
       },
       pluginId: "plugin-secure",
       pluginKey: "acme.secure-sandbox-provider",
@@ -1943,7 +1943,7 @@ describe("environment routes", () => {
         config: {
           provider: "secure-plugin",
           template: "base",
-          apiKey: "11111111-1111-1111-1111-111111111111",
+          apiKey: "11111111-1111-4111-8111-111111111111",
         },
       });
 

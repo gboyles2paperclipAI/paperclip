@@ -97,6 +97,11 @@ export const createIssueWorkProductSchema = z.object({
 
 export type CreateIssueWorkProduct = z.infer<typeof createIssueWorkProductSchema>;
 
-export const updateIssueWorkProductSchema = createIssueWorkProductSchema.partial();
+export const updateIssueWorkProductSchema = createIssueWorkProductSchema.partial().extend({
+  status: issueWorkProductStatusSchema.optional(),
+  reviewState: issueWorkProductReviewStateSchema.optional(),
+  isPrimary: z.boolean().optional(),
+  healthStatus: z.enum(["unknown", "healthy", "unhealthy"]).optional(),
+});
 
 export type UpdateIssueWorkProduct = z.infer<typeof updateIssueWorkProductSchema>;

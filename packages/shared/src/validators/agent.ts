@@ -6,7 +6,7 @@ import {
   INBOX_MINE_ISSUE_STATUS_FILTER,
   PAUSE_REASONS,
 } from "../constants.js";
-import { agentAdapterTypeSchema } from "../adapter-type.js";
+import { agentAdapterTypeSchema, optionalAgentAdapterTypeSchema } from "../adapter-type.js";
 import { envConfigSchema } from "./secret.js";
 import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-policy.js";
 import { agentDesiredSkillSelectionSchema } from "./adapter-skills.js";
@@ -139,7 +139,11 @@ export const updateAgentSchema = createAgentSchema
   .omit({ permissions: true })
   .partial()
   .extend({
+    role: z.enum(AGENT_ROLES).optional(),
+    adapterType: optionalAgentAdapterTypeSchema,
+    adapterConfig: adapterConfigSchema.optional(),
     runtimeConfig: updateAgentRuntimeConfigSchema.optional(),
+    budgetMonthlyCents: z.number().int().nonnegative().optional(),
     permissions: z.never().optional(),
     replaceAdapterConfig: z.boolean().optional(),
     status: z.enum(AGENT_STATUSES).optional(),

@@ -36,4 +36,23 @@ describe("kubernetesProviderConfigSchema", () => {
       parseKubernetesProviderConfig({ inCluster: true, egressAllowCidrs: ["not-a-cidr"] }),
     ).toThrow(/CIDR/i);
   });
+
+  it("accepts string-valued service account annotations", () => {
+    const parsed = parseKubernetesProviderConfig({
+      inCluster: true,
+      serviceAccountAnnotations: { "example.com/role": "sandbox" },
+    });
+    expect(parsed.serviceAccountAnnotations).toEqual({
+      "example.com/role": "sandbox",
+    });
+  });
+
+  it("rejects non-string service account annotation values", () => {
+    expect(() =>
+      parseKubernetesProviderConfig({
+        inCluster: true,
+        serviceAccountAnnotations: { "example.com/role": 42 },
+      }),
+    ).toThrow();
+  });
 });

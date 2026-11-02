@@ -34,7 +34,7 @@ export const projectExecutionWorkspacePolicySchema = z
 export const projectWorkspaceRuntimeConfigSchema = z.object({
   workspaceRuntime: z.record(z.string(), z.unknown()).optional().nullable(),
   desiredState: z.enum(["running", "stopped", "manual"]).optional().nullable(),
-  serviceStates: z.record(z.enum(["running", "stopped", "manual"])).optional().nullable(),
+  serviceStates: z.record(z.string(), z.enum(["running", "stopped", "manual"])).optional().nullable(),
 }).strict();
 
 const projectWorkspaceSourceTypeSchema = z.enum(["local_path", "git_repo", "remote_managed", "non_git_path"]);
@@ -103,7 +103,7 @@ const projectFields = {
   goalIds: z.array(z.string().uuid()).optional(),
   name: z.string().min(1),
   description: z.string().optional().nullable(),
-  status: z.enum(PROJECT_STATUSES).optional().default("backlog"),
+  status: z.enum(PROJECT_STATUSES).optional(),
   leadAgentId: z.string().uuid().optional().nullable(),
   targetDate: z.string().optional().nullable(),
   color: z.string().optional().nullable(),
@@ -115,6 +115,7 @@ const projectFields = {
 
 export const createProjectSchema = z.object({
   ...projectFields,
+  status: z.enum(PROJECT_STATUSES).optional().default("backlog"),
   workspace: createProjectWorkspaceSchema.optional(),
 });
 

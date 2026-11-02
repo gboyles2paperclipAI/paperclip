@@ -152,7 +152,11 @@ export const createToolConnectionSchema = z.object({
 
 export type CreateToolConnection = z.infer<typeof createToolConnectionSchema>;
 
-export const updateToolConnectionSchema = createToolConnectionSchema.omit({ applicationId: true }).partial().refine(
+export const updateToolConnectionSchema = createToolConnectionSchema.omit({ applicationId: true }).partial().extend({
+  connectionKind: toolConnectionKindSchema.optional(),
+  transportConfig: toolTransportConfigSchema.optional(),
+  credentialSecretRefs: z.array(toolCredentialSecretRefSchema).optional(),
+}).refine(
   (value) => Object.keys(value).length > 0,
   { message: "At least one tool connection field is required" },
 );
@@ -273,7 +277,10 @@ export const createToolProfileSchema = z.object({
 
 export type CreateToolProfile = z.infer<typeof createToolProfileSchema>;
 
-export const updateToolProfileSchema = createToolProfileSchema.partial().refine(
+export const updateToolProfileSchema = createToolProfileSchema.partial().extend({
+  status: toolProfileStatusSchema.optional(),
+  defaultAction: toolProfileDefaultActionSchema.optional(),
+}).refine(
   (value) => Object.keys(value).length > 0,
   { message: "At least one tool profile field is required" },
 );
@@ -298,7 +305,9 @@ export const createToolProfileEntryForProfileSchema = createToolProfileEntrySche
 
 export type CreateToolProfileEntryForProfile = z.infer<typeof createToolProfileEntryForProfileSchema>;
 
-export const updateToolProfileEntrySchema = createToolProfileEntryForProfileSchema.partial().refine(
+export const updateToolProfileEntrySchema = createToolProfileEntryForProfileSchema.partial().extend({
+  effect: toolProfileEntryEffectSchema.optional(),
+}).refine(
   (value) => Object.keys(value).length > 0,
   { message: "At least one tool profile entry field is required" },
 );
@@ -319,6 +328,8 @@ export const duplicateToolProfileSchema = z.object({
 export type DuplicateToolProfile = z.infer<typeof duplicateToolProfileSchema>;
 
 export const updateToolProfileWithEntriesSchema = createToolProfileSchema.partial().extend({
+  status: toolProfileStatusSchema.optional(),
+  defaultAction: toolProfileDefaultActionSchema.optional(),
   entries: z.array(createToolProfileEntryForProfileSchema).max(250).optional(),
 }).refine(
   (value) => Object.keys(value).length > 0,
@@ -339,7 +350,7 @@ export type ReviewToolProfileNewTools = z.infer<typeof reviewToolProfileNewTools
 export const deleteToolProfileSchema = z.object({
   force: z.boolean().default(false),
   reassignToProfileId: z.string().uuid().optional(),
-}).default({});
+}).prefault({});
 
 export type DeleteToolProfile = z.infer<typeof deleteToolProfileSchema>;
 
@@ -374,14 +385,14 @@ export const toolMcpGatewayAuthConfigSchema = z.object({
     defaultTtlSeconds: z.number().int().positive().max(31_536_000).nullable().default(7_776_000),
     requireFiniteExpiry: z.boolean().default(true),
     longLivedTokenRequiresOverride: z.boolean().default(true),
-  }).default({}),
+  }).prefault({}),
   oauth: z.object({
     enabled: z.literal(false).default(false),
     reservedFor: z.literal("v1_5").default("v1_5"),
     protectedResourceMetadataPath: z.string().trim().max(240).optional().nullable(),
     dynamicClientRegistration: z.literal(false).optional(),
     authorizationCodePkce: z.literal(false).optional(),
-  }).default({}),
+  }).prefault({}),
 });
 
 export const toolMcpGatewayHeaderPolicySchema = z.object({
@@ -389,7 +400,7 @@ export const toolMcpGatewayHeaderPolicySchema = z.object({
   callerPassthrough: z.object({
     enabled: z.boolean().default(false),
     allowedHeaders: z.array(headerNameSchema).max(50).default([]),
-  }).default({}),
+  }).prefault({}),
   staticHeaders: z.array(z.object({
     name: headerNameSchema,
     valueRef: z.string().trim().max(240).optional().nullable(),
@@ -398,11 +409,11 @@ export const toolMcpGatewayHeaderPolicySchema = z.object({
   generatedMetadata: z.object({
     enabled: z.boolean().default(false),
     allowedHeaders: z.array(headerNameSchema).max(20).default([]),
-  }).default({}),
+  }).prefault({}),
   responseHeaders: z.object({
     forwardMcpRequiredHeaders: z.boolean().default(true),
     forwardSafeCacheHeaders: z.boolean().default(true),
-  }).default({}),
+  }).prefault({}),
 });
 
 export const toolMcpGatewayMetadataPolicySchema = z.object({
@@ -446,7 +457,11 @@ export type CreateToolMcpGateway = z.infer<typeof createToolMcpGatewaySchema>;
 
 export const updateToolMcpGatewaySchema = createToolMcpGatewaySchema
   .partial()
-  .extend({ status: toolMcpGatewayStatusSchema.optional() })
+  .extend({
+    defaultProfileMode: toolMcpGatewayDefaultProfileModeSchema.optional(),
+    contextScopeType: toolMcpGatewayContextScopeTypeSchema.optional(),
+    status: toolMcpGatewayStatusSchema.optional(),
+  })
   .refine((value) => Object.keys(value).length > 0, { message: "At least one gateway field is required" });
 
 export type UpdateToolMcpGateway = z.infer<typeof updateToolMcpGatewaySchema>;
@@ -573,7 +588,11 @@ export const createToolPolicySchema = z.object({
 
 export type CreateToolPolicy = z.infer<typeof createToolPolicySchema>;
 
-export const updateToolPolicySchema = createToolPolicySchema.partial().refine(
+export const updateToolPolicySchema = createToolPolicySchema.partial().extend({
+  priority: z.number().int().min(0).max(10000).optional(),
+  enabled: z.boolean().optional(),
+  selectors: z.record(z.string(), z.unknown()).optional(),
+}).refine(
   (value) => Object.keys(value).length > 0,
   { message: "At least one tool policy field is required" },
 );

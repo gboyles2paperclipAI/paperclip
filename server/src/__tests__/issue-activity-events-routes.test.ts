@@ -205,6 +205,36 @@ describe("issue activity event routes", () => {
     mockRoutineService.syncRunStatusForIssue.mockResolvedValue(undefined);
   });
 
+  it("preserves persisted issue mode and priority on a title-only update", async () => {
+    const persisted = {
+      ...makeIssue(),
+      workMode: "planning",
+      priority: "high",
+    };
+    mockIssueService.getById.mockResolvedValue(persisted);
+    mockIssueService.getRelationSummaries.mockResolvedValue({ blockedBy: [], blocks: [] });
+    mockIssueService.update.mockImplementation(async (_id, patch) => ({
+      ...persisted,
+      ...patch,
+      updatedAt: new Date(),
+    }));
+
+    const res = await request(await createApp())
+      .patch(`/api/issues/${persisted.id}`)
+      .send({ title: "Renamed issue" });
+
+    expect(res.status).toBe(200);
+    const updatePatch = mockIssueService.update.mock.calls[0]?.[1];
+    expect(updatePatch).toMatchObject({ title: "Renamed issue" });
+    expect(updatePatch).not.toHaveProperty("workMode");
+    expect(updatePatch).not.toHaveProperty("priority");
+    expect(res.body).toMatchObject({
+      title: "Renamed issue",
+      workMode: "planning",
+      priority: "high",
+    });
+  });
+
   it("logs blocker activity with added and removed issue summaries", async () => {
     const issue = makeIssue();
     mockIssueService.getById.mockResolvedValue(issue);

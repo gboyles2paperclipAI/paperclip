@@ -86,6 +86,12 @@ describe("routine validators", () => {
     }).baseRevisionId).toBe(baseRevisionId);
   });
 
+  it("does not inject create defaults into sparse routine updates", () => {
+    expect(updateRoutineSchema.parse({ title: "Renamed routine" })).toEqual({
+      title: "Renamed routine",
+    });
+  });
+
   it("accepts tracking modes and requires failureOwner for run_only routines (R2.18)", () => {
     expect(createRoutineSchema.parse({
       title: "Archive sweep",
