@@ -197,6 +197,42 @@ describe("openapi routes", () => {
     expect(validate({})).toBe(false);
   });
 
+  it("preserves every scalar branch in generated create and update routine schemas", () => {
+    const spec = buildOpenApiSpec();
+    const requestSchemas = [
+      spec.paths["/api/companies/{companyId}/routines"].post
+        .requestBody.content["application/json"].schema,
+      spec.paths["/api/routines/{id}"].patch
+        .requestBody.content["application/json"].schema,
+    ];
+
+    for (const requestSchema of requestSchemas) {
+      const schema = requestSchema.properties.variables.items.properties.defaultValue;
+      const validate = new Ajv({ strict: false }).compile(schema);
+
+      expect(validate("description")).toBe(true);
+      expect(validate(42)).toBe(true);
+      expect(validate(true)).toBe(true);
+      expect(validate(null)).toBe(true);
+      expect(validate({})).toBe(false);
+      expect(validate([])).toBe(false);
+    }
+  });
+
+  it("keeps null inside normalized enum constraints", () => {
+    const schema = normalizeJsonSchemaForOpenApi({
+      anyOf: [
+        { type: "string", enum: ["schedule", "webhook", "api"] },
+        { type: "null" },
+      ],
+    }) as Record<string, unknown>;
+    const validate = new Ajv({ strict: false }).compile(schema);
+
+    expect(validate("schedule")).toBe(true);
+    expect(validate(null)).toBe(true);
+    expect(validate("unknown")).toBe(false);
+  });
+
   it("covers the mounted server routes exactly", () => {
     const { routes: actualRoutes, unknownRouteFiles } = loadActualRoutes();
     const { routes: specRoutes } = loadSpecRoutes();

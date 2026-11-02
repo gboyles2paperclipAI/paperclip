@@ -2,8 +2,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   CommandExitError,
+  NotFoundError,
   Sandbox,
-  SandboxNotFoundError,
   TimeoutError,
 } from "e2b";
 import { definePlugin } from "@paperclipai/plugin-sdk";
@@ -120,7 +120,7 @@ async function connectForCleanup(config: E2bDriverConfig, providerLeaseId: strin
   try {
     return await connectSandbox(config, providerLeaseId);
   } catch (error) {
-    if (error instanceof SandboxNotFoundError) return null;
+    if (error instanceof NotFoundError) return null;
     throw error;
   }
 }
@@ -205,7 +205,7 @@ async function releaseSandboxBestEffort(sandbox: Sandbox, reuseLease: boolean): 
   }
 
   try {
-    await sandbox.pause();
+    await sandbox.betaPause();
   } catch (error) {
     console.warn(
       `Failed to pause E2B sandbox during lease release: ${formatErrorMessage(error)}. Attempting kill instead.`,
@@ -325,7 +325,7 @@ const plugin = definePlugin({
         throw error;
       }
     } catch (error) {
-      if (error instanceof SandboxNotFoundError) {
+      if (error instanceof NotFoundError) {
         return { providerLeaseId: null, metadata: { expired: true } };
       }
       throw error;

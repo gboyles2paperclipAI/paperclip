@@ -178,6 +178,18 @@ type OpenApiPathRegistration = {
   [key: string]: unknown;
 };
 
+function makeNullableOpenApiSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  const nullable: Record<string, unknown> = { ...schema, nullable: true };
+  if (Array.isArray(nullable.enum) && !nullable.enum.includes(null)) {
+    nullable.enum = [...nullable.enum, null];
+  }
+  if (Object.hasOwn(nullable, "const")) {
+    nullable.enum = nullable.const === null ? [null] : [nullable.const, null];
+    delete nullable.const;
+  }
+  return nullable;
+}
+
 export function normalizeJsonSchemaForOpenApi(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(normalizeJsonSchemaForOpenApi);
   if (!value || typeof value !== "object") return value;
@@ -199,10 +211,16 @@ export function normalizeJsonSchemaForOpenApi(value: unknown): unknown {
       && typeof (nonNullSchema as Record<string, unknown>).type === "string"
     ) {
       delete source.anyOf;
-      Object.assign(source, nonNullSchema, { nullable: true });
+      Object.assign(source, makeNullableOpenApiSchema(nonNullSchema as Record<string, unknown>));
       delete source.$schema;
       delete source.$id;
       delete source.propertyNames;
+    } else if (nonNull.length > 1 && nonNull.length !== source.anyOf.length) {
+      source.anyOf = nonNull.map((entry, index) => (
+        index === 0 && entry && typeof entry === "object"
+          ? makeNullableOpenApiSchema(entry as Record<string, unknown>)
+          : entry
+      ));
     }
   }
   const schema = Object.fromEntries(
@@ -215,26 +233,40 @@ export function normalizeJsonSchemaForOpenApi(value: unknown): unknown {
     ));
     if (nonNull.length === 1 && nonNull.length !== schema.anyOf.length) {
       delete schema.anyOf;
-      Object.assign(schema, nonNull[0]);
-      schema.nullable = true;
+      Object.assign(schema, makeNullableOpenApiSchema(nonNull[0] as Record<string, unknown>));
+    } else if (nonNull.length > 1 && nonNull.length !== schema.anyOf.length) {
+      schema.anyOf = nonNull.map((entry, index) => (
+        index === 0 && entry && typeof entry === "object"
+          ? makeNullableOpenApiSchema(entry as Record<string, unknown>)
+          : entry
+      ));
     }
   }
   const types = Array.isArray(schema.type) ? schema.type : null;
   if (types?.includes("null")) {
     const nonNullTypes = types.filter((type) => type !== "null");
-    if (nonNullTypes.length === 1) schema.type = nonNullTypes[0];
-    else delete schema.type;
-    schema.nullable = true;
+    if (nonNullTypes.length === 1) {
+      schema.type = nonNullTypes[0];
+      Object.assign(schema, makeNullableOpenApiSchema(schema));
+    } else {
+      schema.anyOf = nonNullTypes.map((type, index) => (
+        index === 0 ? { type, nullable: true } : { type }
+      ));
+      delete schema.type;
+      if (Array.isArray(schema.enum) && !schema.enum.includes(null)) {
+        schema.enum = [...schema.enum, null];
+      }
+    }
   } else if (types) {
     schema.anyOf = types.map((type) => ({ type }));
     delete schema.type;
   }
   if (schema.type === "null") {
     delete schema.type;
-    schema.nullable = true;
+    schema.enum = [null];
   }
   if (Object.hasOwn(schema, "const")) {
-    schema.enum = [schema.const];
+    schema.enum = schema.nullable === true ? [schema.const, null] : [schema.const];
     delete schema.const;
   }
   if (typeof schema.exclusiveMinimum === "number") {
