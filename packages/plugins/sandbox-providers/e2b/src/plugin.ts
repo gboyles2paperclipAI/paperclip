@@ -198,14 +198,17 @@ async function killSandboxBestEffort(sandbox: Sandbox, reason: string): Promise<
   });
 }
 
-async function releaseSandboxBestEffort(sandbox: Sandbox, reuseLease: boolean): Promise<void> {
-  if (!reuseLease) {
+async function releaseSandboxBestEffort(sandbox: Sandbox, config: E2bDriverConfig): Promise<void> {
+  if (!config.reuseLease) {
     await killSandboxBestEffort(sandbox, "lease release");
     return;
   }
 
   try {
-    await sandbox.betaPause();
+    // Unlike kill(), E2B 2.x betaPause() does not merge the connection
+    // options stored on the Sandbox instance. Pass the resolved key explicitly
+    // so config-only credentials authenticate the pause request.
+    await sandbox.betaPause({ apiKey: resolveApiKey(config) });
   } catch (error) {
     console.warn(
       `Failed to pause E2B sandbox during lease release: ${formatErrorMessage(error)}. Attempting kill instead.`,
@@ -340,7 +343,7 @@ const plugin = definePlugin({
     const sandbox = await connectForCleanup(config, params.providerLeaseId);
     if (!sandbox) return;
 
-    await releaseSandboxBestEffort(sandbox, config.reuseLease);
+    await releaseSandboxBestEffort(sandbox, config);
   },
 
   async onEnvironmentDestroyLease(

@@ -582,7 +582,7 @@ describe("E2B sandbox provider plugin", () => {
       providerLeaseId: "sandbox-ephemeral",
     });
 
-    expect(reusable.betaPause).toHaveBeenCalled();
+    expect(reusable.betaPause).toHaveBeenCalledWith({ apiKey: "resolved-key" });
     expect(reusable.kill).not.toHaveBeenCalled();
     expect(ephemeral.kill).toHaveBeenCalled();
   });
@@ -606,7 +606,7 @@ describe("E2B sandbox provider plugin", () => {
       providerLeaseId: "sandbox-reusable",
     })).resolves.toBeUndefined();
 
-    expect(sandbox.betaPause).toHaveBeenCalled();
+    expect(sandbox.betaPause).toHaveBeenCalledWith({ apiKey: "resolved-key" });
     expect(sandbox.kill).toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalled();
   });

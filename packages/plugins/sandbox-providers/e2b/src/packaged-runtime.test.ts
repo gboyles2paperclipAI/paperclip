@@ -10,11 +10,18 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { Sandbox } from "e2b";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import plugin from "./plugin.js";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 describe("packaged E2B runtime", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.E2B_API_KEY;
+  });
+
   it("imports the built package in an isolated Node process", () => {
     execFileSync("pnpm", ["run", "build"], {
       cwd: packageRoot,
@@ -50,4 +57,36 @@ describe("packaged E2B runtime", () => {
       rmSync(installRoot, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("authenticates reusable-lease pause with config-only credentials", async () => {
+    delete process.env.E2B_API_KEY;
+    const sandbox = Object.create(Sandbox.prototype) as Sandbox;
+    Object.defineProperty(sandbox, "sandboxId", { value: "sandbox-config-only" });
+
+    const killSpy = vi.spyOn(sandbox, "kill").mockResolvedValue(undefined);
+    vi.spyOn(Sandbox, "connect").mockResolvedValue(sandbox);
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, { status: 204 }),
+    );
+
+    await plugin.definition.onEnvironmentReleaseLease?.({
+      driverKey: "e2b",
+      companyId: "company-1",
+      environmentId: "env-1",
+      config: {
+        template: "base",
+        apiKey: "config-only-key",
+        timeoutMs: 300_000,
+        reuseLease: true,
+      },
+      providerLeaseId: "sandbox-config-only",
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const request = new Request(fetchSpy.mock.calls[0]![0], fetchSpy.mock.calls[0]![1]);
+    expect(request.method).toBe("POST");
+    expect(request.url).toContain("/sandboxes/sandbox-config-only/pause");
+    expect(request.headers.get("x-api-key")).toBe("config-only-key");
+    expect(killSpy).not.toHaveBeenCalled();
+  });
 });
