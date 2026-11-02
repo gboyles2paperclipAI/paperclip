@@ -58,7 +58,7 @@ if [[ "$MODE" == "host" ]]; then
   [[ -n "$LIVE_PREFIX" && -d "$LIVE_PREFIX" ]] || fail "host mode requires a live prefix"
 fi
 
-for command in cmp curl env find jq node pgrep realpath rg setsid sha256sum ss; do
+for command in awk cmp curl env find jq node pgrep realpath setsid sha256sum ss; do
   command -v "$command" >/dev/null 2>&1 || fail "required command is unavailable: $command"
 done
 if [[ "$MODE" == "host" ]]; then
@@ -82,7 +82,7 @@ rm -rf -- "$TEMP_HOME" "$TMP_ROOT"
 mkdir -m 700 "$TEMP_HOME" "$TMP_ROOT"
 
 listener_exists() {
-  ss -H -ltn "( sport = :$PORT )" | rg -q .
+  ss -H -ltn "( sport = :$PORT )" | awk 'NR == 1 { found = 1 } END { exit(found ? 0 : 1) }'
 }
 
 stop_smoke() {
@@ -110,6 +110,7 @@ hash_live_runtime() {
   local destination="$1"
   (
     cd "$LIVE_PREFIX"
+    # SH-9: filename-only inventory of two fixed package roots; sha256sum does not content-match.
     find lib/node_modules/paperclipai lib/node_modules/@paperclipai \
       -type f -print0 \
       | LC_ALL=C sort -z \
@@ -140,7 +141,8 @@ assert_expected_host_state() {
     || fail "paperclip-staging.service is active"
   [[ "$(ss -H -ltn "( sport = :3100 )" | wc -l)" -eq 1 ]] \
     || fail "expected exactly one live listener on port 3100"
-  if ss -H -ltn "( sport = :3101 or sport = :3102 )" | rg -q .; then
+  if ss -H -ltn "( sport = :3101 or sport = :3102 )" \
+    | awk 'NR == 1 { found = 1 } END { exit(found ? 0 : 1) }'; then
     fail "unexpected staging Paperclip listener exists"
   fi
 }
@@ -186,8 +188,16 @@ jq -e \
   '.status == "ok" and .version == $version and .buildCommit == $source' \
   "$OUTPUT/isolated-health.json" >/dev/null \
   || fail "isolated health does not match governed version and source commit"
-rg -q '<div id="root">' "$OUTPUT/isolated-index.html" \
-  || fail "isolated static UI root mount is missing"
+set +e
+node "$(cd "$(dirname "$0")" && pwd -P)/sh9-quiet-search.mjs" \
+  --literal '<div id="root">' --file "$OUTPUT/isolated-index.html"
+ui_scan_status=$?
+set -e
+[[ "$ui_scan_status" -eq 0 ]] || {
+  [[ "$ui_scan_status" -eq 1 ]] \
+    && fail "isolated static UI root mount is missing"
+  fail "isolated static UI quiet scan could not complete safely"
+}
 
 stop_smoke
 for _ in $(seq 1 20); do
@@ -199,11 +209,17 @@ if pgrep -g "$SMOKE_GROUP" >/dev/null 2>&1; then
   fail "isolated runtime process group survived shutdown"
 fi
 
-if rg --pcre2 -q \
+set +e
+node "$(cd "$(dirname "$0")" && pwd -P)/sh9-quiet-search.mjs" --regex \
   '(?:ghp_|gho_|github_pat_|sk-)[A-Za-z0-9_-]{12,}|Authorization:\s*(?!\[(?:REDACTED|redacted)\])\S+' \
-  "$OUTPUT/isolated-runtime.log"; then
+  --file "$OUTPUT/isolated-runtime.log"
+credential_scan_status=$?
+set -e
+if [[ "$credential_scan_status" -eq 0 ]]; then
   fail "isolated runtime log contains credential-shaped output"
 fi
+[[ "$credential_scan_status" -eq 1 ]] \
+  || fail "isolated runtime credential quiet scan could not complete safely"
 
 if [[ "$MODE" == "host" ]]; then
   capture_host_state after

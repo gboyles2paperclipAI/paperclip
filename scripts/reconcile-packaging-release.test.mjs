@@ -173,7 +173,9 @@ test("Help2day source evidence is isolated from publication and runtime activati
   assert.match(evidence, /--runtime-proof-mode/);
   assert.match(evidence, /squash-tree-equivalent/);
   assert.match(evidence, /reviewed provenance tree does not match the reconciliation merge tree/);
-  assert.match(evidence, /heartbeat-settlement-errors\.log/);
+  assert.match(evidence, /sh9-quiet-search\.mjs/);
+  assert.match(evidence, /settlement_scan_status/);
+  assert.doesNotMatch(evidence, /heartbeat-settlement-errors\.log/);
   assert.match(evidence, /assert_no_vitest_fixture_leaks/);
   assert.match(evidence, /PAPERCLIP_RELEASE_EVIDENCE_RUN_ID=/);
   assert.match(evidence, /VITEST_TEMP_BASE="\$\{RUNNER_TEMP:-\/tmp\}"/);

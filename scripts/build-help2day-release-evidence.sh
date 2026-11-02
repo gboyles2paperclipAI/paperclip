@@ -72,7 +72,7 @@ for value in VERSION OUTPUT UPSTREAM_BASE FORK_ANCHOR UPSTREAM_PROVENANCE_COMMIT
   [[ -n "${!value}" ]] || fail "missing required ${value,,}"
 done
 
-for command in git node pnpm npm jq rg sha256sum tar gitleaks osv-scanner grype; do
+for command in git node pnpm npm jq sha256sum tar gitleaks osv-scanner grype; do
   command -v "$command" >/dev/null 2>&1 || fail "required tool is unavailable: $command"
 done
 
@@ -236,11 +236,16 @@ run_logged tests env \
   PAPERCLIP_RELEASE_EVIDENCE_RUN_ID="$RELEASE_EVIDENCE_RUN_ID" \
   pnpm test:run
 assert_no_vitest_fixture_leaks "$VITEST_EVIDENCE_TMP" "$RELEASE_EVIDENCE_RUN_ID"
-if rg -n \
+set +e
+node scripts/sh9-quiet-search.mjs --regex \
   'CONNECTION_(ENDED|DESTROYED)|violates foreign key constraint|failed to refresh issue continuation summary|queued heartbeat execution failed|failed to release environment lease for heartbeat run|skipping late (setup failure|adapter failure|run) finalization.*"currentStatus":null' \
-  "$OUTPUT/test-results/tests.log" > "$OUTPUT/test-results/heartbeat-settlement-errors.log"; then
+  --file "$OUTPUT/test-results/tests.log"
+settlement_scan_status=$?
+set -e
+if [[ "$settlement_scan_status" -eq 0 ]]; then
   fail "test output contains late heartbeat settlement errors"
 fi
+[[ "$settlement_scan_status" -eq 1 ]] || fail "test output quiet scan could not complete safely"
 run_logged standalone-tests env \
   TMPDIR="$VITEST_EVIDENCE_TMP" \
   PAPERCLIP_RELEASE_EVIDENCE_RUN_ID="$RELEASE_EVIDENCE_RUN_ID" \
@@ -477,6 +482,7 @@ NODE
 
 (
   cd "$OUTPUT"
+  # SH-9: filename-only evidence inventory. find does not inspect file content or print matches.
   find . -type f ! -name checksums.sha256 -print0 \
     | LC_ALL=C sort -z \
     | xargs -0 sha256sum > checksums.sha256
