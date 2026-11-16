@@ -249,3 +249,34 @@ export function shouldRetryProcessLoss(input: ProcessLossRetryInput): boolean {
   const earlyStartKillWindow = !hasTrackedHandle && input.startedAt != null;
   return hasTrackedHandle || earlyStartKillWindow;
 }
+
+/**
+ * Minimum hold applied to a provider-quota retry when the provider did not
+ * state a parseable reset time. Retrying an exhausted provider after ~1 minute
+ * only produces another failed run (FUL-26246).
+ */
+export const PROVIDER_QUOTA_UNKNOWN_RESET_HOLD_MS = 60 * 60 * 1000;
+
+/** Issue statuses for which a pending retry must be dropped, never dispatched. */
+export function isTerminalIssueStatusForRetry(status: string | null | undefined): boolean {
+  return status === "done" || status === "cancelled";
+}
+
+/**
+ * Earliest time a `provider_quota` retry may run. Honors the provider's stated
+ * reset time; when none was parsed, holds for a conservative floor instead of
+ * the short generic backoff. Non-quota families return the input unchanged.
+ */
+export function resolveQuotaRetryNotBefore(input: {
+  errorFamily: string | null | undefined;
+  retryNotBefore: Date | null;
+  now: Date;
+  unknownResetHoldMs?: number;
+}): Date | null {
+  if (input.errorFamily !== "provider_quota") return input.retryNotBefore;
+  if (input.retryNotBefore && input.retryNotBefore.getTime() > input.now.getTime()) {
+    return input.retryNotBefore;
+  }
+  const hold = input.unknownResetHoldMs ?? PROVIDER_QUOTA_UNKNOWN_RESET_HOLD_MS;
+  return new Date(input.now.getTime() + hold);
+}
