@@ -117,6 +117,12 @@ describe("isCodexTransientUpstreamError", () => {
     );
   });
 
+  it("parses dated usage-limit reset windows (FUL-26246)", () => {
+    const errorMessage = "You've hit your usage limit for GPT-5.3-Codex. Switch to another model now, or try again at Nov 22nd, 2026 3:23 PM UTC.";
+    const now = new Date("2026-11-16T16:11:00.000Z");
+    expect(extractCodexRetryNotBefore({ errorMessage }, now)?.toISOString()).toBe("2026-11-22T15:23:00.000Z");
+  });
+
   it("classifies model-capacity messages as provider quota without reset metadata", () => {
     const errorMessage = "The requested model is at capacity. Please try again later.";
 

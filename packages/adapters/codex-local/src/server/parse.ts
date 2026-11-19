@@ -205,8 +205,20 @@ function nextClockTimeInTimeZone(input: {
   return retryAt;
 }
 
+function parseExplicitDateTime(text: string, now: Date): Date | null {
+  // Dated resets such as "Nov 22nd, 2026 3:23 PM" or "2026-11-22 15:23 UTC".
+  // Require an explicit year so bare clock text keeps using the clock parser.
+  if (!/\b\d{4}\b/.test(text)) return null;
+  const cleaned = text.replace(/(\d)(st|nd|rd|th)\b/gi, "$1").replace(/\bat\b/i, " ").trim();
+  const parsed = new Date(cleaned);
+  if (Number.isNaN(parsed.getTime()) || parsed.getTime() <= now.getTime()) return null;
+  return parsed;
+}
+
 function parseLocalClockTime(clockText: string, now: Date): Date | null {
   const normalized = clockText.trim();
+  const dated = parseExplicitDateTime(normalized, now);
+  if (dated) return dated;
   const match = normalized.match(/^(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?$/i);
   if (!match) return null;
 

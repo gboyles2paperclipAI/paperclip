@@ -281,6 +281,8 @@ import {
 import {
   classifyErrorClass,
   classifyFailureRetryability,
+  isTerminalIssueStatusForRetry,
+  resolveQuotaRetryNotBefore,
   shouldApplyCodexTransientFallbackMode,
 } from "./run-retry-policy.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
@@ -9662,9 +9664,38 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     })
       ? resolveCodexTransientFallbackMode(nextAttempt)
       : null;
-    const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
+    const transientRetryNotBefore = resolveQuotaRetryNotBefore({
+      errorFamily: transientRecovery?.errorFamily,
+      retryNotBefore: transientRecovery?.retryNotBefore ?? null,
+      now,
+    });
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
+
+    // A retry for an issue that is already done/cancelled must be dropped, not
+    // scheduled: dispatching it would reopen or re-wake closed work (FUL-26246).
+    if (issueId && retryReason !== MAX_TURN_CONTINUATION_RETRY_REASON) {
+      const retryIssue = await db
+        .select({ status: issues.status })
+        .from(issues)
+        .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
+        .then((rows) => rows[0] ?? null);
+      if (retryIssue && isTerminalIssueStatusForRetry(retryIssue.status)) {
+        await appendRunEvent(run, await nextRunEventSeq(run.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "info",
+          message: `Scheduled retry dropped because issue is already ${retryIssue.status}`,
+          payload: { retryReason, issueId, currentStatus: retryIssue.status },
+        });
+        return {
+          outcome: "not_scheduled" as const,
+          reason: `Scheduled retry dropped because issue reached terminal status (${retryIssue.status})`,
+          errorCode: retryIssue.status === "cancelled" ? ("issue_cancelled" as const) : ("issue_terminal_status" as const),
+          issueId,
+        };
+      }
+    }
 
     if (!baseSchedule) {
       await appendRunEvent(run, await nextRunEventSeq(run.id), {
